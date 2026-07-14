@@ -1,0 +1,17 @@
+Dockerfile
+.git
+.gitignore
+.env
+.env.prod
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pem
+.pytest_cache/
+.coverage
+.cache/
+venv/
+tools/
+*.md
+.DS_Store
