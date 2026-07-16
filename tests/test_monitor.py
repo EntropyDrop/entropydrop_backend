@@ -1,9 +1,55 @@
 import datetime
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from main import app
 from auth import get_current_admin
 import models
+
+
+def test_monitor_stats_includes_seven_day_active_users(client, db):
+    admin_user = models.User(
+        id="ADMINSTATS000001",
+        email="admin-stats@entropydrop.com",
+        username="StatsAdmin",
+    )
+    db.add(admin_user)
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    today_noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    login_logs = [
+        # Duplicate logs for one user must count as one active user.
+        models.CreditLog(user_id="ACTIVEUSER000001", amount=1, action="daily_login", created_at=today_noon),
+        models.CreditLog(user_id="ACTIVEUSER000001", amount=1, action="daily_login", created_at=today_noon),
+        # Two distinct users logged in yesterday.
+        models.CreditLog(user_id="ACTIVEUSER000001", amount=1, action="daily_login", created_at=today_noon - datetime.timedelta(days=1)),
+        models.CreditLog(user_id="ACTIVEUSER000002", amount=1, action="daily_login", created_at=today_noon - datetime.timedelta(days=1)),
+        # Other credit actions are not logins.
+        models.CreditLog(user_id="ACTIVEUSER000003", amount=20, action="monthly_login", created_at=today_noon - datetime.timedelta(days=1)),
+        # Logins outside the seven-day window are excluded.
+        models.CreditLog(user_id="ACTIVEUSER000004", amount=1, action="daily_login", created_at=today_noon - datetime.timedelta(days=7)),
+    ]
+    db.add_all(login_logs)
+    db.commit()
+
+    app.dependency_overrides[get_current_admin] = lambda: admin_user
+
+    queue = MagicMock()
+    queue.count = 0
+    queue.started_job_registry.count = 0
+    queue.deferred_job_registry.count = 0
+    queue.finished_job_registry.count = 0
+    queue.failed_job_registry.count = 0
+    queue.scheduled_job_registry.count = 0
+
+    with patch("routers.monitor.Queue", return_value=queue), \
+         patch("routers.monitor.Worker.all", return_value=[]):
+        response = client.get("/skin/api/monitor/stats")
+
+    assert response.status_code == 200
+    history = response.json()["history"]
+    assert len(history) == 7
+    assert [day["active_users"] for day in history[-2:]] == [2, 1]
+    assert all(day["active_users"] == 0 for day in history[:-2])
 
 def test_unfinished_logs_non_admin(client):
     # If get_current_admin is not overridden, it will try to decode token and fail or raise 403/401
@@ -444,12 +490,12 @@ def test_mode_status_endpoints(client, db):
     app.dependency_overrides.clear()
 
 
-def test_gift_credits_to_all_users_non_admin_rejects(client):
+def test_gift_credits_to_seven_day_active_users_non_admin_rejects(client):
     response = client.post("/skin/api/monitor/gift_all", json={"amount": 10, "message": "Test Gift"})
     assert response.status_code in (401, 403)
 
 
-def test_gift_credits_to_all_users_success(client, db):
+def test_gift_credits_to_seven_day_active_users_success(client, db):
     # 1. Create admin user
     admin_user = models.User(
         id="ADMIN_GIFT_001",
@@ -473,6 +519,19 @@ def test_gift_credits_to_all_users_success(client, db):
     )
     db.add(user1)
     db.add(user2)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    db.add(models.CreditLog(
+        user_id=user1.id,
+        amount=1,
+        action="daily_login",
+        created_at=now - datetime.timedelta(days=2),
+    ))
+    db.add(models.CreditLog(
+        user_id=user2.id,
+        amount=1,
+        action="daily_login",
+        created_at=now - datetime.timedelta(days=8),
+    ))
     db.commit()
 
     # 3. Mock admin override
@@ -493,30 +552,29 @@ def test_gift_credits_to_all_users_success(client, db):
     response = client.post("/skin/api/monitor/gift_all", json={"amount": 15, "message": "Maintenance Gift"})
     assert response.status_code == 200
     assert response.json()["status"] == "success"
+    assert response.json()["gifted_users"] == 1
 
     # 6. Verify credits updated in database
     db.refresh(user1)
     db.refresh(user2)
     assert user1.credits == 20
-    assert user2.credits == 25
+    assert user2.credits == 10
 
-    # 7. Verify credit logs created (admin user also gets gifted)
+    # 7. Verify only the seven-day active user gets a credit log.
     logs = db.query(models.CreditLog).filter(models.CreditLog.action == "system_gift").all()
-    assert len(logs) == 3
-    assert {l.user_id for l in logs} == {"ADMIN_GIFT_001", "GIFT_USER_001", "GIFT_USER_002"}
+    assert len(logs) == 1
+    assert {l.user_id for l in logs} == {"GIFT_USER_001"}
     assert all(l.amount == 15 for l in logs)
     assert all(l.source == "Maintenance Gift" for l in logs)
 
     # 8. Verify mailbox notifications created
     notifs = db.query(models.ForumNotification).filter(models.ForumNotification.type == "system_gift").all()
-    assert len(notifs) == 3
-    assert {n.user_id for n in notifs} == {"ADMIN_GIFT_001", "GIFT_USER_001", "GIFT_USER_002"}
+    assert len(notifs) == 1
+    assert {n.user_id for n in notifs} == {"GIFT_USER_001"}
     assert all(n.comment_id == "15" for n in notifs)
     assert all(n.sender_id is None for n in notifs)
 
     # Clean up
     app.dependency_overrides.clear()
-
-
 
 

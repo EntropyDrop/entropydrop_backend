@@ -139,10 +139,21 @@ async def get_monitor_stats(
                 GenerationLog.is_pro == True
             ).scalar()
 
+        # A daily_login credit log is created on a user's first login of each
+        # UTC day. Count distinct users to keep the metric correct even if
+        # legacy or duplicate logs exist.
+        active_users = db.query(func.count(func.distinct(CreditLog.user_id)))\
+            .filter(
+                CreditLog.action == "daily_login",
+                CreditLog.created_at >= day_start,
+                CreditLog.created_at <= day_end
+            ).scalar()
+
         history.append({
             "date": day_start.strftime("%m-%d"),
             "total_users": total_users_day,
             "total_pro": total_pro_day,
+            "active_users": active_users,
             "gen_regular": gen_reg,
             "gen_pro": gen_pro
         })
@@ -498,7 +509,7 @@ class GiftAllRequest(BaseModel):
 
 
 @router.post("/gift_all")
-async def gift_credits_to_all_users(
+async def gift_credits_to_seven_day_active_users(
     req: GiftAllRequest,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
@@ -509,8 +520,18 @@ async def gift_credits_to_all_users(
         raise HTTPException(status_code=400, detail="Message is required")
         
     try:
-        users = db.query(User).all()
-        print(f"Admin gifting {req.amount} credits to {len(users)} users...")
+        now_utc = datetime.now(timezone.utc)
+        active_since = now_utc.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=6)
+        users = db.query(User)\
+            .join(CreditLog, CreditLog.user_id == User.id)\
+            .filter(
+                CreditLog.action == "daily_login",
+                CreditLog.created_at >= active_since,
+                CreditLog.created_at <= now_utc
+            )\
+            .distinct()\
+            .all()
+        print(f"Admin gifting {req.amount} credits to {len(users)} seven-day active users...")
         
         for u in users:
             u.credits = (u.credits or 0) + req.amount
@@ -537,7 +558,11 @@ async def gift_credits_to_all_users(
             db.add(notif)
             
         db.commit()
-        return {"status": "success", "message": f"Successfully gifted {req.amount} credits to {len(users)} users"}
+        return {
+            "status": "success",
+            "gifted_users": len(users),
+            "message": f"Successfully gifted {req.amount} credits to {len(users)} seven-day active users"
+        }
         
     except Exception as e:
         db.rollback()
