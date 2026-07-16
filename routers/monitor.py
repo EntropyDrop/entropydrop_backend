@@ -503,14 +503,14 @@ async def admin_delete_user_by_email(
     return {"message": f"User with email {email} and all associated data have been permanently deleted."}
 
 
-class GiftAllRequest(BaseModel):
+class GiftActiveUsersRequest(BaseModel):
     amount: int
     message: str
 
 
-@router.post("/gift_all")
+@router.post("/gift_active_users")
 async def gift_credits_to_seven_day_active_users(
-    req: GiftAllRequest,
+    req: GiftActiveUsersRequest,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):

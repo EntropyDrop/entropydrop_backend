@@ -491,8 +491,13 @@ def test_mode_status_endpoints(client, db):
 
 
 def test_gift_credits_to_seven_day_active_users_non_admin_rejects(client):
-    response = client.post("/skin/api/monitor/gift_all", json={"amount": 10, "message": "Test Gift"})
+    response = client.post("/skin/api/monitor/gift_active_users", json={"amount": 10, "message": "Test Gift"})
     assert response.status_code in (401, 403)
+
+
+def test_gift_all_endpoint_is_removed(client):
+    response = client.post("/skin/api/monitor/gift_all", json={"amount": 10, "message": "Test Gift"})
+    assert response.status_code == 404
 
 
 def test_gift_credits_to_seven_day_active_users_success(client, db):
@@ -541,15 +546,15 @@ def test_gift_credits_to_seven_day_active_users_success(client, db):
 
     # 4. Attempt validation errors
     # Negative amount
-    response = client.post("/skin/api/monitor/gift_all", json={"amount": -5, "message": "Test"})
+    response = client.post("/skin/api/monitor/gift_active_users", json={"amount": -5, "message": "Test"})
     assert response.status_code == 400
 
     # Empty message
-    response = client.post("/skin/api/monitor/gift_all", json={"amount": 15, "message": "   "})
+    response = client.post("/skin/api/monitor/gift_active_users", json={"amount": 15, "message": "   "})
     assert response.status_code == 400
 
     # 5. Execute successful gift request
-    response = client.post("/skin/api/monitor/gift_all", json={"amount": 15, "message": "Maintenance Gift"})
+    response = client.post("/skin/api/monitor/gift_active_users", json={"amount": 15, "message": "Maintenance Gift"})
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     assert response.json()["gifted_users"] == 1
@@ -576,5 +581,3 @@ def test_gift_credits_to_seven_day_active_users_success(client, db):
 
     # Clean up
     app.dependency_overrides.clear()
-
-
