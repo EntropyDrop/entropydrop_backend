@@ -391,6 +391,10 @@ async def toggle_mode_status(
 class DailyFreeCreditsRequest(BaseModel):
     credits: int
 
+
+class GenerationCreditCostRequest(BaseModel):
+    credits: int
+
 @router.get("/daily_free_credits")
 async def get_daily_free_credits_endpoint(
     admin: User = Depends(get_current_admin)
@@ -407,6 +411,28 @@ async def set_daily_free_credits_endpoint(
         raise HTTPException(status_code=400, detail="Credits cannot be negative")
     try:
         redis_conn.set("config:daily_free_credits", str(req.credits))
+        return {"credits": req.credits}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")
+
+
+@router.get("/generation_credit_cost")
+async def get_generation_credit_cost_endpoint(
+    admin: User = Depends(get_current_admin)
+):
+    from backend_utils import get_generation_credit_cost
+    return {"credits": get_generation_credit_cost()}
+
+
+@router.post("/generation_credit_cost")
+async def set_generation_credit_cost_endpoint(
+    req: GenerationCreditCostRequest,
+    admin: User = Depends(get_current_admin)
+):
+    if req.credits < 0:
+        raise HTTPException(status_code=400, detail="Credits cannot be negative")
+    try:
+        redis_conn.set("config:generation_credit_cost", str(req.credits))
         return {"credits": req.credits}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")

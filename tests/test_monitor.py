@@ -310,6 +310,44 @@ def test_daily_free_credits_endpoints(client, db):
     app.dependency_overrides.clear()
 
 
+def test_generation_credit_cost_endpoints(client, db):
+    admin_user = models.User(
+        id="ADMIN_GEN_COST_001",
+        email="admin-generation-cost@entropydrop.com",
+        username="AdminGenerationCost",
+    )
+    db.add(admin_user)
+    db.commit()
+
+    response = client.get("/skin/api/monitor/generation_credit_cost")
+    assert response.status_code in (401, 403)
+
+    response = client.post("/skin/api/monitor/generation_credit_cost", json={"credits": 4})
+    assert response.status_code in (401, 403)
+
+    app.dependency_overrides[get_current_admin] = lambda: admin_user
+
+    response = client.get("/skin/api/monitor/generation_credit_cost")
+    assert response.status_code == 200
+    assert response.json() == {"credits": 1}
+
+    response = client.post("/skin/api/monitor/generation_credit_cost", json={"credits": 4})
+    assert response.status_code == 200
+    assert response.json() == {"credits": 4}
+
+    response = client.get("/skin/api/monitor/generation_credit_cost")
+    assert response.status_code == 200
+    assert response.json() == {"credits": 4}
+
+    response = client.post("/skin/api/monitor/generation_credit_cost", json={"credits": -1})
+    assert response.status_code == 400
+
+    response = client.post("/skin/api/monitor/generation_credit_cost", json={"credits": 1})
+    assert response.status_code == 200
+
+    app.dependency_overrides.clear()
+
+
 @patch("routers.generate.BackgroundTasks.add_task")
 def test_delete_user_by_email_admin_success(mock_add_task, client, db):
     # 1. Create admin user

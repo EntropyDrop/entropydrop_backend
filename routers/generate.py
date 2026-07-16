@@ -228,6 +228,11 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
     }
 
 
+@router.get("/generation_credit_cost")
+async def get_generation_credit_cost(current_user: models.User = Depends(auth.get_current_user)):
+    return {"credits": backend_utils.get_generation_credit_cost()}
+
+
 @router.get("/generate/active")
 async def get_active_generation(
     db: Session = Depends(get_db),
@@ -351,16 +356,17 @@ async def generate_image(
 
     # Quota Check
     if not current_user.is_admin:
+        generation_credit_cost = backend_utils.get_generation_credit_cost()
         remaining = current_user.credits if current_user.credits is not None else 0
-        if remaining < 3:
+        if remaining < generation_credit_cost:
             raise HTTPException(status_code=403, detail="Insufficient credits")
         
         # Deduct credit
-        current_user.credits = max(0, (current_user.credits or 0) - 3)
+        current_user.credits = max(0, (current_user.credits or 0) - generation_credit_cost)
         # Record credit log
         log_entry = models.CreditLog(
             user_id=current_user.id,
-            amount=-3,
+            amount=-generation_credit_cost,
             action="generation",
             source=f"Skin Generation: {log_id}"
         )

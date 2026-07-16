@@ -9,7 +9,7 @@ from fastapi import BackgroundTasks
 
 from main import app
 from auth import get_current_user, get_current_user_optional
-from models import User, GenerationLog, UserFeedback
+from models import User, GenerationLog, UserFeedback, CreditLog
 import routers.generate
 
 pytestmark = pytest.mark.usefixtures("mock_auth", "mock_db_session")
@@ -62,6 +62,14 @@ def test_get_models(client):
     data = response.json()
     assert "aigc_image_to_skin" in data
     assert "sking_v39_flux_4b_000028000" in data["aigc_image_to_skin"]
+
+
+@patch("routers.generate.backend_utils.get_generation_credit_cost", return_value=5)
+def test_get_generation_credit_cost(mock_credit_cost, client):
+    response = client.get("/skin/api/generation_credit_cost")
+    assert response.status_code == 200
+    assert response.json() == {"credits": 5}
+    mock_credit_cost.assert_called_once()
 
 def test_get_active_generation_none(client, db):
     response = client.get("/skin/api/generate/active")
@@ -161,7 +169,12 @@ def test_generation_result_update_clears_retry_error():
     assert log.error_msg is None
 
 @patch("rq.Queue.enqueue")
-def test_submit_generate_text_to_skin(mock_enqueue, client, db):
+@patch("routers.generate.backend_utils.get_generation_credit_cost", return_value=1)
+def test_submit_generate_text_to_skin(mock_credit_cost, mock_enqueue, client, db):
+    user = db.query(User).filter(User.id == "test_user_generate").one()
+    user.credits = 1
+    db.commit()
+
     payload = {
         "prompt": "cute girl with hoodie",
         "is_public": True,
@@ -178,6 +191,41 @@ def test_submit_generate_text_to_skin(mock_enqueue, client, db):
     assert log is not None
     assert log.prompt == "cute girl with hoodie"
     assert log.status == "pending"
+    db.refresh(user)
+    assert user.credits == 0
+    credit_log = db.query(CreditLog).filter(
+        CreditLog.user_id == user.id,
+        CreditLog.action == "generation",
+    ).one()
+    assert credit_log.amount == -1
+    assert credit_log.source == f"Skin Generation: {log.id}"
+    mock_credit_cost.assert_called_once()
+    mock_enqueue.assert_called_once()
+
+
+@patch("rq.Queue.enqueue")
+@patch("routers.generate.backend_utils.get_generation_credit_cost", return_value=4)
+def test_submit_generate_uses_dynamic_credit_cost(mock_credit_cost, mock_enqueue, client, db):
+    user = db.query(User).filter(User.id == "test_user_generate").one()
+    user.credits = 4
+    db.commit()
+
+    response = client.post("/skin/api/generate", data={
+        "prompt": "dynamic cost",
+        "is_public": True,
+        "model_version": "z_image + sking_v39_flux_4b_000028000",
+        "mode": "aigc_text_to_skin",
+    })
+
+    assert response.status_code == 200
+    db.refresh(user)
+    assert user.credits == 0
+    credit_log = db.query(CreditLog).filter(
+        CreditLog.user_id == user.id,
+        CreditLog.action == "generation",
+    ).one()
+    assert credit_log.amount == -4
+    mock_credit_cost.assert_called_once()
     mock_enqueue.assert_called_once()
 
 
@@ -804,5 +852,3 @@ def test_generate_image_edit_to_skin_maintenance_block(mock_is_enabled, client, 
     )
     assert response.status_code == 403
     assert "Image edit to skin generation is temporarily under maintenance." in response.json()["detail"]
-
-
