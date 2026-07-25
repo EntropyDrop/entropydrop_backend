@@ -618,7 +618,7 @@ def test_activate_subscription_success(mock_get_subscription, monkeypatch, clien
     user = db.query(User).filter(User.id == "1").first()
     assert user.paypal_subscription_id == "SUB-3"
     assert user.pro_level == "pro-plus"
-    assert user.credits == 60
+    assert user.credits == 80
 
 @patch("routers.order.get_paypal_subscription_api")
 def test_activate_subscription_deduplication(mock_get_subscription, monkeypatch, client, db):
@@ -636,20 +636,20 @@ def test_activate_subscription_deduplication(mock_get_subscription, monkeypatch,
     assert response1.status_code == 200
     
     user = db.query(User).filter(User.id == "1").first()
-    assert user.credits == 60
+    assert user.credits == 80
 
     # 2. Simulate webhook for the same subscription (should be skipped/deduplicated)
     import backend_utils
     backend_utils.award_subscription_credits(db, user, "pro-plus", "SUB-3", is_webhook=True)
     db.commit()
     db.refresh(user)
-    assert user.credits == 60
+    assert user.credits == 80
 
     # 3. Simulate webhook for a different subscription (should be granted, e.g. resubscribed)
     backend_utils.award_subscription_credits(db, user, "pro-plus", "SUB-DIFF", is_webhook=True)
     db.commit()
     db.refresh(user)
-    assert user.credits == 120
+    assert user.credits == 160
 
 def test_activate_subscription_rejects_subscription_linked_to_other_user(client, db):
     other = User(

@@ -189,7 +189,7 @@ def award_subscription_credits(db: Session, user: models.User, pro_level: str, s
         print(f"Skipping subscription credits grant for user {user.id}: already awarded for subscription {subscription_id} in the last 3 days (Reference: {existing_grant.source})")
         return
         
-    monthly_credits = 180 if pro_level == "pro-max" else 60
+    monthly_credits = 200 if pro_level == "pro-max" else 80
     user.credits = (user.credits or 0) + monthly_credits
     
     # Record credit log
