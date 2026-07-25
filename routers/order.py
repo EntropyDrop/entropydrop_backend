@@ -17,6 +17,8 @@ from payment_utils import (
     capture_paypal_order_api,
     get_paypal_order_api,
     get_paypal_subscription_api,
+    create_paypal_subscription_api,
+    revise_paypal_subscription_api,
 )
 import backend_utils
 
@@ -628,6 +630,49 @@ async def get_paypal_config():
         "pro_plus_plan_id": settings.PAYPAL_PRO_PLUS_PLAN_ID,
         "pro_max_plan_id": settings.PAYPAL_PRO_MAX_PLAN_ID
     }
+
+@router.post("/subscription/create")
+async def create_subscription(
+    req: schemas.SubscriptionCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    """Create a new subscription or revise an existing subscription (for upgrades)"""
+    if req.tier not in ("pro_plus", "pro_max"):
+        raise HTTPException(status_code=400, detail="Invalid subscription tier")
+        
+    plan_id = settings.PAYPAL_PRO_MAX_PLAN_ID if req.tier == "pro_max" else settings.PAYPAL_PRO_PLUS_PLAN_ID
+    
+    is_upgrade = current_user.paypal_subscription_status == "ACTIVE" and current_user.paypal_subscription_id
+    
+    try:
+        if is_upgrade:
+            rev_res = revise_paypal_subscription_api(current_user.paypal_subscription_id, plan_id)
+            approve_link = next((link["href"] for link in rev_res.get("links", []) if link["rel"] == "approve"), None)
+            if not approve_link:
+                raise HTTPException(status_code=500, detail="Failed to retrieve approval URL from revision response")
+            return {
+                "approval_url": approve_link,
+                "subscription_id": current_user.paypal_subscription_id
+            }
+        else:
+            sub_res = create_paypal_subscription_api(
+                plan_id=plan_id,
+                custom_id=current_user.id,
+                return_url=req.return_url,
+                cancel_url=req.return_url
+            )
+            approve_link = next((link["href"] for link in sub_res.get("links", []) if link["rel"] == "approve"), None)
+            if not approve_link:
+                raise HTTPException(status_code=500, detail="Failed to retrieve approval URL from subscription response")
+            return {
+                "approval_url": approve_link,
+                "subscription_id": sub_res["id"]
+            }
+    except Exception as e:
+        print(f"Error creating/revising subscription: {e}")
+        raise HTTPException(status_code=500, detail="Failed to initialize subscription checkout")
+
 
 @router.post("/subscription/activate")
 async def activate_subscription(

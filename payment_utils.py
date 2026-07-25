@@ -24,14 +24,14 @@ def get_paypal_access_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
-def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "USD"):
+def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "USD", return_url: str | None = None, cancel_url: str | None = None):
     """Create order using PayPal API."""
     access_token = get_paypal_access_token()
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json"
     }
-    
+
     order_payload = {
         "intent": "CAPTURE",
         "purchase_units": [
@@ -44,6 +44,12 @@ def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "
             }
         ]
     }
+    if return_url or cancel_url:
+        order_payload["application_context"] = {}
+        if return_url:
+            order_payload["application_context"]["return_url"] = return_url
+        if cancel_url:
+            order_payload["application_context"]["cancel_url"] = cancel_url
     
     response = requests.post(
         f"{settings.PAYPAL_API_BASE}/v2/checkout/orders",
@@ -101,6 +107,56 @@ def get_paypal_subscription_api(subscription_id: str):
     )
     response.raise_for_status()
     return response.json()
+
+def create_paypal_subscription_api(plan_id: str, custom_id: str, return_url: str, cancel_url: str):
+    """Create subscription using PayPal API."""
+    access_token = get_paypal_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "plan_id": plan_id,
+        "custom_id": custom_id,
+        "application_context": {
+            "shipping_preference": "NO_SHIPPING",
+            "user_action": "SUBSCRIBE_NOW",
+            "return_url": return_url,
+            "cancel_url": cancel_url
+        }
+    }
+    
+    response = requests.post(
+        f"{settings.PAYPAL_API_BASE}/v1/billing/subscriptions",
+        headers=headers,
+        json=payload,
+        timeout=PAYPAL_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+def revise_paypal_subscription_api(subscription_id: str, plan_id: str):
+    """Revise subscription using PayPal API."""
+    access_token = get_paypal_access_token()
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "plan_id": plan_id
+    }
+    
+    response = requests.post(
+        f"{settings.PAYPAL_API_BASE}/v1/billing/subscriptions/{subscription_id}/revise",
+        headers=headers,
+        json=payload,
+        timeout=PAYPAL_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
 
 def cancel_paypal_subscription_api(subscription_id: str, reason: str = "User requested cancellation"):
     """Cancel subscription via PayPal."""

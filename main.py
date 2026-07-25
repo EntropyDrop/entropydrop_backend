@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from database import engine
 import models
-from routers import auth, generate, collections, address, order, webhooks, monitor, ledger, forum
+from routers import auth, generate, collections, address, order, webhooks, monitor, ledger, forum, credit
 from config import settings
 
 from slowapi.errors import RateLimitExceeded
@@ -138,6 +138,7 @@ app.include_router(monitor.router, prefix="/skin")
 app.include_router(ledger.router, prefix="/skin")
 app.include_router(ledger.legacy_open_router, prefix="/skin")
 app.include_router(forum.router, prefix="/skin")
+app.include_router(credit.router, prefix="/skin")
 
 
 

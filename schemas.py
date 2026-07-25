@@ -164,6 +164,10 @@ class OrderResponse(OrderBase):
 class PayRequest(BaseModel):
     paypal_order_id: Optional[str] = None
 
+class SubscriptionCreateRequest(BaseModel):
+    tier: str
+    return_url: str
+
 # Cart related models
 class CartItemBase(BaseModel):
     log_id: str
