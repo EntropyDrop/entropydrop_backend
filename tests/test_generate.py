@@ -61,7 +61,7 @@ def test_get_models(client):
     assert response.status_code == 200
     data = response.json()
     assert "aigc_image_to_skin" in data
-    assert "sking_v39_flux_4b_000028000" in data["aigc_image_to_skin"]
+    assert "sking_v73_flux_4b_000027000" in data["aigc_image_to_skin"]
 
 
 @patch("routers.generate.backend_utils.get_generation_credit_cost", return_value=5)
@@ -178,7 +178,7 @@ def test_submit_generate_text_to_skin(mock_credit_cost, mock_enqueue, client, db
     payload = {
         "prompt": "cute girl with hoodie",
         "is_public": True,
-        "model_version": "z_image + sking_v39_flux_4b_000028000",
+        "model_version": "z_image + sking_v73_flux_4b_000027000",
         "mode": "aigc_text_to_skin"
     }
     response = client.post("/skin/api/generate", data=payload)
@@ -213,7 +213,7 @@ def test_submit_generate_uses_dynamic_credit_cost(mock_credit_cost, mock_enqueue
     response = client.post("/skin/api/generate", data={
         "prompt": "dynamic cost",
         "is_public": True,
-        "model_version": "z_image + sking_v39_flux_4b_000028000",
+        "model_version": "z_image + sking_v73_flux_4b_000027000",
         "mode": "aigc_text_to_skin",
     })
 
@@ -227,6 +227,35 @@ def test_submit_generate_uses_dynamic_credit_cost(mock_credit_cost, mock_enqueue
     assert credit_log.amount == -4
     mock_credit_cost.assert_called_once()
     mock_enqueue.assert_called_once()
+
+
+@patch("rq.Queue.enqueue")
+def test_submit_generate_uses_model_specific_credit_cost(mock_enqueue, client, db):
+    user = db.query(User).filter(User.id == "test_user_generate").one()
+    user.credits = 10
+    db.commit()
+
+    import backend_utils
+    backend_utils.redis_conn.set("config:model_price:sking_v73_flux_4b_000027000", "7")
+
+    try:
+        response = client.post("/skin/api/generate", data={
+            "prompt": "custom model price test",
+            "is_public": True,
+            "model_version": "z_image + sking_v73_flux_4b_000027000",
+            "mode": "aigc_text_to_skin",
+        })
+
+        assert response.status_code == 200
+        db.refresh(user)
+        assert user.credits == 3  # 10 - 7 = 3
+        credit_log = db.query(CreditLog).filter(
+            CreditLog.user_id == user.id,
+            CreditLog.action == "generation",
+        ).order_by(CreditLog.created_at.desc()).first()
+        assert credit_log.amount == -7
+    finally:
+        backend_utils.redis_conn.delete("config:model_price:sking_v73_flux_4b_000027000")
 
 
 # ----------------- Background Worker Task Tests -----------------

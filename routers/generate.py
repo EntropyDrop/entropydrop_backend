@@ -178,43 +178,17 @@ def display_log_name(log):
     return "Untitled"
 
 
-AVAILABLE_LORAS = [
-    'sking_v37_flux_4b_000018000',
-    'sking_v38_flux_4b_000018000',
-    'sking_v38_flux_4b_000021000',
-    'sking_v39_flux_4b_000011000',
-    'sking_v39_flux_4b_000028000',
-    'sking_v40_flux_4b_000009000',
-    'sking_v40_flux_4b_000011000',
-    'sking_v40_flux_4b_000013000',
-    'sking_v55_flux_4b_000015000',
-    'sking_v50_flux_4b_000020000',
-    'sking_v51_flux_4b_000020000',
-    'sking_v52_flux_4b_000020000',
-    'sking_v53_flux_4b_000020000',
-    'sking_v54_flux_4b_000020000',
-    'sking_v55_flux_4b_000020000',
-    'sking_v56_flux_4b_000020000',
-    'sking_v57_flux_4b_000020000',
-    'sking_v58_flux_4b_000018000',
-    'sking_v58_flux_4b_000020000',
-    'sking_v59_flux_4b_000017000',
-    'sking_v59_flux_4b_000020000',
-    'sking_v62_flux_4b_000020000',
-    'sking_v63_flux_4b_000020000',
-    'sking_v70_flux_4b_000022000',
-    'sking_v71_flux_4b_000022000',
-    'sking_v72_flux_4b_000027000',
+AVAILABLE_MODELS = [
+    'SkingDDJ_v1',
     'sking_v73_flux_4b_000027000',
 ]
-
 
 @router.get("/models")
 async def get_models(current_user: models.User = Depends(auth.get_current_user)):
     """
     Get the list of available models, grouped by generation mode
     """
-    loras = [f.replace(".safetensors", "") for f in AVAILABLE_LORAS]
+    loras = [f.replace(".safetensors", "") for f in AVAILABLE_MODELS]
     loras.reverse()
     
     return {
@@ -229,7 +203,12 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
 
 
 @router.get("/generation_credit_cost")
-async def get_generation_credit_cost(current_user: models.User = Depends(auth.get_current_user)):
+async def get_generation_credit_cost(
+    model_name: Optional[str] = Query(None),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    if model_name:
+        return {"credits": backend_utils.get_model_credit_cost(model_name)}
     return {"credits": backend_utils.get_generation_credit_cost()}
 
 
@@ -294,7 +273,7 @@ async def generate_image(
         raise HTTPException(status_code=403, detail="Image edit to skin generation is temporarily under maintenance.")
 
     # Model Version Validation
-    loras = [f.replace(".safetensors", "") for f in AVAILABLE_LORAS]
+    loras = [f.replace(".safetensors", "") for f in AVAILABLE_MODELS]
     loras.reverse()
 
     if mode == "aigc_image_to_skin":
@@ -356,7 +335,11 @@ async def generate_image(
 
     # Quota Check
     if not current_user.is_admin:
-        generation_credit_cost = backend_utils.get_generation_credit_cost()
+        matched_model = next((lora for lora in loras if version and lora in version), None)
+        if matched_model:
+            generation_credit_cost = backend_utils.get_model_credit_cost(matched_model)
+        else:
+            generation_credit_cost = backend_utils.get_generation_credit_cost()
         remaining = current_user.credits if current_user.credits is not None else 0
         if remaining < generation_credit_cost:
             raise HTTPException(status_code=403, detail="Insufficient credits")

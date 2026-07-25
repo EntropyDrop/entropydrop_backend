@@ -62,6 +62,17 @@ def get_generation_credit_cost():
     return 1
 
 
+def get_model_credit_cost(model_name: str) -> int:
+    try:
+        val = redis_conn.get(f"config:model_price:{model_name}")
+        if val is not None:
+            return max(0, int(val.decode("utf-8")))
+    except Exception as e:
+        print(f"Failed to read model credit cost for {model_name} from redis: {e}")
+    # Fallback to default cost
+    return get_generation_credit_cost()
+
+
 
 def award_daily_login_credits(db: Session, user: models.User):
     import time

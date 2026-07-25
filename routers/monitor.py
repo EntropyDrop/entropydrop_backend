@@ -395,6 +395,10 @@ class DailyFreeCreditsRequest(BaseModel):
 class GenerationCreditCostRequest(BaseModel):
     credits: int
 
+class SetModelPriceRequest(BaseModel):
+    model_name: str
+    credits: int
+
 @router.get("/daily_free_credits")
 async def get_daily_free_credits_endpoint(
     admin: User = Depends(get_current_admin)
@@ -434,6 +438,34 @@ async def set_generation_credit_cost_endpoint(
     try:
         redis_conn.set("config:generation_credit_cost", str(req.credits))
         return {"credits": req.credits}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")
+
+
+@router.get("/model_prices")
+async def get_model_prices_endpoint(
+    admin: User = Depends(get_current_admin)
+):
+    from routers.generate import AVAILABLE_MODELS
+    from backend_utils import get_model_credit_cost
+    
+    cleaned_models = [m.replace(".safetensors", "") for m in AVAILABLE_MODELS]
+    prices = {}
+    for m in cleaned_models:
+        prices[m] = get_model_credit_cost(m)
+    return prices
+
+
+@router.post("/model_prices")
+async def set_model_price_endpoint(
+    req: SetModelPriceRequest,
+    admin: User = Depends(get_current_admin)
+):
+    if req.credits < 0:
+        raise HTTPException(status_code=400, detail="Credits cannot be negative")
+    try:
+        redis_conn.set(f"config:model_price:{req.model_name}", str(req.credits))
+        return {"model_name": req.model_name, "credits": req.credits}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")
 
