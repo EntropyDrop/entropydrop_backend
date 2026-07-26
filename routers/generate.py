@@ -47,10 +47,17 @@ def get_generation_retry_policy() -> Retry:
     return Retry(max=99999, interval=[5, 10, 30, 60])
 
 
+def get_generation_retry_policy_for_log(log: models.GenerationLog) -> Optional[Retry]:
+    """RQ retries and DB recovery are the same product policy."""
+    if not log.recoverable:
+        return None
+    return get_generation_retry_policy()
+
+
 def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, content_type: str = "image/png"):
     prefix = "high_" if is_pro_active else ""
     q_skin = Queue(f'{prefix}queue_image_to_skin', connection=redis_conn)
-    retry_policy = get_generation_retry_policy()
+    retry_policy = get_generation_retry_policy_for_log(log)
 
     source = log.source
     skin_content_type = content_type
@@ -91,7 +98,7 @@ def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, cont
     q_t2i = Queue(f'{prefix}queue_text_to_image', connection=redis_conn)
     q_edit = Queue(f'{prefix}queue_image_edit', connection=redis_conn)
     
-    retry_policy = get_generation_retry_policy()
+    retry_policy = get_generation_retry_policy_for_log(log)
 
     if log.mode == "aigc_text_to_skin":
         q_t2i.enqueue(
@@ -339,6 +346,8 @@ async def generate_image(
     if global_queue_count > 10000:
         raise HTTPException(status_code=429, detail="Server is busy. The queue is full, please try again later.")
 
+    generation_credit_cost = 0
+
     # Quota Check
     if not current_user.is_admin:
         generation_credit_cost = backend_utils.get_model_credit_cost(model_version)
@@ -402,6 +411,7 @@ async def generate_image(
         is_public=is_public,
         model_version=model_version,
         aux_model_version=aux_model_version,
+        credits_charged=generation_credit_cost,
         recoverable=(model_version == "sking_v73_flux_4b_000027000"),
         parent=parent,
         seed=seed,
@@ -420,6 +430,7 @@ async def generate_image(
     except Exception as e:
         log.status = "failed"
         log.error_msg = f"Failed to enqueue: {e}"
+        refund_generation_credits(db, log)
         db.commit()
         raise HTTPException(status_code=500, detail="Failed to push to queue")
 
@@ -475,9 +486,9 @@ def should_apply_generation_status(log: models.GenerationLog, data: dict) -> boo
         return True
 
     if incoming_status == "failed":
-        if incoming_stage in {"text_to_image", "image_edit"}:
+        if incoming_stage in {"text_to_image", "image_edit", "real_to_render"}:
             return current_status in {"pending", "processing", "failed"}
-        if incoming_stage == "image_to_skin":
+        if incoming_stage in {"image_to_skin", "render_to_uv"}:
             return current_status in {"pending", "processing", "pending_skin", "processing_skin", "failed"}
         return current_status not in {"success", "deleted"}
 
@@ -503,11 +514,78 @@ def apply_generation_result_update(log: models.GenerationLog, data: dict) -> boo
         log.result = data["result"]
     if "edited_result" in data:
         log.edited_result = data["edited_result"]
+    if "provider_task_id" in data:
+        log.provider_task_id = data["provider_task_id"]
+    if "pipeline_version" in data:
+        log.pipeline_version = data["pipeline_version"]
     if "error_msg" in data:
         log.error_msg = data["error_msg"]
     elif status != "failed":
         log.error_msg = None
     return True
+
+
+def _charged_credits_from_history(db: Session, log: models.GenerationLog) -> int:
+    """Compatibility fallback for rows created before credits_charged existed."""
+    debit = (
+        db.query(models.CreditLog)
+        .filter(
+            models.CreditLog.user_id == log.user_id,
+            models.CreditLog.action == "generation",
+            models.CreditLog.source == f"Skin Generation: {log.id}",
+            models.CreditLog.amount < 0,
+        )
+        .first()
+    )
+    return abs(debit.amount) if debit else 0
+
+
+def refund_generation_credits(db: Session, log: models.GenerationLog) -> int:
+    """Refund one failed generation exactly once in the caller's transaction."""
+    if log.credits_refunded:
+        return 0
+
+    charged = log.credits_charged or _charged_credits_from_history(db, log)
+    if not log.user_id or charged <= 0:
+        log.credits_refunded = True
+        return 0
+
+    user = (
+        db.query(models.User)
+        .filter(models.User.id == log.user_id)
+        .with_for_update()
+        .first()
+    )
+    if not user:
+        raise RuntimeError(
+            f"Cannot refund generation {log.id}: user {log.user_id} was not found"
+        )
+
+    refund_source = f"Skin Generation Refund: {log.id}"
+    existing_refund = (
+        db.query(models.CreditLog)
+        .filter(
+            models.CreditLog.user_id == log.user_id,
+            models.CreditLog.action == "refund",
+            models.CreditLog.source == refund_source,
+        )
+        .first()
+    )
+    if existing_refund:
+        log.credits_refunded = True
+        return 0
+
+    user.credits = (user.credits or 0) + charged
+    db.add(
+        models.CreditLog(
+            user_id=log.user_id,
+            amount=charged,
+            action="refund",
+            source=refund_source,
+        )
+    )
+    log.credits_refunded = True
+    return charged
 
 
 async def start_result_listener():
@@ -539,12 +617,24 @@ async def start_result_listener():
 
             db = SessionLocal()
             try:
-                log = db.query(models.GenerationLog).filter(models.GenerationLog.id == log_id).first()
+                log = (
+                    db.query(models.GenerationLog)
+                    .filter(models.GenerationLog.id == log_id)
+                    .with_for_update()
+                    .first()
+                )
                 if log:
                     updated = apply_generation_result_update(log, data)
+                    refunded = (
+                        refund_generation_credits(db, log)
+                        if updated and status == "failed" and not log.recoverable
+                        else 0
+                    )
                     db.commit()
                     if updated:
                         print(f"[*] Task {log_id} status updated to {status}")
+                        if refunded:
+                            print(f"[*] Task {log_id} refunded {refunded} credits")
                     else:
                         print(f"[*] Task {log_id} stale status {status} ignored")
                 await asyncio.to_thread(ack_result_message, raw_message)

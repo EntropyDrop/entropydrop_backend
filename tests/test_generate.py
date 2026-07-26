@@ -189,6 +189,120 @@ def test_generation_result_update_clears_retry_error():
     assert log.status == "processing_skin"
     assert log.error_msg is None
 
+
+def test_failed_generation_refund_is_idempotent(db):
+    user = db.query(User).filter(User.id == "test_user_generate").one()
+    user.credits = 7
+    log = GenerationLog(
+        id="refund_once",
+        prompt="refund",
+        user_id=user.id,
+        mode="aigc_image_to_skin",
+        status="failed",
+        credits_charged=3,
+        credits_refunded=False,
+    )
+    db.add(log)
+    db.commit()
+
+    first = routers.generate.refund_generation_credits(db, log)
+    db.commit()
+    second = routers.generate.refund_generation_credits(db, log)
+    db.commit()
+
+    db.refresh(user)
+    db.refresh(log)
+    refund_logs = db.query(CreditLog).filter(
+        CreditLog.user_id == user.id,
+        CreditLog.action == "refund",
+        CreditLog.source == f"Skin Generation Refund: {log.id}",
+    ).all()
+    assert first == 3
+    assert second == 0
+    assert user.credits == 10
+    assert log.credits_refunded is True
+    assert len(refund_logs) == 1
+    assert refund_logs[0].amount == 3
+
+
+def test_generation_result_update_persists_stage1_provider_metadata():
+    log = GenerationLog(
+        id="provider_metadata",
+        prompt="metadata",
+        user_id="test_user_generate",
+        mode="aigc_image_to_skin",
+        status="processing",
+    )
+
+    updated = routers.generate.apply_generation_result_update(
+        log,
+        {
+            "log_id": log.id,
+            "status": "processing",
+            "stage": "real_to_render",
+            "provider_task_id": "provider-task-123",
+            "pipeline_version": "sample-v0",
+        },
+    )
+
+    assert updated is True
+    assert log.provider_task_id == "provider-task-123"
+    assert log.pipeline_version == "sample-v0"
+
+
+def test_unrecoverable_generation_has_no_rq_retry():
+    log = GenerationLog(recoverable=False)
+    assert routers.generate.get_generation_retry_policy_for_log(log) is None
+
+
+def test_recoverable_generation_keeps_rq_retry():
+    log = GenerationLog(recoverable=True)
+    retry = routers.generate.get_generation_retry_policy_for_log(log)
+    assert retry is not None
+    assert retry.max == 99999
+
+
+@patch("rq.Queue.enqueue", side_effect=RuntimeError("redis unavailable"))
+@patch("routers.generate.backend_utils.get_model_credit_cost", return_value=2)
+def test_enqueue_failure_refunds_credits_and_records_history(
+    mock_credit_cost,
+    mock_enqueue,
+    client,
+    db,
+):
+    user = db.query(User).filter(User.id == "test_user_generate").one()
+    starting_credits = user.credits
+
+    response = client.post(
+        "/skin/api/generate",
+        data={
+            "prompt": "refund enqueue failure",
+            "is_public": True,
+            "aux_model_version": "z_image",
+            "model_version": "SkingDDJ_v1",
+            "mode": "aigc_text_to_skin",
+        },
+    )
+
+    assert response.status_code == 500
+    db.refresh(user)
+    log = db.query(GenerationLog).filter(
+        GenerationLog.prompt == "refund enqueue failure"
+    ).one()
+    refund = db.query(CreditLog).filter(
+        CreditLog.user_id == user.id,
+        CreditLog.action == "refund",
+        CreditLog.source == f"Skin Generation Refund: {log.id}",
+    ).one()
+    assert log.status == "failed"
+    assert log.credits_charged == 4
+    assert log.credits_refunded is True
+    assert refund.amount == 4
+    assert user.credits == starting_credits
+    assert mock_credit_cost.call_count == 2
+    mock_enqueue.assert_called_once()
+
+
 @patch("rq.Queue.enqueue")
 @patch("routers.generate.backend_utils.get_generation_credit_cost", return_value=1)
 def test_submit_generate_text_to_skin(mock_credit_cost, mock_enqueue, client, db):

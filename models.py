@@ -80,8 +80,12 @@ class GenerationLog(Base):
     likes_count = Column(Integer, default=0)
     model_version = Column(String(50), nullable=True) # Large model version identifier
     aux_model_version = Column(String(50), nullable=True) # Large model auxiliary/base version identifier
+    pipeline_version = Column(String(100), nullable=True) # Immutable stage-1 templates/prompt + stage-2 checkpoint bundle
+    provider_task_id = Column(String(100), nullable=True, index=True) # External stage-1 task ID
     parent = Column(String(16), index=True, nullable=True) # Parent log ID if derived from another item
     recoverable = Column(Boolean, default=False, index=True, server_default="0")
+    credits_charged = Column(Integer, default=0, nullable=False, server_default="0")
+    credits_refunded = Column(Boolean, default=False, nullable=False, server_default="0")
     seed = Column(Integer, nullable=True)
     n_step = Column(Integer, nullable=True)
     guidance = Column(Float, nullable=True)
@@ -370,7 +374,6 @@ class CreditLog(Base):
     action = Column(String(50), nullable=False)
     source = Column(String(100), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
-
 
 
 
