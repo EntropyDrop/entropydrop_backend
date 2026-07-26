@@ -178,9 +178,17 @@ def display_log_name(log):
     return "Untitled"
 
 
-AVAILABLE_MODELS = [
+AVAILABLE_IMAGE_TO_SKIN_MODELS = [
     'SkingDDJ_v1',
     'sking_v73_flux_4b_000027000',
+]
+
+AVAILABlE_TEXT_TO_IMAGE_MODELS = [
+    'z_image'
+]
+
+AVAILABLE_IMAGE_EDIT_MODELS = [
+    'flux_4b'
 ]
 
 @router.get("/models")
@@ -188,16 +196,20 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
     """
     Get the list of available models, grouped by generation mode
     """
-    loras = [f.replace(".safetensors", "") for f in AVAILABLE_MODELS]
+    loras = [f.replace(".safetensors", "") for f in AVAILABLE_IMAGE_TO_SKIN_MODELS]
     loras.reverse()
     
     return {
         "aigc_image_to_skin": loras,
         "aigc_text_to_skin": [
-            "z_image + " + lora for lora in loras
+            f"{base} + {lora}"
+            for base in AVAILABlE_TEXT_TO_IMAGE_MODELS
+            for lora in loras
         ],
         "aigc_image_edit_to_skin": [
-            "flux_4b + " + lora for lora in loras
+            f"{base} + {lora}"
+            for base in AVAILABLE_IMAGE_EDIT_MODELS
+            for lora in loras
         ]
     }
 
@@ -273,15 +285,15 @@ async def generate_image(
         raise HTTPException(status_code=403, detail="Image edit to skin generation is temporarily under maintenance.")
 
     # Model Version Validation
-    loras = [f.replace(".safetensors", "") for f in AVAILABLE_MODELS]
+    loras = [f.replace(".safetensors", "") for f in AVAILABLE_IMAGE_TO_SKIN_MODELS]
     loras.reverse()
 
     if mode == "aigc_image_to_skin":
         allowed_versions = loras
     elif mode == "aigc_text_to_skin":
-        allowed_versions = [f"z_image + {lora}" for lora in loras]
+        allowed_versions = [f"{base} + {lora}" for base in AVAILABlE_TEXT_TO_IMAGE_MODELS for lora in loras]
     elif mode == "aigc_image_edit_to_skin":
-        allowed_versions = [f"flux_4b + {lora}" for lora in loras]
+        allowed_versions = [f"{base} + {lora}" for base in AVAILABLE_IMAGE_EDIT_MODELS for lora in loras]
     else:
         allowed_versions = []
 
