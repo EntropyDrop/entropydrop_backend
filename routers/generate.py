@@ -256,7 +256,8 @@ async def generate_image(
     prompt: Optional[str] = Form(None, max_length=500),
     is_public: bool = Form(True),
     file: UploadFile = File(None),
-    version: Optional[str] = Form(None, alias="model_version", max_length=50),
+    model_version: Optional[str] = Form(None, alias="model_version", max_length=50),
+    aux_model_version: Optional[str] = Form(None, alias="aux_model_version", max_length=50),
     mode: Optional[str] = Form(None, max_length=50),
     parent: Optional[str] = Form(None),
     seed: Optional[int] = Form(None),
@@ -289,13 +290,23 @@ async def generate_image(
     else:
         allowed_versions = []
 
-    if not version:
-        version = allowed_versions[0] if allowed_versions else None
-    elif version not in allowed_versions:
+    resolved_version = None
+    if model_version:
+        if " + " in model_version:
+            resolved_version = model_version
+        elif aux_model_version:
+            resolved_version = f"{aux_model_version} + {model_version}"
+        else:
+            resolved_version = model_version
+            
+    if not resolved_version:
+        resolved_version = allowed_versions[0] if allowed_versions else None
+    elif resolved_version not in allowed_versions:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid model version '{version}' for mode '{mode}'."
+            detail=f"Invalid model version '{resolved_version}' for mode '{mode}'."
         )
+    version = resolved_version
         
     parent_log = None
     if parent:
