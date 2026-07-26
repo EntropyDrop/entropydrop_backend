@@ -97,7 +97,7 @@ def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, cont
         q_t2i.enqueue(
             "worker_tasks.task_text_to_image",
             args=(log.id, log.is_public, log.prompt, log.model_version, log.aux_model_version, log.seed, log.n_step, log.guidance),
-            job_timeout='120s',
+            job_timeout='400s',
             retry=retry_policy,
             result_ttl=10,
             job_id=make_generation_job_id(log.id, "text_to_image")
@@ -106,7 +106,7 @@ def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, cont
         q_edit.enqueue(
             "worker_tasks.task_image_edit",
             args=(log.id, log.is_public, log.source, content_type, log.prompt, log.model_version, log.aux_model_version, log.seed, log.n_step, log.guidance),
-            job_timeout='120s',
+            job_timeout='400s',
             retry=retry_policy,
             result_ttl=10,
             job_id=make_generation_job_id(log.id, "image_edit")
@@ -280,15 +280,6 @@ async def generate_image(
     if mode == "aigc_image_edit_to_skin" and not backend_utils.is_image_edit_to_skin_enabled():
         raise HTTPException(status_code=403, detail="Image edit to skin generation is temporarily under maintenance.")
 
-    if mode == "aigc_image_to_skin":
-        allowed_versions = AVAILABLE_IMAGE_TO_SKIN_MODELS
-    elif mode == "aigc_text_to_skin":
-        allowed_versions = [f"{base} + {i2s_model}" for base in AVAILABlE_TEXT_TO_IMAGE_MODELS for i2s_model in AVAILABLE_IMAGE_TO_SKIN_MODELS]
-    elif mode == "aigc_image_edit_to_skin":
-        allowed_versions = [f"{base} + {i2s_model}" for base in AVAILABLE_IMAGE_EDIT_MODELS for i2s_model in AVAILABLE_IMAGE_TO_SKIN_MODELS]
-    else:
-        allowed_versions = []
-
     # 1. Validate aux_model_version legitimacy
     if mode == "aigc_image_to_skin":
         if aux_model_version is not None and aux_model_version != "":
@@ -316,14 +307,7 @@ async def generate_image(
             detail=f"Invalid model version '{model_version}'."
         )
 
-    # 3. Validate combination legitimacy
-    resolved_version = f"{aux_model_version} + {model_version}" if aux_model_version else model_version
-    if resolved_version not in allowed_versions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid model combination '{resolved_version}' for mode '{mode}'."
-        )
-    version = resolved_version
+    version = f"{aux_model_version} + {model_version}" if aux_model_version else model_version
         
     parent_log = None
     if parent:
