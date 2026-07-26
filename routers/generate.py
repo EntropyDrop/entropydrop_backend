@@ -179,6 +179,7 @@ def display_log_name(log):
         return log.prompt[:100]
     return "Untitled"
 
+ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
 
 AVAILABLE_IMAGE_TO_SKIN_MODELS = [
     'SkingDDJ_v1',
@@ -267,7 +268,6 @@ async def generate_image(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
     log_id = models.generate_base58_id()
     if not mode:
         mode = "aigc_image_to_skin" if file else "aigc_text_to_skin"
@@ -290,14 +290,39 @@ async def generate_image(
     else:
         allowed_versions = []
 
-    resolved_version = f"{aux_model_version} + {model_version}" if aux_model_version else model_version
-            
-    if not resolved_version:
-        resolved_version = allowed_versions[0] if allowed_versions else None
-    elif resolved_version not in allowed_versions:
+    # 1. Validate aux_model_version legitimacy
+    if mode == "aigc_image_to_skin":
+        if aux_model_version is not None and aux_model_version != "":
+            raise HTTPException(
+                status_code=400,
+                detail=f"aux_model_version is not allowed for mode '{mode}'."
+            )
+    elif mode == "aigc_text_to_skin":
+        if aux_model_version not in AVAILABlE_TEXT_TO_IMAGE_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid aux_model_version '{aux_model_version}' for mode '{mode}'."
+            )
+    elif mode == "aigc_image_edit_to_skin":
+        if aux_model_version not in AVAILABLE_IMAGE_EDIT_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid aux_model_version '{aux_model_version}' for mode '{mode}'."
+            )
+
+    # 2. Validate model_version legitimacy
+    if model_version not in AVAILABLE_IMAGE_TO_SKIN_MODELS:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid model version '{resolved_version}' for mode '{mode}'."
+            detail=f"Invalid model version '{model_version}'."
+        )
+
+    # 3. Validate combination legitimacy
+    resolved_version = f"{aux_model_version} + {model_version}" if aux_model_version else model_version
+    if resolved_version not in allowed_versions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid model combination '{resolved_version}' for mode '{mode}'."
         )
     version = resolved_version
         

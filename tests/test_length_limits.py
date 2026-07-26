@@ -55,7 +55,7 @@ def test_log_name_update_length_limit(client, db):
 def test_generate_prompt_length_limit(client):
     # Limit is 500
     long_prompt = "a" * 501
-    payload = {"prompt": long_prompt, "model_version": "z_image + SkingDDJ_v1"}
+    payload = {"prompt": long_prompt, "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 422
     assert "at most 500 characters" in response.json()["detail"][0]["msg"]
@@ -64,7 +64,7 @@ def test_generate_prompt_length_limit(client):
 def test_generate_name_truncation(mock_enqueue, client, db):
     # Prompt is long (e.g. 200), name should be truncated to 100
     prompt = "a" * 200
-    payload = {"prompt": prompt, "model_version": "z_image + SkingDDJ_v1"}
+    payload = {"prompt": prompt, "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 200
     

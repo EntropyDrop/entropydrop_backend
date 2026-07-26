@@ -459,13 +459,13 @@ def test_toggle_like_rejects_deleted_log(client, db):
 # ----------------- More Logic Branches and Error Tests -----------------
 
 def test_generate_validation_fail_guidance(client):
-    payload = {"prompt": "test", "guidance": 20.0, "model_version": "z_image + SkingDDJ_v1"}  # Too large
+    payload = {"prompt": "test", "guidance": 20.0, "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}  # Too large
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 400
     assert "Guidance must be between" in response.json()["detail"]
 
 def test_generate_validation_fail_n_step(client):
-    payload = {"prompt": "test", "n_step": 10, "model_version": "z_image + SkingDDJ_v1"}  # Too small
+    payload = {"prompt": "test", "n_step": 10, "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}  # Too small
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 400
     assert "n_step must be between" in response.json()["detail"]
@@ -476,7 +476,7 @@ def test_generate_private_non_pro(client, db):
     user.pro_expires_at = None
     db.commit()
 
-    payload = {"prompt": "test", "is_public": False, "model_version": "z_image + SkingDDJ_v1"}
+    payload = {"prompt": "test", "is_public": False, "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 403
     assert "Free users have no private quota" in response.json()["detail"]
@@ -497,7 +497,7 @@ def test_generate_queue_full(client, db):
         db.add(log)
     db.commit()
 
-    payload = {"prompt": "test", "model_version": "z_image + SkingDDJ_v1"}
+    payload = {"prompt": "test", "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 429
     assert "task(s) in the queue" in response.json()["detail"]
@@ -514,7 +514,7 @@ def test_generate_queue_limit_counts_pending_skin(mock_enqueue, client, db):
     db.add(GenerationLog(status="pending_skin", user_id="test_user_generate", mode="aigc_text_to_skin"))
     db.commit()
 
-    response = client.post("/skin/api/generate", data={"prompt": "blocked", "model_version": "z_image + SkingDDJ_v1"})
+    response = client.post("/skin/api/generate", data={"prompt": "blocked", "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"})
     assert response.status_code == 429
     assert "task(s) in the queue" in response.json()["detail"]
     mock_enqueue.assert_not_called()
@@ -718,7 +718,8 @@ def test_generate_pro_priority(mock_q_init, mock_enqueue, client, db):
     payload = {
         "prompt": "pro task",
         "mode": "aigc_text_to_skin",
-        "model_version": "z_image + SkingDDJ_v1"
+        "aux_model_version": "z_image",
+        "model_version": "SkingDDJ_v1"
     }
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 200
@@ -739,7 +740,8 @@ def test_generate_normal_priority(mock_q_init, mock_enqueue, client, db):
     payload = {
         "prompt": "normal task",
         "mode": "aigc_text_to_skin",
-        "model_version": "z_image + SkingDDJ_v1"
+        "aux_model_version": "z_image",
+        "model_version": "SkingDDJ_v1"
     }
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 200
@@ -811,6 +813,7 @@ def test_generate_validation_fail_invalid_model_version(client):
     payload = {
         "prompt": "cute girl with hoodie",
         "is_public": True,
+        "aux_model_version": "z_image",
         "model_version": "invalid_model_version_name",
         "mode": "aigc_text_to_skin"
     }
@@ -834,7 +837,8 @@ def test_generate_text_to_skin_maintenance_block(mock_is_enabled, client, db):
         "prompt": "cute girl with hoodie",
         "is_public": True,
         "mode": "aigc_text_to_skin",
-        "model_version": "z_image + SkingDDJ_v1"
+        "aux_model_version": "z_image",
+        "model_version": "SkingDDJ_v1"
     }
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 403
