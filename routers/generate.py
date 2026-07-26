@@ -331,14 +331,13 @@ async def generate_image(
         models.GenerationLog.status.in_(ACTIVE_GENERATION_STATUSES)
     ).count()
 
-    if not current_user.is_admin:
-        if current_user.is_pro_active:
-            queue_max_len = 2
-        else:
-            queue_max_len = 1
-            
-        if user_queue_count >= queue_max_len:
-            raise HTTPException(status_code=429, detail=f"You already have {queue_max_len} task(s) in the queue. Please wait for them to finish.")
+    if current_user.is_pro_active:
+        queue_max_len = 2
+    else:
+        queue_max_len = 1
+        
+    if user_queue_count >= queue_max_len:
+        raise HTTPException(status_code=429, detail=f"You already have {queue_max_len} task(s) in the queue. Please wait for them to finish.")
 
     global_queue_count = db.query(models.GenerationLog).filter(
         models.GenerationLog.status.in_(ACTIVE_GENERATION_STATUSES)
@@ -349,24 +348,23 @@ async def generate_image(
     generation_credit_cost = 0
 
     # Quota Check
-    if not current_user.is_admin:
-        generation_credit_cost = backend_utils.get_model_credit_cost(model_version)
-        if aux_model_version:
-            generation_credit_cost += backend_utils.get_model_credit_cost(aux_model_version)
-        remaining = current_user.credits if current_user.credits is not None else 0
-        if remaining < generation_credit_cost:
-            raise HTTPException(status_code=403, detail="Insufficient credits")
-        
-        # Deduct credit
-        current_user.credits = max(0, (current_user.credits or 0) - generation_credit_cost)
-        # Record credit log
-        log_entry = models.CreditLog(
-            user_id=current_user.id,
-            amount=-generation_credit_cost,
-            action="generation",
-            source=f"Skin Generation: {log_id}"
-        )
-        db.add(log_entry)
+    generation_credit_cost = backend_utils.get_model_credit_cost(model_version)
+    if aux_model_version:
+        generation_credit_cost += backend_utils.get_model_credit_cost(aux_model_version)
+    remaining = current_user.credits if current_user.credits is not None else 0
+    if remaining < generation_credit_cost:
+        raise HTTPException(status_code=403, detail="Insufficient credits")
+    
+    # Deduct credit
+    current_user.credits = max(0, (current_user.credits or 0) - generation_credit_cost)
+    # Record credit log
+    log_entry = models.CreditLog(
+        user_id=current_user.id,
+        amount=-generation_credit_cost,
+        action="generation",
+        source=f"Skin Generation: {log_id}"
+    )
+    db.add(log_entry)
     # Limit removed for default collections
 
     # Validation and Defaults
