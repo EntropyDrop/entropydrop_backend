@@ -420,14 +420,6 @@ async def generate_image(
             print(f"S3 upload error for {log_id}: {err_detail}")
             raise HTTPException(status_code=500, detail="Image upload failed, please try again later")
 
-    aux_model_version = None
-    clean_model_version = version
-    if version and " + " in version:
-        parts = [p.strip() for p in version.split("+")]
-        if len(parts) >= 2:
-            aux_model_version = parts[0]
-            clean_model_version = parts[1]
-
     log = models.GenerationLog(
         id=log_id,
         prompt=prompt,
@@ -435,7 +427,7 @@ async def generate_image(
         mode=mode,
         user_id=current_user.id,
         is_public=is_public,
-        model_version=clean_model_version,
+        model_version=model_version,
         aux_model_version=aux_model_version,
         parent=parent,
         seed=seed,
