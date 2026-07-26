@@ -180,7 +180,8 @@ def test_submit_generate_text_to_skin(mock_credit_cost, mock_enqueue, client, db
     payload = {
         "prompt": "cute girl with hoodie",
         "is_public": True,
-        "model_version": "z_image + sking_v73_flux_4b_000027000",
+        "aux_model_version": "z_image",
+        "model_version": "sking_v73_flux_4b_000027000",
         "mode": "aigc_text_to_skin"
     }
     response = client.post("/skin/api/generate", data=payload)
@@ -215,7 +216,8 @@ def test_submit_generate_uses_dynamic_credit_cost(mock_credit_cost, mock_enqueue
     response = client.post("/skin/api/generate", data={
         "prompt": "dynamic cost",
         "is_public": True,
-        "model_version": "z_image + sking_v73_flux_4b_000027000",
+        "aux_model_version": "z_image",
+        "model_version": "sking_v73_flux_4b_000027000",
         "mode": "aigc_text_to_skin",
     })
 
@@ -244,7 +246,8 @@ def test_submit_generate_uses_model_specific_credit_cost(mock_enqueue, client, d
         response = client.post("/skin/api/generate", data={
             "prompt": "custom model price test",
             "is_public": True,
-            "model_version": "z_image + sking_v73_flux_4b_000027000",
+            "aux_model_version": "z_image",
+            "model_version": "sking_v73_flux_4b_000027000",
             "mode": "aigc_text_to_skin",
         })
 
@@ -871,7 +874,8 @@ def test_generate_image_edit_to_skin_maintenance_block(mock_is_enabled, client, 
     payload = {
         "prompt": "edit task",
         "mode": "aigc_image_edit_to_skin",
-        "model_version": "flux_4b + sking_v73_flux_4b_000027000"
+        "aux_model_version": "flux_4b",
+        "model_version": "sking_v73_flux_4b_000027000"
     }
     response = client.post(
         "/skin/api/generate",

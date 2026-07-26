@@ -290,14 +290,7 @@ async def generate_image(
     else:
         allowed_versions = []
 
-    resolved_version = None
-    if model_version:
-        if " + " in model_version:
-            resolved_version = model_version
-        elif aux_model_version:
-            resolved_version = f"{aux_model_version} + {model_version}"
-        else:
-            resolved_version = model_version
+    resolved_version = f"{aux_model_version} + {model_version}" if aux_model_version else model_version
             
     if not resolved_version:
         resolved_version = allowed_versions[0] if allowed_versions else None
