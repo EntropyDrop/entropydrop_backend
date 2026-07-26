@@ -256,7 +256,7 @@ async def generate_image(
     prompt: Optional[str] = Form(None, max_length=500),
     is_public: bool = Form(True),
     file: UploadFile = File(None),
-    model_version: Optional[str] = Form(None, alias="model_version", max_length=50),
+    model_version: str = Form(..., alias="model_version", max_length=50),
     aux_model_version: Optional[str] = Form(None, alias="aux_model_version", max_length=50),
     mode: Optional[str] = Form(None, max_length=50),
     parent: Optional[str] = Form(None),
