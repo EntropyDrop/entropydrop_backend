@@ -75,7 +75,6 @@ class GenerationLog(Base):
     source = Column(String(500), nullable=True) # Source image key in S3
     result = Column(String(500), nullable=True) # Generated image key, can be null (pending)
     edited_result = Column(String(500), nullable=True) # Intermediate edited image key
-    edit_source_type = Column(String(50), nullable=True) # 'source' or 'intermediate'
     user_id = Column(String(16), index=True, nullable=True) # Associated user ID
     is_public = Column(Boolean, default=True, index=True)
     likes_count = Column(Integer, default=0)

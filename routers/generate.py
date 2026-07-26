@@ -263,7 +263,6 @@ async def generate_image(
     seed: Optional[int] = Form(None),
     n_step: Optional[int] = Form(None),
     guidance: Optional[float] = Form(None),
-    edit_source_type: Optional[str] = Form(None, max_length=50),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
@@ -410,7 +409,6 @@ async def generate_image(
         guidance=guidance,
         status="pending",
         is_pro=current_user.is_pro_active,
-        edit_source_type=edit_source_type,
         source=source_filename
     )
     db.add(log)
@@ -631,7 +629,6 @@ async def get_history(
             "name": display_log_name(log),
             "prompt": log.prompt,
             "mode": log.mode,
-            "edit_source_type": log.edit_source_type,
             "source": source_url,
             "result": result_url,
             "edited_image_url": edited_image_url,
@@ -906,7 +903,6 @@ async def get_log(
         "name": display_log_name(log),
         "prompt": log.prompt,
         "mode": log.mode,
-        "edit_source_type": log.edit_source_type,
         "result": result_url,
         "source": source_url,
         "edited_image_url": edited_image_url,
