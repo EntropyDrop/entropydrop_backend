@@ -280,31 +280,22 @@ async def generate_image(
     if mode == "aigc_image_edit_to_skin" and not backend_utils.is_image_edit_to_skin_enabled():
         raise HTTPException(status_code=403, detail="Image edit to skin generation is temporarily under maintenance.")
 
-    # 1. Validate aux_model_version legitimacy
-    if mode == "aigc_image_to_skin":
-        if aux_model_version is not None and aux_model_version != "":
-            raise HTTPException(
-                status_code=400,
-                detail=f"aux_model_version is not allowed for mode '{mode}'."
-            )
-    elif mode == "aigc_text_to_skin":
-        if aux_model_version not in AVAILABlE_TEXT_TO_IMAGE_MODELS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid aux_model_version '{aux_model_version}' for mode '{mode}'."
-            )
-    elif mode == "aigc_image_edit_to_skin":
-        if aux_model_version not in AVAILABLE_IMAGE_EDIT_MODELS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid aux_model_version '{aux_model_version}' for mode '{mode}'."
-            )
+    aux = aux_model_version if aux_model_version else None
 
-    # 2. Validate model_version legitimacy
-    if model_version not in AVAILABLE_IMAGE_TO_SKIN_MODELS:
+    # Calculate allowed combinations set of (aux, skin) pairs
+    if mode == "aigc_image_to_skin":
+        allowed_combinations = {(None, skin) for skin in AVAILABLE_IMAGE_TO_SKIN_MODELS}
+    elif mode == "aigc_text_to_skin":
+        allowed_combinations = {(base, skin) for base in AVAILABlE_TEXT_TO_IMAGE_MODELS for skin in AVAILABLE_IMAGE_TO_SKIN_MODELS}
+    elif mode == "aigc_image_edit_to_skin":
+        allowed_combinations = {(base, skin) for base in AVAILABLE_IMAGE_EDIT_MODELS for skin in AVAILABLE_IMAGE_TO_SKIN_MODELS}
+    else:
+        allowed_combinations = set()
+
+    if (aux, model_version) not in allowed_combinations:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid model version '{model_version}'."
+            detail=f"Invalid model version combination: aux_model_version='{aux}', model_version='{model_version}' for mode '{mode}'."
         )
 
     version = f"{aux_model_version} + {model_version}" if aux_model_version else model_version
