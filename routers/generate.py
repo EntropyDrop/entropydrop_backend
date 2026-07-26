@@ -14,6 +14,7 @@ import backend_utils
 from config import settings
 from redis import Redis
 from rq import Queue, Retry
+from rq.job import Callback
 import httpx
 from rate_limit import limiter
 
@@ -29,7 +30,13 @@ router = APIRouter(prefix="/api", tags=["generate"])
 ACTIVE_GENERATION_STATUSES = ["pending", "processing", "pending_skin", "processing_skin"]
 RECOVERABLE_GENERATION_STATUSES = ACTIVE_GENERATION_STATUSES
 SECOND_STAGE_STATUSES = {"pending_skin", "processing_skin"}
-TWO_STAGE_GENERATION_MODES = {"aigc_text_to_skin", "aigc_image_edit_to_skin"}
+TWO_STAGE_GENERATION_MODES = {
+    "aigc_text_to_skin",
+    "aigc_image_edit_to_skin",
+    "aigc_image_to_skin",
+}
+LEGACY_SKIN_MODEL_VERSION = "sking_v73_flux_4b_000027000"
+DENSE_UV_MODEL_VERSION = "SKING_DDJ_v54"
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
 RESULT_PROCESSING_QUEUE_KEY = os.getenv("GENERATE_RESULT_PROCESSING_QUEUE_KEY", "generate_results_processing")
 GENERATION_RECOVERY_MIN_AGE_SECONDS = int(os.getenv("GENERATION_RECOVERY_MIN_AGE_SECONDS", "300"))
@@ -54,6 +61,19 @@ def get_generation_retry_policy_for_log(log: models.GenerationLog) -> Optional[R
     return get_generation_retry_policy()
 
 
+def uses_real_to_render_pipeline(log: models.GenerationLog) -> bool:
+    return (
+        log.mode == "aigc_image_to_skin"
+        and log.model_version == DENSE_UV_MODEL_VERSION
+    )
+
+
+def uses_image_to_skin_intermediate(log: models.GenerationLog) -> bool:
+    if log.mode not in TWO_STAGE_GENERATION_MODES:
+        return False
+    return log.mode != "aigc_image_to_skin" or uses_real_to_render_pipeline(log)
+
+
 def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, content_type: str = "image/png"):
     prefix = "high_" if is_pro_active else ""
     q_skin = Queue(f'{prefix}queue_image_to_skin', connection=redis_conn)
@@ -63,7 +83,7 @@ def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, c
     skin_content_type = content_type
     intermediate_filename = None
 
-    if log.mode in TWO_STAGE_GENERATION_MODES:
+    if uses_image_to_skin_intermediate(log):
         source = log.edited_result
         skin_content_type = "image/jpeg"
         intermediate_filename = log.edited_result
@@ -92,8 +112,57 @@ def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, c
     )
 
 
+def enqueue_real_to_render_task(
+    log: models.GenerationLog,
+    is_pro_active: bool,
+    content_type: str,
+):
+    if not uses_real_to_render_pipeline(log):
+        raise ValueError(
+            f"Generation {log.id} is not a {DENSE_UV_MODEL_VERSION} "
+            "image-to-skin task"
+        )
+    if not log.source:
+        raise ValueError(
+            f"Cannot enqueue real_to_render for {log.id}: missing source image"
+        )
+
+    prefix = "high_" if is_pro_active else ""
+    queue = Queue(f"{prefix}queue_real_to_render", connection=redis_conn)
+    return queue.enqueue(
+        "tasks.submit_real_to_render",
+        args=(
+            log.id,
+            log.is_public,
+            log.source,
+            content_type,
+            prefix,
+        ),
+        job_timeout="60s",
+        retry=None,
+        on_failure=Callback(
+            "tasks.real_to_render_job_failure",
+            timeout=20,
+        ),
+        on_stopped=Callback(
+            "tasks.real_to_render_job_stopped",
+            timeout=20,
+        ),
+        result_ttl=10,
+        failure_ttl=86400,
+        job_id=make_generation_job_id(log.id, "real_to_render"),
+    )
+
+
 def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, content_type: str = "image/png"):
     prefix = "high_" if is_pro_active else ""
+
+    if log.model_version == DENSE_UV_MODEL_VERSION:
+        return enqueue_real_to_render_task(
+            log,
+            is_pro_active,
+            content_type,
+        )
     
     q_t2i = Queue(f'{prefix}queue_text_to_image', connection=redis_conn)
     q_edit = Queue(f'{prefix}queue_image_edit', connection=redis_conn)
@@ -140,7 +209,7 @@ def get_queue_position(db: Session, log_id: str) -> int:
         count = db.query(models.GenerationLog).filter(
             models.GenerationLog.created_at < log.created_at,
             (
-                (models.GenerationLog.mode == "aigc_image_to_skin") & models.GenerationLog.status.in_(["pending", "processing_skin"])
+                (models.GenerationLog.mode == "aigc_image_to_skin") & models.GenerationLog.status.in_(["pending", "pending_skin", "processing_skin"])
             ) | (
                 (models.GenerationLog.mode.in_(["aigc_text_to_skin", "aigc_image_edit_to_skin"])) & models.GenerationLog.status.in_(["pending_skin", "processing_skin"])
             )
@@ -188,8 +257,8 @@ def display_log_name(log):
 ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
 
 AVAILABLE_IMAGE_TO_SKIN_MODELS = [
-    'sking_v73_flux_4b_000027000',
-    'SkingDDJ_v1',
+    LEGACY_SKIN_MODEL_VERSION,
+    DENSE_UV_MODEL_VERSION,
 ]
 
 AVAILABlE_TEXT_TO_IMAGE_MODELS = [
@@ -292,9 +361,15 @@ async def generate_image(
     if mode == "aigc_image_to_skin":
         allowed_combinations = {(None, skin) for skin in AVAILABLE_IMAGE_TO_SKIN_MODELS}
     elif mode == "aigc_text_to_skin":
-        allowed_combinations = {(base, skin) for base in AVAILABlE_TEXT_TO_IMAGE_MODELS for skin in AVAILABLE_IMAGE_TO_SKIN_MODELS}
+        allowed_combinations = {
+            (base, LEGACY_SKIN_MODEL_VERSION)
+            for base in AVAILABlE_TEXT_TO_IMAGE_MODELS
+        }
     elif mode == "aigc_image_edit_to_skin":
-        allowed_combinations = {(base, skin) for base in AVAILABLE_IMAGE_EDIT_MODELS for skin in AVAILABLE_IMAGE_TO_SKIN_MODELS}
+        allowed_combinations = {
+            (base, LEGACY_SKIN_MODEL_VERSION)
+            for base in AVAILABLE_IMAGE_EDIT_MODELS
+        }
     else:
         allowed_combinations = set()
 
@@ -410,7 +485,7 @@ async def generate_image(
         model_version=model_version,
         aux_model_version=aux_model_version,
         credits_charged=generation_credit_cost,
-        recoverable=(model_version == "sking_v73_flux_4b_000027000"),
+        recoverable=(model_version == LEGACY_SKIN_MODEL_VERSION),
         parent=parent,
         seed=seed,
         n_step=n_step,
@@ -1257,7 +1332,7 @@ def collect_active_generation_log_ids(queues, registry_classes, job_class):
 
 def enqueue_recovered_generation_task(log: models.GenerationLog, is_pro_active: bool):
     if log.status in SECOND_STAGE_STATUSES:
-        if log.mode in TWO_STAGE_GENERATION_MODES and log.edited_result:
+        if uses_image_to_skin_intermediate(log) and log.edited_result:
             return enqueue_image_to_skin_task(log, is_pro_active, "image/jpeg")
         if log.mode == "aigc_image_to_skin" and log.source:
             return enqueue_image_to_skin_task(log, is_pro_active, "image/png")

@@ -62,6 +62,8 @@ def test_get_models(client):
     data = response.json()
     assert "image_to_skin_models" in data
     assert "sking_v73_flux_4b_000027000" in data["image_to_skin_models"]
+    assert "SKING_DDJ_v54" in data["image_to_skin_models"]
+    assert "SkingDDJ_v1" not in data["image_to_skin_models"]
     assert "text_to_image_models" in data
     assert "image_edit_models" in data
 
@@ -75,21 +77,21 @@ def test_get_generation_credit_cost(mock_credit_cost, client):
 
 def test_get_generation_credit_cost_with_params(client):
     import backend_utils
-    backend_utils.redis_conn.set("config:model_price:SkingDDJ_v1", "3")
+    backend_utils.redis_conn.set("config:model_price:SKING_DDJ_v54", "3")
     backend_utils.redis_conn.set("config:model_price:z_image", "2")
 
     try:
         # Test model_version only
-        response = client.get("/skin/api/generation_credit_cost?model_version=SkingDDJ_v1")
+        response = client.get("/skin/api/generation_credit_cost?model_version=SKING_DDJ_v54")
         assert response.status_code == 200
         assert response.json() == {"credits": 3}
 
         # Test aux_model_version + model_version
-        response = client.get("/skin/api/generation_credit_cost?aux_model_version=z_image&model_version=SkingDDJ_v1")
+        response = client.get("/skin/api/generation_credit_cost?aux_model_version=z_image&model_version=SKING_DDJ_v54")
         assert response.status_code == 200
         assert response.json() == {"credits": 5}
     finally:
-        backend_utils.redis_conn.delete("config:model_price:SkingDDJ_v1")
+        backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v54")
         backend_utils.redis_conn.delete("config:model_price:z_image")
 
 def test_get_active_generation_none(client, db):
@@ -262,6 +264,113 @@ def test_recoverable_generation_keeps_rq_retry():
     assert retry.max == 99999
 
 
+def test_dense_uv_model_routes_to_real_to_render_without_retry(monkeypatch):
+    enqueued = []
+
+    class FakeQueue:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def enqueue(self, *args, **kwargs):
+            enqueued.append((self.name, args, kwargs))
+            return object()
+
+    monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
+    log = GenerationLog(
+        id="dense-route",
+        mode="aigc_image_to_skin",
+        model_version="SKING_DDJ_v54",
+        source="uploads/dense-route.png",
+        is_public=False,
+        recoverable=False,
+    )
+
+    routers.generate.enqueue_generation_task(
+        log,
+        is_pro_active=True,
+        content_type="image/png",
+    )
+
+    assert len(enqueued) == 1
+    queue_name, args, kwargs = enqueued[0]
+    assert queue_name == "high_queue_real_to_render"
+    assert args[0] == "tasks.submit_real_to_render"
+    assert kwargs["args"] == (
+        "dense-route",
+        False,
+        "uploads/dense-route.png",
+        "image/png",
+        "high_",
+    )
+    assert kwargs["retry"] is None
+    assert kwargs["job_id"] == "generation_dense-route_real_to_render"
+    assert kwargs["on_failure"].func == (
+        "tasks.real_to_render_job_failure"
+    )
+    assert kwargs["on_stopped"].func == (
+        "tasks.real_to_render_job_stopped"
+    )
+
+
+def test_dense_uv_model_is_rejected_for_text_to_skin(client):
+    response = client.post(
+        "/skin/api/generate",
+        data={
+            "prompt": "not a direct image pipeline",
+            "mode": "aigc_text_to_skin",
+            "aux_model_version": "z_image",
+            "model_version": "SKING_DDJ_v54",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "Invalid model version combination" in response.json()["detail"]
+
+
+def test_dense_uv_generation_is_unrecoverable(
+    monkeypatch,
+    client,
+    db,
+):
+    image = Image.new("RGB", (768, 768), color="red")
+    image_file = io.BytesIO()
+    image.save(image_file, format="PNG")
+    monkeypatch.setattr(
+        routers.generate,
+        "upload_to_s3",
+        lambda *args, **kwargs: "uploads/dense.png",
+    )
+    monkeypatch.setattr(
+        routers.generate,
+        "enqueue_generation_task",
+        lambda *args, **kwargs: object(),
+    )
+
+    response = client.post(
+        "/skin/api/generate",
+        data={
+            "mode": "aigc_image_to_skin",
+            "model_version": "SKING_DDJ_v54",
+        },
+        files={
+            "file": (
+                "source.png",
+                image_file.getvalue(),
+                "image/png",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    log = db.query(GenerationLog).filter(
+        GenerationLog.id == response.json()["id"]
+    ).one()
+    assert log.model_version == "SKING_DDJ_v54"
+    assert log.source == f"uploads/{log.id}.png"
+    assert log.edited_result is None
+    assert log.recoverable is False
+
+
 @patch("rq.Queue.enqueue", side_effect=RuntimeError("redis unavailable"))
 @patch("routers.generate.backend_utils.get_model_credit_cost", return_value=2)
 def test_enqueue_failure_refunds_credits_and_records_history(
@@ -279,7 +388,7 @@ def test_enqueue_failure_refunds_credits_and_records_history(
             "prompt": "refund enqueue failure",
             "is_public": True,
             "aux_model_version": "z_image",
-            "model_version": "SkingDDJ_v1",
+            "model_version": "sking_v73_flux_4b_000027000",
             "mode": "aigc_text_to_skin",
         },
     )
@@ -592,13 +701,13 @@ def test_toggle_like_rejects_deleted_log(client, db):
 # ----------------- More Logic Branches and Error Tests -----------------
 
 def test_generate_validation_fail_guidance(client):
-    payload = {"prompt": "test", "guidance": 20.0, "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}  # Too large
+    payload = {"prompt": "test", "guidance": 20.0, "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}  # Too large
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 400
     assert "Guidance must be between" in response.json()["detail"]
 
 def test_generate_validation_fail_n_step(client):
-    payload = {"prompt": "test", "n_step": 10, "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}  # Too small
+    payload = {"prompt": "test", "n_step": 10, "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}  # Too small
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 400
     assert "n_step must be between" in response.json()["detail"]
@@ -609,7 +718,7 @@ def test_generate_private_non_pro(client, db):
     user.pro_expires_at = None
     db.commit()
 
-    payload = {"prompt": "test", "is_public": False, "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}
+    payload = {"prompt": "test", "is_public": False, "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 403
     assert "Free users have no private quota" in response.json()["detail"]
@@ -630,7 +739,7 @@ def test_generate_queue_full(client, db):
         db.add(log)
     db.commit()
 
-    payload = {"prompt": "test", "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"}
+    payload = {"prompt": "test", "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 429
     assert "task(s) in the queue" in response.json()["detail"]
@@ -647,7 +756,7 @@ def test_generate_queue_limit_counts_pending_skin(mock_enqueue, client, db):
     db.add(GenerationLog(status="pending_skin", user_id="test_user_generate", mode="aigc_text_to_skin"))
     db.commit()
 
-    response = client.post("/skin/api/generate", data={"prompt": "blocked", "aux_model_version": "z_image", "model_version": "SkingDDJ_v1"})
+    response = client.post("/skin/api/generate", data={"prompt": "blocked", "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"})
     assert response.status_code == 429
     assert "task(s) in the queue" in response.json()["detail"]
     mock_enqueue.assert_not_called()
@@ -718,7 +827,7 @@ def test_re_enqueue_if_missing_ignores_unrecoverable(monkeypatch, db):
         mode="aigc_text_to_skin",
         status="pending_skin",
         edited_result="edited/unrecover.jpg",
-        model_version="SkingDDJ_v1",
+        model_version="SKING_DDJ_v54",
         aux_model_version="z_image",
         recoverable=False,
         created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11),
@@ -903,7 +1012,7 @@ def test_generate_pro_priority(mock_q_init, mock_enqueue, client, db):
         "prompt": "pro task",
         "mode": "aigc_text_to_skin",
         "aux_model_version": "z_image",
-        "model_version": "SkingDDJ_v1"
+        "model_version": "sking_v73_flux_4b_000027000"
     }
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 200
@@ -925,7 +1034,7 @@ def test_generate_normal_priority(mock_q_init, mock_enqueue, client, db):
         "prompt": "normal task",
         "mode": "aigc_text_to_skin",
         "aux_model_version": "z_image",
-        "model_version": "SkingDDJ_v1"
+        "model_version": "sking_v73_flux_4b_000027000"
     }
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 200
@@ -1022,7 +1131,7 @@ def test_generate_text_to_skin_maintenance_block(mock_is_enabled, client, db):
         "is_public": True,
         "mode": "aigc_text_to_skin",
         "aux_model_version": "z_image",
-        "model_version": "SkingDDJ_v1"
+        "model_version": "sking_v73_flux_4b_000027000"
     }
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 403
