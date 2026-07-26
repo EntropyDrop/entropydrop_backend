@@ -73,6 +73,25 @@ def test_get_generation_credit_cost(mock_credit_cost, client):
     assert response.json() == {"credits": 5}
     mock_credit_cost.assert_called_once()
 
+def test_get_generation_credit_cost_with_params(client):
+    import backend_utils
+    backend_utils.redis_conn.set("config:model_price:SkingDDJ_v1", "3")
+    backend_utils.redis_conn.set("config:model_price:z_image", "2")
+
+    try:
+        # Test model_version only
+        response = client.get("/skin/api/generation_credit_cost?model_version=SkingDDJ_v1")
+        assert response.status_code == 200
+        assert response.json() == {"credits": 3}
+
+        # Test aux_model_version + model_version
+        response = client.get("/skin/api/generation_credit_cost?aux_model_version=z_image&model_version=SkingDDJ_v1")
+        assert response.status_code == 200
+        assert response.json() == {"credits": 5}
+    finally:
+        backend_utils.redis_conn.delete("config:model_price:SkingDDJ_v1")
+        backend_utils.redis_conn.delete("config:model_price:z_image")
+
 def test_get_active_generation_none(client, db):
     response = client.get("/skin/api/generate/active")
     assert response.status_code == 200

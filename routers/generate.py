@@ -209,15 +209,15 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
 
 @router.get("/generation_credit_cost")
 async def get_generation_credit_cost(
-    model_name: Optional[str] = Query(None),
+    model_version: Optional[str] = Query(None),
+    aux_model_version: Optional[str] = Query(None),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    if model_name:
-        if " + " in model_name:
-            parts = [p.strip() for p in model_name.split("+")]
-            total_cost = sum(backend_utils.get_model_credit_cost(p) for p in parts)
-            return {"credits": total_cost}
-        return {"credits": backend_utils.get_model_credit_cost(model_name)}
+    if model_version:
+        cost = backend_utils.get_model_credit_cost(model_version)
+        if aux_model_version:
+            cost += backend_utils.get_model_credit_cost(aux_model_version)
+        return {"credits": cost}
     return {"credits": backend_utils.get_generation_credit_cost()}
 
 
@@ -368,13 +368,9 @@ async def generate_image(
 
     # Quota Check
     if not current_user.is_admin:
-        if version and " + " in version:
-            parts = [p.strip() for p in version.split("+")]
-            generation_credit_cost = sum(backend_utils.get_model_credit_cost(p) for p in parts)
-        elif version:
-            generation_credit_cost = backend_utils.get_model_credit_cost(version)
-        else:
-            generation_credit_cost = backend_utils.get_generation_credit_cost()
+        generation_credit_cost = backend_utils.get_model_credit_cost(model_version)
+        if aux_model_version:
+            generation_credit_cost += backend_utils.get_model_credit_cost(aux_model_version)
         remaining = current_user.credits if current_user.credits is not None else 0
         if remaining < generation_credit_cost:
             raise HTTPException(status_code=403, detail="Insufficient credits")
