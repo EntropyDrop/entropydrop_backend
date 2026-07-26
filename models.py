@@ -80,6 +80,7 @@ class GenerationLog(Base):
     is_public = Column(Boolean, default=True, index=True)
     likes_count = Column(Integer, default=0)
     model_version = Column(String(50), nullable=True) # Large model version identifier
+    aux_model_version = Column(String(50), nullable=True) # Large model auxiliary/base version identifier
     parent = Column(String(16), index=True, nullable=True) # Parent log ID if derived from another item
     seed = Column(Integer, nullable=True)
     n_step = Column(Integer, nullable=True)

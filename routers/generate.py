@@ -65,7 +65,7 @@ def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, c
         raise Exception(f"Cannot enqueue image_to_skin for {log.id}: missing source image")
 
     kwargs = {
-        "model_version": log.model_version,
+        "model_version": f"{log.aux_model_version} + {log.model_version}" if log.aux_model_version else log.model_version,
         "seed": log.seed,
         "n_step": log.n_step,
         "guidance": log.guidance
@@ -92,10 +92,12 @@ def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, cont
     
     retry_policy = get_generation_retry_policy()
 
+    combined_version = f"{log.aux_model_version} + {log.model_version}" if log.aux_model_version else log.model_version
+
     if log.mode == "aigc_text_to_skin":
         q_t2i.enqueue(
             "worker_tasks.task_text_to_image",
-            args=(log.id, log.is_public, log.prompt, log.model_version, log.seed, log.n_step, log.guidance),
+            args=(log.id, log.is_public, log.prompt, combined_version, log.seed, log.n_step, log.guidance),
             job_timeout='120s',
             retry=retry_policy,
             result_ttl=10,
@@ -104,7 +106,7 @@ def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, cont
     elif log.mode == "aigc_image_edit_to_skin":
         q_edit.enqueue(
             "worker_tasks.task_image_edit",
-            args=(log.id, log.is_public, log.source, content_type, log.prompt, log.model_version, log.seed, log.n_step, log.guidance),
+            args=(log.id, log.is_public, log.source, content_type, log.prompt, combined_version, log.seed, log.n_step, log.guidance),
             job_timeout='120s',
             retry=retry_policy,
             result_ttl=10,
@@ -196,13 +198,11 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
     """
     Get the list of available models, grouped by generation mode
     """
-    loras = [f.replace(".safetensors", "") for f in AVAILABLE_IMAGE_TO_SKIN_MODELS]
-    loras.reverse()
     
     return {
         "text_to_image_models": AVAILABlE_TEXT_TO_IMAGE_MODELS,
         "image_edit_models": AVAILABLE_IMAGE_EDIT_MODELS,
-        "image_to_skin_models": loras
+        "image_to_skin_models": AVAILABLE_IMAGE_TO_SKIN_MODELS
     }
 
 
@@ -280,16 +280,12 @@ async def generate_image(
     if mode == "aigc_image_edit_to_skin" and not backend_utils.is_image_edit_to_skin_enabled():
         raise HTTPException(status_code=403, detail="Image edit to skin generation is temporarily under maintenance.")
 
-    # Model Version Validation
-    loras = [f.replace(".safetensors", "") for f in AVAILABLE_IMAGE_TO_SKIN_MODELS]
-    loras.reverse()
-
     if mode == "aigc_image_to_skin":
-        allowed_versions = loras
+        allowed_versions = AVAILABLE_IMAGE_TO_SKIN_MODELS
     elif mode == "aigc_text_to_skin":
-        allowed_versions = [f"{base} + {lora}" for base in AVAILABlE_TEXT_TO_IMAGE_MODELS for lora in loras]
+        allowed_versions = [f"{base} + {i2s_model}" for base in AVAILABlE_TEXT_TO_IMAGE_MODELS for i2s_model in AVAILABLE_IMAGE_TO_SKIN_MODELS]
     elif mode == "aigc_image_edit_to_skin":
-        allowed_versions = [f"{base} + {lora}" for base in AVAILABLE_IMAGE_EDIT_MODELS for lora in loras]
+        allowed_versions = [f"{base} + {i2s_model}" for base in AVAILABLE_IMAGE_EDIT_MODELS for i2s_model in AVAILABLE_IMAGE_TO_SKIN_MODELS]
     else:
         allowed_versions = []
 
@@ -399,6 +395,14 @@ async def generate_image(
             print(f"S3 upload error for {log_id}: {err_detail}")
             raise HTTPException(status_code=500, detail="Image upload failed, please try again later")
 
+    aux_model_version = None
+    clean_model_version = version
+    if version and " + " in version:
+        parts = [p.strip() for p in version.split("+")]
+        if len(parts) >= 2:
+            aux_model_version = parts[0]
+            clean_model_version = parts[1]
+
     log = models.GenerationLog(
         id=log_id,
         prompt=prompt,
@@ -406,7 +410,8 @@ async def generate_image(
         mode=mode,
         user_id=current_user.id,
         is_public=is_public,
-        model_version=version,
+        model_version=clean_model_version,
+        aux_model_version=aux_model_version,
         parent=parent,
         seed=seed,
         n_step=n_step,
@@ -651,7 +656,7 @@ async def get_history(
             "timestamp": log.created_at.replace(tzinfo=None).isoformat() + "Z",
             "likes_count": log.likes_count or 0,
             "is_liked": db.query(models.UserLike).filter(models.UserLike.user_id == current_user.id, models.UserLike.log_id == log.id).first() is not None,
-            "model_version": log.model_version,
+            "model_version": f"{log.aux_model_version} + {log.model_version}" if log.aux_model_version else log.model_version,
             "parent": log.parent,
             "seed": log.seed,
             "n_step": log.n_step,
@@ -925,7 +930,7 @@ async def get_log(
         "timestamp": log.created_at.replace(tzinfo=None).isoformat() + "Z",
         "likes_count": log.likes_count or 0,
         "is_liked": db.query(models.UserLike).filter(models.UserLike.user_id == current_user.id, models.UserLike.log_id == log.id).first() is not None if current_user else False,
-        "model_version": log.model_version,
+        "model_version": f"{log.aux_model_version} + {log.model_version}" if log.aux_model_version else log.model_version,
         "parent": log.parent,
         "seed": log.seed,
         "n_step": log.n_step,

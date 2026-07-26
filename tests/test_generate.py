@@ -526,7 +526,8 @@ def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
         mode="aigc_text_to_skin",
         status="pending_skin",
         edited_result="edited/recover.jpg",
-        model_version="z_image + sking_v73_flux_4b_000027000",
+        model_version="sking_v73_flux_4b_000027000",
+        aux_model_version="z_image",
         created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11),
     )
     db.add_all([user, log])
@@ -826,7 +827,8 @@ def test_generate_default_model_version(mock_enqueue, client, db):
     
     log = db.query(GenerationLog).filter(GenerationLog.id == data["id"]).first()
     assert log is not None
-    assert log.model_version == "z_image + sking_v73_flux_4b_000027000"
+    assert log.model_version == "SkingDDJ_v1"
+    assert log.aux_model_version == "z_image"
 
 
 @patch("routers.generate.backend_utils.is_text_to_skin_enabled", return_value=False)
