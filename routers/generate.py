@@ -65,7 +65,8 @@ def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, c
         raise Exception(f"Cannot enqueue image_to_skin for {log.id}: missing source image")
 
     kwargs = {
-        "model_version": f"{log.aux_model_version} + {log.model_version}" if log.aux_model_version else log.model_version,
+        "model_version": log.model_version,
+        "aux_model_version": log.aux_model_version,
         "seed": log.seed,
         "n_step": log.n_step,
         "guidance": log.guidance
@@ -92,12 +93,10 @@ def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, cont
     
     retry_policy = get_generation_retry_policy()
 
-    combined_version = f"{log.aux_model_version} + {log.model_version}" if log.aux_model_version else log.model_version
-
     if log.mode == "aigc_text_to_skin":
         q_t2i.enqueue(
             "worker_tasks.task_text_to_image",
-            args=(log.id, log.is_public, log.prompt, combined_version, log.seed, log.n_step, log.guidance),
+            args=(log.id, log.is_public, log.prompt, log.model_version, log.aux_model_version, log.seed, log.n_step, log.guidance),
             job_timeout='120s',
             retry=retry_policy,
             result_ttl=10,
@@ -106,7 +105,7 @@ def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, cont
     elif log.mode == "aigc_image_edit_to_skin":
         q_edit.enqueue(
             "worker_tasks.task_image_edit",
-            args=(log.id, log.is_public, log.source, content_type, log.prompt, combined_version, log.seed, log.n_step, log.guidance),
+            args=(log.id, log.is_public, log.source, content_type, log.prompt, log.model_version, log.aux_model_version, log.seed, log.n_step, log.guidance),
             job_timeout='120s',
             retry=retry_policy,
             result_ttl=10,
