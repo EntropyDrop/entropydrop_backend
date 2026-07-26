@@ -188,8 +188,8 @@ def display_log_name(log):
 ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
 
 AVAILABLE_IMAGE_TO_SKIN_MODELS = [
-    'SkingDDJ_v1',
     'sking_v73_flux_4b_000027000',
+    'SkingDDJ_v1',
 ]
 
 AVAILABlE_TEXT_TO_IMAGE_MODELS = [
