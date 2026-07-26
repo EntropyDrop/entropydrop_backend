@@ -60,8 +60,10 @@ def test_get_models(client):
     response = client.get("/skin/api/models")
     assert response.status_code == 200
     data = response.json()
-    assert "aigc_image_to_skin" in data
-    assert "sking_v73_flux_4b_000027000" in data["aigc_image_to_skin"]
+    assert "image_to_skin_models" in data
+    assert "sking_v73_flux_4b_000027000" in data["image_to_skin_models"]
+    assert "text_to_image_models" in data
+    assert "image_edit_models" in data
 
 
 @patch("routers.generate.backend_utils.get_generation_credit_cost", return_value=5)

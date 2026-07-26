@@ -446,12 +446,20 @@ async def set_generation_credit_cost_endpoint(
 async def get_model_prices_endpoint(
     admin: User = Depends(get_current_admin)
 ):
-    from routers.generate import AVAILABLE_MODELS
+    from routers.generate import (
+        AVAILABLE_IMAGE_TO_SKIN_MODELS,
+        AVAILABlE_TEXT_TO_IMAGE_MODELS,
+        AVAILABLE_IMAGE_EDIT_MODELS
+    )
     from backend_utils import get_model_credit_cost
     
-    cleaned_models = [m.replace(".safetensors", "") for m in AVAILABLE_MODELS]
+    all_models = (
+        [m.replace(".safetensors", "") for m in AVAILABLE_IMAGE_TO_SKIN_MODELS] +
+        AVAILABlE_TEXT_TO_IMAGE_MODELS +
+        AVAILABLE_IMAGE_EDIT_MODELS
+    )
     prices = {}
-    for m in cleaned_models:
+    for m in all_models:
         prices[m] = get_model_credit_cost(m)
     return prices
 

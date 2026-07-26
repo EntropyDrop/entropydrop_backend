@@ -200,17 +200,9 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
     loras.reverse()
     
     return {
-        "aigc_image_to_skin": loras,
-        "aigc_text_to_skin": [
-            f"{base} + {lora}"
-            for base in AVAILABlE_TEXT_TO_IMAGE_MODELS
-            for lora in loras
-        ],
-        "aigc_image_edit_to_skin": [
-            f"{base} + {lora}"
-            for base in AVAILABLE_IMAGE_EDIT_MODELS
-            for lora in loras
-        ]
+        "text_to_image_models": AVAILABlE_TEXT_TO_IMAGE_MODELS,
+        "image_edit_models": AVAILABLE_IMAGE_EDIT_MODELS,
+        "image_to_skin_models": loras
     }
 
 
@@ -220,6 +212,10 @@ async def get_generation_credit_cost(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     if model_name:
+        if " + " in model_name:
+            parts = [p.strip() for p in model_name.split("+")]
+            total_cost = sum(backend_utils.get_model_credit_cost(p) for p in parts)
+            return {"credits": total_cost}
         return {"credits": backend_utils.get_model_credit_cost(model_name)}
     return {"credits": backend_utils.get_generation_credit_cost()}
 
@@ -347,9 +343,11 @@ async def generate_image(
 
     # Quota Check
     if not current_user.is_admin:
-        matched_model = next((lora for lora in loras if version and lora in version), None)
-        if matched_model:
-            generation_credit_cost = backend_utils.get_model_credit_cost(matched_model)
+        if version and " + " in version:
+            parts = [p.strip() for p in version.split("+")]
+            generation_credit_cost = sum(backend_utils.get_model_credit_cost(p) for p in parts)
+        elif version:
+            generation_credit_cost = backend_utils.get_model_credit_cost(version)
         else:
             generation_credit_cost = backend_utils.get_generation_credit_cost()
         remaining = current_user.credits if current_user.credits is not None else 0

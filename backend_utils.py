@@ -69,7 +69,10 @@ def get_model_credit_cost(model_name: str) -> int:
             return max(0, int(val.decode("utf-8")))
     except Exception as e:
         print(f"Failed to read model credit cost for {model_name} from redis: {e}")
-    # Fallback to default cost
+    # Fallback: base models default to 0, skin models default to global cost
+    from routers.generate import AVAILABlE_TEXT_TO_IMAGE_MODELS, AVAILABLE_IMAGE_EDIT_MODELS
+    if model_name in AVAILABlE_TEXT_TO_IMAGE_MODELS or model_name in AVAILABLE_IMAGE_EDIT_MODELS:
+        return 0
     return get_generation_credit_cost()
 
 
