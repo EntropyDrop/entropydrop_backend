@@ -550,6 +550,7 @@ def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
         edited_result="edited/recover.jpg",
         model_version="sking_v73_flux_4b_000027000",
         aux_model_version="z_image",
+        recoverable=True,
         created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11),
     )
     db.add_all([user, log])
@@ -575,6 +576,7 @@ def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
 
     import rq.registry
 
+    FakeQueue.enqueued.clear()
     monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
     monkeypatch.setattr(routers.generate, "SessionLocal", lambda: db)
     monkeypatch.setattr(rq.registry, "StartedJobRegistry", FakeRegistry)
@@ -591,6 +593,55 @@ def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
     assert kwargs["args"][2] == "edited/recover.jpg"
     assert kwargs["kwargs"]["intermediate_filename"] == "edited/recover.jpg"
     assert kwargs["job_id"] == "generation_recover_log_image_to_skin"
+
+
+def test_re_enqueue_if_missing_ignores_unrecoverable(monkeypatch, db):
+    user = User(id="unrecover_user", email="unrecover@example.com", username="Unrecover")
+    log = GenerationLog(
+        id="unrecover_log",
+        prompt="unrecover",
+        user_id=user.id,
+        mode="aigc_text_to_skin",
+        status="pending_skin",
+        edited_result="edited/unrecover.jpg",
+        model_version="SkingDDJ_v1",
+        aux_model_version="z_image",
+        recoverable=False,
+        created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11),
+    )
+    db.add_all([user, log])
+    db.commit()
+
+    class FakeQueue:
+        enqueued = []
+
+        def __init__(self, name, connection=None):
+            self.name = name
+            self.jobs = []
+
+        def enqueue(self, *args, **kwargs):
+            self.enqueued.append((self.name, args, kwargs))
+            return object()
+
+    class FakeRegistry:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def get_job_ids(self):
+            return []
+
+    import rq.registry
+
+    FakeQueue.enqueued.clear()
+    monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
+    monkeypatch.setattr(routers.generate, "SessionLocal", lambda: db)
+    monkeypatch.setattr(rq.registry, "StartedJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "DeferredJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "ScheduledJobRegistry", FakeRegistry)
+
+    routers.generate.re_enqueue_if_missing()
+
+    assert len(FakeQueue.enqueued) == 0
 
 def test_get_log_not_found(client):
     response = client.get("/skin/api/logs/non_existent_id")

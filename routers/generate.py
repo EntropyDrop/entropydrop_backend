@@ -403,6 +403,7 @@ async def generate_image(
         is_public=is_public,
         model_version=model_version,
         aux_model_version=aux_model_version,
+        recoverable=(model_version == "sking_v73_flux_4b_000027000"),
         parent=parent,
         seed=seed,
         n_step=n_step,
@@ -1197,6 +1198,7 @@ def re_enqueue_if_missing():
         )
         stale_logs = db.query(models.GenerationLog).filter(
             models.GenerationLog.status.in_(RECOVERABLE_GENERATION_STATUSES),
+            models.GenerationLog.recoverable == True,
             models.GenerationLog.created_at < stale_before
         ).all()
         

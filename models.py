@@ -82,6 +82,7 @@ class GenerationLog(Base):
     model_version = Column(String(50), nullable=True) # Large model version identifier
     aux_model_version = Column(String(50), nullable=True) # Large model auxiliary/base version identifier
     parent = Column(String(16), index=True, nullable=True) # Parent log ID if derived from another item
+    recoverable = Column(Boolean, default=False, index=True, server_default="0")
     seed = Column(Integer, nullable=True)
     n_step = Column(Integer, nullable=True)
     guidance = Column(Float, nullable=True)
