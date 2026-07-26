@@ -225,3 +225,6 @@ __marimo__/
 
 # Local deployment scripts contain environment-specific infrastructure details.
 tools/
+
+# Node dependencies
+node_modules/
