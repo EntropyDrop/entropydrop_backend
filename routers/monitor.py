@@ -392,9 +392,6 @@ class DailyFreeCreditsRequest(BaseModel):
     credits: int
 
 
-class GenerationCreditCostRequest(BaseModel):
-    credits: int
-
 class SetModelPriceRequest(BaseModel):
     model_name: str
     credits: int
@@ -415,28 +412,6 @@ async def set_daily_free_credits_endpoint(
         raise HTTPException(status_code=400, detail="Credits cannot be negative")
     try:
         redis_conn.set("config:daily_free_credits", str(req.credits))
-        return {"credits": req.credits}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")
-
-
-@router.get("/generation_credit_cost")
-async def get_generation_credit_cost_endpoint(
-    admin: User = Depends(get_current_admin)
-):
-    from backend_utils import get_generation_credit_cost
-    return {"credits": get_generation_credit_cost()}
-
-
-@router.post("/generation_credit_cost")
-async def set_generation_credit_cost_endpoint(
-    req: GenerationCreditCostRequest,
-    admin: User = Depends(get_current_admin)
-):
-    if req.credits < 0:
-        raise HTTPException(status_code=400, detail="Credits cannot be negative")
-    try:
-        redis_conn.set("config:generation_credit_cost", str(req.credits))
         return {"credits": req.credits}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")
@@ -633,3 +608,121 @@ async def gift_credits_to_seven_day_active_users(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error during gifting: {e}")
+
+
+class GiftSpecificUserRequest(BaseModel):
+    email: str
+    amount: int
+    message: str
+
+
+@router.post("/gift_specific_user")
+async def gift_credits_to_specific_user(
+    req: GiftSpecificUserRequest,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="Message is required")
+    if not req.email.strip():
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    target_email = req.email.strip().lower()
+    user = db.query(User).filter(func.lower(User.email) == target_email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User with email {req.email} not found")
+
+    try:
+        user.credits = (user.credits or 0) + req.amount
+
+        # Generate a new CreditLog
+        gift_log = CreditLog(
+            user_id=user.id,
+            amount=req.amount,
+            action="system_gift",
+            source=req.message.strip()
+        )
+        db.add(gift_log)
+        db.flush() # Flush to get gift_log.id
+
+        # Create system_gift ForumNotification
+        notif = ForumNotification(
+            user_id=user.id,
+            sender_id=None,
+            type="system_gift",
+            post_id=gift_log.id,
+            comment_id=str(req.amount),
+            is_read=False
+        )
+        db.add(notif)
+        
+        db.commit()
+        return {
+            "status": "success",
+            "user_id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "new_credits": user.credits,
+            "message": f"Successfully gifted {req.amount} credits to user {user.username} ({user.email})"
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error during gifting: {e}")
+
+
+
+@router.get("/sking_ddj_generations")
+async def get_sking_ddj_generations(
+    page: int = 1,
+    page_size: int = 10,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 10
+    elif page_size > 100:
+        page_size = 100
+
+    offset = (page - 1) * page_size
+
+    # Query logs where model_version starts with "SKING_DDJ" and is_deleted is False
+    query = db.query(GenerationLog).filter(
+        GenerationLog.model_version.like("SKING_DDJ%"),
+        GenerationLog.is_deleted == False
+    )
+
+    total_count = query.count()
+
+    results = query.order_by(
+        GenerationLog.created_at.desc()
+    ).offset(offset).limit(page_size).all()
+
+    items = []
+    for log in results:
+        items.append({
+            "id": log.id,
+            "prompt": log.prompt,
+            "mode": log.mode,
+            "status": log.status,
+            "model_version": log.model_version,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+            "source_url": log.source_url if log.source else None,
+            "edited_image_url": log.edited_image_url if log.edited_result else None,
+            "result_url": log.result_url if log.result else None,
+        })
+
+    total_pages = math.ceil(total_count / page_size) if total_count > 0 else 1
+
+    return {
+        "items": items,
+        "total_count": total_count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages
+    }
+

@@ -310,43 +310,6 @@ def test_daily_free_credits_endpoints(client, db):
     app.dependency_overrides.clear()
 
 
-def test_generation_credit_cost_endpoints(client, db):
-    admin_user = models.User(
-        id="ADMIN_GEN_COST_001",
-        email="admin-generation-cost@entropydrop.com",
-        username="AdminGenerationCost",
-    )
-    db.add(admin_user)
-    db.commit()
-
-    response = client.get("/skin/api/monitor/generation_credit_cost")
-    assert response.status_code in (401, 403)
-
-    response = client.post("/skin/api/monitor/generation_credit_cost", json={"credits": 4})
-    assert response.status_code in (401, 403)
-
-    app.dependency_overrides[get_current_admin] = lambda: admin_user
-
-    response = client.get("/skin/api/monitor/generation_credit_cost")
-    assert response.status_code == 200
-    assert response.json() == {"credits": 1}
-
-    response = client.post("/skin/api/monitor/generation_credit_cost", json={"credits": 4})
-    assert response.status_code == 200
-    assert response.json() == {"credits": 4}
-
-    response = client.get("/skin/api/monitor/generation_credit_cost")
-    assert response.status_code == 200
-    assert response.json() == {"credits": 4}
-
-    response = client.post("/skin/api/monitor/generation_credit_cost", json={"credits": -1})
-    assert response.status_code == 400
-
-    response = client.post("/skin/api/monitor/generation_credit_cost", json={"credits": 1})
-    assert response.status_code == 200
-
-    app.dependency_overrides.clear()
-
 
 @patch("routers.generate.BackgroundTasks.add_task")
 def test_delete_user_by_email_admin_success(mock_add_task, client, db):
@@ -619,3 +582,175 @@ def test_gift_credits_to_seven_day_active_users_success(client, db):
 
     # Clean up
     app.dependency_overrides.clear()
+
+
+def test_get_sking_ddj_generations(client, db):
+    # 1. Test unauthorized access
+    response = client.get("/skin/api/monitor/sking_ddj_generations")
+    assert response.status_code in (401, 403)
+
+    # 2. Setup mock admin user
+    admin_user = models.User(
+        id="ADMIN_DDJ_TEST",
+        email="admin-ddj@entropydrop.com",
+        username="DdjAdmin",
+    )
+    db.add(admin_user)
+
+    # 3. Create mock generation logs
+    logs = [
+        models.GenerationLog(
+            id="LOG_DDJ_001",
+            prompt="Prompt 1",
+            mode="aigc_image_to_skin",
+            status="success",
+            model_version="SKING_DDJ_v54",
+            source="source/img1.png",
+            edited_result="edited/img1.png",
+            result="result/img1.png",
+            is_deleted=False,
+            created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=10)
+        ),
+        models.GenerationLog(
+            id="LOG_DDJ_002",
+            prompt="Prompt 2",
+            mode="aigc_image_to_skin",
+            status="failed",
+            model_version="SKING_DDJ_v54",
+            source="source/img2.png",
+            edited_result=None,
+            result=None,
+            is_deleted=False,
+            created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=5)
+        ),
+        models.GenerationLog(
+            id="LOG_DDJ_003",
+            prompt="Prompt 3",
+            mode="aigc_text_to_image",
+            status="success",
+            model_version="sking_v73_flux_4b_000027000",
+            source="source/img3.png",
+            result="result/img3.png",
+            is_deleted=False,
+            created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=2)
+        ),
+        models.GenerationLog(
+            id="LOG_DDJ_004",
+            prompt="Prompt 4",
+            mode="aigc_image_to_skin",
+            status="success",
+            model_version="SKING_DDJ_v54",
+            source="source/img4.png",
+            edited_result="edited/img4.png",
+            result="result/img4.png",
+            is_deleted=True,
+            created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)
+        )
+    ]
+    db.add_all(logs)
+    db.commit()
+
+    # 4. Mock admin override
+    app.dependency_overrides[get_current_admin] = lambda: admin_user
+
+    try:
+        # 5. Fetch first page
+        response = client.get("/skin/api/monitor/sking_ddj_generations?page=1&page_size=1")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_count"] == 2
+        assert len(data["items"]) == 1
+        assert data["items"][0]["id"] == "LOG_DDJ_002"
+        assert data["items"][0]["status"] == "failed"
+        assert data["items"][0]["source_url"] is not None
+        assert data["items"][0]["edited_image_url"] is None
+
+        # 6. Fetch second page
+        response = client.get("/skin/api/monitor/sking_ddj_generations?page=2&page_size=1")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["items"]) == 1
+        assert data["items"][0]["id"] == "LOG_DDJ_001"
+        assert data["items"][0]["edited_image_url"] is not None
+
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_gift_specific_user(client, db):
+    # 1. Test unauthorized access
+    response = client.post("/skin/api/monitor/gift_specific_user", json={
+        "email": "test-gift@entropydrop.com",
+        "amount": 25,
+        "message": "Compensation"
+    })
+    assert response.status_code in (401, 403)
+
+    # 2. Setup mock admin and target user
+    admin_user = models.User(
+        id="ADMIN_GIFT_001",
+        email="admin-gift@entropydrop.com",
+        username="GiftAdmin",
+    )
+    target_user = models.User(
+        id="TARGET_USER_GIFT",
+        email="target-gift@entropydrop.com",
+        username="GiftReceiver",
+        credits=50
+    )
+    db.add_all([admin_user, target_user])
+    db.commit()
+
+    # 3. Mock admin override
+    app.dependency_overrides[get_current_admin] = lambda: admin_user
+
+    try:
+        # 4. Test non-existent user
+        response = client.post("/skin/api/monitor/gift_specific_user", json={
+            "email": "nonexistent@entropydrop.com",
+            "amount": 25,
+            "message": "Compensation"
+        })
+        assert response.status_code == 404
+
+        # 5. Test invalid parameters
+        response = client.post("/skin/api/monitor/gift_specific_user", json={
+            "email": "target-gift@entropydrop.com",
+            "amount": -5,
+            "message": "Compensation"
+        })
+        assert response.status_code == 400
+
+        # 6. Test successful gifting
+        response = client.post("/skin/api/monitor/gift_specific_user", json={
+            "email": "TARGET-GIFT@entropydrop.com",
+            "amount": 30,
+            "message": "Special Gift Compensation"
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["email"] == "target-gift@entropydrop.com"
+        assert data["new_credits"] == 80
+
+        # Verify database state
+        db.refresh(target_user)
+        assert target_user.credits == 80
+
+        # Verify CreditLog
+        credit_logs = db.query(models.CreditLog).filter(models.CreditLog.user_id == target_user.id).all()
+        assert len(credit_logs) == 1
+        assert credit_logs[0].amount == 30
+        assert credit_logs[0].action == "system_gift"
+        assert credit_logs[0].source == "Special Gift Compensation"
+
+        # Verify ForumNotification
+        notifs = db.query(models.ForumNotification).filter(models.ForumNotification.user_id == target_user.id).all()
+        assert len(notifs) == 1
+        assert notifs[0].type == "system_gift"
+        assert notifs[0].comment_id == "30"
+
+    finally:
+        app.dependency_overrides.clear()
+
+

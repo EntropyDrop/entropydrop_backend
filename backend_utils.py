@@ -53,12 +53,6 @@ def get_daily_free_credits():
 
 
 def get_generation_credit_cost():
-    try:
-        val = redis_conn.get("config:generation_credit_cost")
-        if val is not None:
-            return max(0, int(val.decode("utf-8")))
-    except Exception as e:
-        print(f"Failed to read generation credit cost config from redis: {e}")
     return 1
 
 
