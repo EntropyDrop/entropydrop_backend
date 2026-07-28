@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, BackgroundTasks, Query, Response
 import io
 import json
 import os
@@ -941,10 +941,10 @@ async def start_discovery_cache_job():
         await asyncio.sleep(300)
 
 @router.get("/discovery")
-async def get_discovery_logs(
-    db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(auth.get_current_user_optional)
-):
+async def get_discovery_logs(response: Response):
+    response.headers["Cache-Control"] = (
+        "public, max-age=60, s-maxage=300, stale-while-revalidate=600"
+    )
     return get_discovery_cache_items()
 
 from fastapi import Request

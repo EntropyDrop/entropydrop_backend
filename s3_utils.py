@@ -76,6 +76,7 @@ def upload_to_s3(file_content: bytes, key: str, is_public: bool, content_type: s
     }
     if is_public:
         upload_args["ACL"] = 'public-read'
+        upload_args["CacheControl"] = "public, max-age=31536000, immutable"
     
     s3_client.put_object(**upload_args)
     

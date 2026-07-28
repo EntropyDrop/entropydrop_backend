@@ -115,6 +115,7 @@ def test_unfinished_logs_admin_success(client, db):
         prompt="Failed skin",
         mode="aigc_text_to_image",
         status="failed",
+        error_msg="Test failure details",
         user_id="USER000000000001",
         created_at=now - datetime.timedelta(minutes=1)
     )
@@ -149,6 +150,7 @@ def test_unfinished_logs_admin_success(client, db):
 
     # Verify status fields
     assert items[0]["status"] == "failed"
+    assert items[0]["error_msg"] == "Test failure details"
     assert items[1]["status"] == "processing_skin"
     assert items[2]["status"] == "pending"
 

@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 import asyncio
 import logging
 import os
@@ -124,6 +125,7 @@ app.add_middleware(
 )
 
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
 
 
 

@@ -936,7 +936,14 @@ def test_upload_to_s3_public(mock_settings, mock_s3_client):
     from s3_utils import upload_to_s3
     res = upload_to_s3(b"data", "key", is_public=True)
     assert res == "key"
-    mock_s3_client.put_object.assert_called_once()
+    mock_s3_client.put_object.assert_called_once_with(
+        Bucket="pub-bucket",
+        Key="key",
+        Body=b"data",
+        ContentType="image/png",
+        ACL="public-read",
+        CacheControl="public, max-age=31536000, immutable",
+    )
 
 @patch("s3_utils.s3_client")
 @patch("s3_utils.settings")
@@ -947,7 +954,12 @@ def test_upload_to_s3_private(mock_settings, mock_s3_client):
     from s3_utils import upload_to_s3
     res = upload_to_s3(b"data", "key", is_public=False)
     assert res == "key"
-    mock_s3_client.put_object.assert_called_once()
+    mock_s3_client.put_object.assert_called_once_with(
+        Bucket="priv-bucket",
+        Key="key",
+        Body=b"data",
+        ContentType="image/png",
+    )
 
 # test_process_generation_no_images_fail is removed as process_generation is no longer in routers/generate.py
 
@@ -966,6 +978,8 @@ def test_get_discovery_random(client, db):
 
     response = client.get("/skin/api/discovery")
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=60, s-maxage=300, stale-while-revalidate=600"
+    assert response.headers["content-encoding"] == "gzip"
     data = response.json()
     assert len(data) >= 3
     assert "creator" in data[0]
