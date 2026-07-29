@@ -762,6 +762,38 @@ def test_generate_queue_limit_counts_pending_skin(mock_enqueue, client, db):
     mock_enqueue.assert_not_called()
 
 
+def test_enqueue_image_to_skin_disables_rq_timeout(monkeypatch):
+    enqueued = []
+
+    class FakeQueue:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def enqueue(self, *args, **kwargs):
+            enqueued.append((self.name, args, kwargs))
+            return object()
+
+    monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
+    log = GenerationLog(
+        id="no_timeout",
+        prompt="retry S3 forever",
+        mode="aigc_image_to_skin",
+        status="pending",
+        source="uploads/no_timeout.png",
+        model_version="sking_v73_flux_4b_000027000",
+        recoverable=True,
+        is_public=True,
+    )
+
+    routers.generate.enqueue_image_to_skin_task(log, False)
+
+    assert len(enqueued) == 1
+    queue_name, args, kwargs = enqueued[0]
+    assert queue_name == "queue_image_to_skin"
+    assert args[0] == "worker_tasks.task_image_to_skin"
+    assert kwargs["job_timeout"] == -1
+
+
 def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
     user = User(id="recover_user", email="recover@example.com", username="Recover")
     log = GenerationLog(
@@ -815,6 +847,7 @@ def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
     assert kwargs["args"][0] == "recover_log"
     assert kwargs["args"][2] == "edited/recover.jpg"
     assert kwargs["kwargs"]["intermediate_filename"] == "edited/recover.jpg"
+    assert kwargs["job_timeout"] == -1
     assert kwargs["job_id"] == "generation_recover_log_image_to_skin"
 
 

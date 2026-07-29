@@ -48,6 +48,10 @@ RENDER_TO_UV_JOB_TIMEOUT_SECONDS = int(
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
 RESULT_PROCESSING_QUEUE_KEY = os.getenv("GENERATE_RESULT_PROCESSING_QUEUE_KEY", "generate_results_processing")
 GENERATION_RECOVERY_MIN_AGE_SECONDS = int(os.getenv("GENERATION_RECOVERY_MIN_AGE_SECONDS", "300"))
+# image_to_skin performs its own infinite S3 failover/retry loop. RQ's
+# timeout must therefore be disabled, otherwise it interrupts that loop and
+# advances the worker to the next queued job while S3 is temporarily down.
+IMAGE_TO_SKIN_JOB_TIMEOUT = -1
 
 import random
 import time
@@ -113,7 +117,7 @@ def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, c
         "worker_tasks.task_image_to_skin",
         args=(log.id, log.is_public, source, skin_content_type, log.prompt),
         kwargs=kwargs,
-        job_timeout='120s',
+        job_timeout=IMAGE_TO_SKIN_JOB_TIMEOUT,
         retry=retry_policy,
         result_ttl=10,
         job_id=make_generation_job_id(log.id, "image_to_skin")
