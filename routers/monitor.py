@@ -333,7 +333,8 @@ async def admin_delete_log(
         files_to_delete.append((log.edited_result, log.is_public))
 
     # 2. Trigger background cleaning task
-    from routers.generate import delete_s3_files_task
+    from routers.generate import cancel_generation_jobs, delete_s3_files_task
+    cancel_generation_jobs(log.id)
     if files_to_delete:
         background_tasks.add_task(delete_s3_files_task, files_to_delete)
 
@@ -479,8 +480,10 @@ async def admin_delete_user_by_email(
     logs = db.query(GenerationLog).filter(GenerationLog.user_id == user_id).all()
     log_ids = [log.id for log in logs]
     
+    from routers.generate import cancel_generation_jobs
     files_to_delete = []
     for log in logs:
+        cancel_generation_jobs(log.id)
         if log.source:
             files_to_delete.append((log.source, log.is_public))
         if log.result:
@@ -731,4 +734,3 @@ async def get_sking_ddj_generations(
         "page_size": page_size,
         "total_pages": total_pages
     }
-

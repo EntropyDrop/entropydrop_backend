@@ -181,8 +181,14 @@ def test_unfinished_logs_admin_success(client, db):
     app.dependency_overrides.clear()
 
 
+@patch("routers.generate.cancel_generation_jobs")
 @patch("routers.generate.BackgroundTasks.add_task")
-def test_delete_log_admin_success(mock_add_task, client, db):
+def test_delete_log_admin_success(
+    mock_add_task,
+    mock_cancel_jobs,
+    client,
+    db,
+):
     # 1. Create mock admin user
     admin_user = models.User(
         id="ADMIN_DEL_000001",
@@ -249,6 +255,7 @@ def test_delete_log_admin_success(mock_add_task, client, db):
     assert log.status == "deleted"
     assert log.source is None
     assert log.result is None
+    mock_cancel_jobs.assert_called_once_with(log.id)
 
     # 8. Verify S3 cleanup background task was scheduled
     mock_add_task.assert_called_once()
@@ -758,5 +765,4 @@ def test_gift_specific_user(client, db):
 
     finally:
         app.dependency_overrides.clear()
-
 

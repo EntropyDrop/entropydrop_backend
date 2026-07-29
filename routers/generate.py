@@ -15,7 +15,8 @@ import backend_utils
 from config import settings
 from redis import Redis
 from rq import Queue, Retry
-from rq.job import Callback
+from rq.exceptions import InvalidJobOperation, NoSuchJobError
+from rq.job import Callback, Job
 import httpx
 from rate_limit import limiter
 
@@ -48,6 +49,9 @@ RENDER_TO_UV_JOB_TIMEOUT_SECONDS = int(
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
 RESULT_PROCESSING_QUEUE_KEY = os.getenv("GENERATE_RESULT_PROCESSING_QUEUE_KEY", "generate_results_processing")
 GENERATION_RECOVERY_MIN_AGE_SECONDS = int(os.getenv("GENERATION_RECOVERY_MIN_AGE_SECONDS", "300"))
+GENERATION_CANCELLATION_TTL_SECONDS = int(
+    os.getenv("GENERATION_CANCELLATION_TTL_SECONDS", str(7 * 24 * 3600))
+)
 # image_to_skin performs its own infinite S3 failover/retry loop. RQ's
 # timeout must therefore be disabled, otherwise it interrupts that loop and
 # advances the worker to the next queued job while S3 is temporarily down.
@@ -60,6 +64,68 @@ from database import SessionLocal
 
 def make_generation_job_id(log_id: str, stage: str) -> str:
     return f"generation_{log_id}_{stage}"
+
+
+def generation_cancellation_key(log_id: str) -> str:
+    return f"generation:cancelled:{log_id}"
+
+
+def cancel_generation_jobs(log_id: str) -> list[str]:
+    """Stop queued retries and signal an in-flight GPU task to exit safely."""
+    try:
+        redis_conn.set(
+            generation_cancellation_key(log_id),
+            "1",
+            ex=GENERATION_CANCELLATION_TTL_SECONDS,
+        )
+    except Exception as exc:
+        print(f"[!] Failed to mark generation {log_id} as cancelled: {exc}")
+
+    job_ids = {
+        make_generation_job_id(log_id, stage)
+        for stage in (
+            "text_to_image",
+            "image_edit",
+            "image_to_skin",
+            "real_to_render",
+            "render_to_uv",
+        )
+    }
+
+    # Provider polling uses numbered job IDs, so discover any outstanding
+    # poll jobs belonging to this generation as well.
+    try:
+        redis_prefix = "rq:job:"
+        for raw_key in redis_conn.scan_iter(
+            match=f"{redis_prefix}real_to_render_poll_{log_id}_*"
+        ):
+            key = (
+                raw_key.decode("utf-8")
+                if isinstance(raw_key, bytes)
+                else str(raw_key)
+            )
+            if key.startswith(redis_prefix):
+                job_ids.add(key[len(redis_prefix):])
+    except Exception as exc:
+        print(f"[!] Failed to discover poll jobs for generation {log_id}: {exc}")
+
+    cancelled = []
+    for job_id in sorted(job_ids):
+        try:
+            job = Job.fetch(job_id, connection=redis_conn)
+            job.cancel()
+            cancelled.append(job_id)
+        except NoSuchJobError:
+            continue
+        except InvalidJobOperation:
+            # Already cancelled is the desired state.
+            continue
+        except Exception as exc:
+            print(f"[!] Failed to cancel RQ job {job_id}: {exc}")
+
+    if cancelled:
+        print(f"[*] Cancelled generation jobs for {log_id}: {cancelled}")
+    return cancelled
 
 
 def get_generation_retry_policy() -> Retry:
@@ -1206,6 +1272,10 @@ async def delete_log(
         redis_conn.incr(day_key)
         if not count:
             redis_conn.expire(day_key, 2 * 24 * 3600)
+
+    # Signal an in-flight worker first and remove queued/scheduled retries
+    # before deleting the task's source objects.
+    cancel_generation_jobs(log.id)
         
     # 1. Collect S3 files that need cleaning
     files_to_delete = []

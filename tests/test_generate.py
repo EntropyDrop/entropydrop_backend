@@ -586,8 +586,9 @@ def test_get_log_private_owner(mock_presigned, mock_cdn, client, db):
     assert response.status_code == 200
     assert response.json()["prompt"] == "private_log"
 
+@patch("routers.generate.cancel_generation_jobs")
 @patch("routers.generate.BackgroundTasks.add_task")
-def test_delete_log(mock_add_task, client, db):
+def test_delete_log(mock_add_task, mock_cancel_jobs, client, db):
     log = GenerationLog(
         prompt="to_delete", 
         user_id="test_user_generate", 
@@ -611,6 +612,7 @@ def test_delete_log(mock_add_task, client, db):
     assert log.status == "deleted"
     assert log.source is None
     assert log.result is None
+    mock_cancel_jobs.assert_called_once_with(log.id)
 
     # Verify S3 cleanup background task triggered
     mock_add_task.assert_called_once()
@@ -792,6 +794,66 @@ def test_enqueue_image_to_skin_disables_rq_timeout(monkeypatch):
     assert queue_name == "queue_image_to_skin"
     assert args[0] == "worker_tasks.task_image_to_skin"
     assert kwargs["job_timeout"] == -1
+
+
+def test_cancel_generation_jobs_sets_tombstone_and_cancels_all_job_types(
+    monkeypatch,
+):
+    log_id = "cancel_all_jobs"
+    set_calls = []
+    fetched_job_ids = []
+    cancelled_job_ids = []
+
+    class FakeRedisConnection:
+        def set(self, key, value, ex=None):
+            set_calls.append((key, value, ex))
+            return True
+
+        def scan_iter(self, match):
+            assert match == f"rq:job:real_to_render_poll_{log_id}_*"
+            return [
+                f"rq:job:real_to_render_poll_{log_id}_3".encode("utf-8")
+            ]
+
+    existing_job_ids = {
+        f"generation_{log_id}_image_to_skin",
+        f"generation_{log_id}_real_to_render",
+        f"real_to_render_poll_{log_id}_3",
+    }
+
+    class FakeJob:
+        def __init__(self, job_id):
+            self.id = job_id
+
+        @classmethod
+        def fetch(cls, job_id, connection):
+            assert connection is fake_redis
+            fetched_job_ids.append(job_id)
+            if job_id not in existing_job_ids:
+                from rq.exceptions import NoSuchJobError
+                raise NoSuchJobError
+            return cls(job_id)
+
+        def cancel(self):
+            cancelled_job_ids.append(self.id)
+
+    fake_redis = FakeRedisConnection()
+    monkeypatch.setattr(routers.generate, "redis_conn", fake_redis)
+    monkeypatch.setattr(routers.generate, "Job", FakeJob)
+
+    cancelled = routers.generate.cancel_generation_jobs(log_id)
+
+    assert set_calls == [
+        (
+            routers.generate.generation_cancellation_key(log_id),
+            "1",
+            routers.generate.GENERATION_CANCELLATION_TTL_SECONDS,
+        )
+    ]
+    assert set(cancelled) == existing_job_ids
+    assert set(cancelled_job_ids) == existing_job_ids
+    assert f"generation_{log_id}_text_to_image" in fetched_job_ids
+    assert f"generation_{log_id}_render_to_uv" in fetched_job_ids
 
 
 def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
