@@ -818,16 +818,22 @@ def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
     assert kwargs["job_id"] == "generation_recover_log_image_to_skin"
 
 
-def test_re_enqueue_if_missing_ignores_unrecoverable(monkeypatch, db):
+@pytest.mark.parametrize("status", ["pending_skin", "processing_skin"])
+def test_re_enqueue_if_missing_recovers_dense_uv_second_stage(
+    monkeypatch,
+    db,
+    status,
+):
     user = User(id="unrecover_user", email="unrecover@example.com", username="Unrecover")
     log = GenerationLog(
         id="unrecover_log",
         prompt="unrecover",
         user_id=user.id,
-        mode="aigc_text_to_skin",
-        status="pending_skin",
-        edited_result="edited/unrecover.jpg",
+        mode="aigc_image_to_skin",
+        status=status,
+        edited_result="real_to_render_intermediate/unrecover.png",
         model_version="SKING_DDJ_v54",
+        pipeline_version="dense-pipeline-v1",
         aux_model_version="z_image",
         recoverable=False,
         created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11),
@@ -864,7 +870,135 @@ def test_re_enqueue_if_missing_ignores_unrecoverable(monkeypatch, db):
 
     routers.generate.re_enqueue_if_missing()
 
-    assert len(FakeQueue.enqueued) == 0
+    assert len(FakeQueue.enqueued) == 1
+    queue_name, args, kwargs = FakeQueue.enqueued[0]
+    assert queue_name == "queue_render_to_uv"
+    assert args[0] == "worker_tasks.task_render_to_uv"
+    assert kwargs["args"] == (
+        "unrecover_log",
+        True,
+        "real_to_render_intermediate/unrecover.png",
+        "image/png",
+        "dense-pipeline-v1",
+    )
+    assert kwargs["job_timeout"] == 120
+    assert kwargs["retry"] is None
+    assert kwargs["job_id"] == "generation_unrecover_log_render_to_uv"
+
+
+def test_re_enqueue_if_missing_does_not_resubmit_dense_uv_stage_one(
+    monkeypatch,
+    db,
+):
+    log = GenerationLog(
+        id="dense_stage_one",
+        prompt="do not resubmit",
+        user_id="test_user_generate",
+        mode="aigc_image_to_skin",
+        status="processing",
+        model_version="SKING_DDJ_v54",
+        provider_task_id="provider-task",
+        recoverable=False,
+        created_at=(
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=11)
+        ),
+    )
+    db.add(log)
+    db.commit()
+
+    class FakeQueue:
+        enqueued = []
+
+        def __init__(self, name, connection=None):
+            self.name = name
+            self.jobs = []
+
+        def enqueue(self, *args, **kwargs):
+            self.enqueued.append((self.name, args, kwargs))
+            return object()
+
+    class FakeRegistry:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def get_job_ids(self):
+            return []
+
+    import rq.registry
+
+    FakeQueue.enqueued.clear()
+    monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
+    monkeypatch.setattr(routers.generate, "SessionLocal", lambda: db)
+    monkeypatch.setattr(rq.registry, "StartedJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "DeferredJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "ScheduledJobRegistry", FakeRegistry)
+
+    routers.generate.re_enqueue_if_missing()
+
+    assert FakeQueue.enqueued == []
+
+
+def test_re_enqueue_if_missing_does_not_duplicate_active_dense_uv_job(
+    monkeypatch,
+    db,
+):
+    log = GenerationLog(
+        id="dense_active",
+        prompt="already queued",
+        user_id="test_user_generate",
+        mode="aigc_image_to_skin",
+        status="pending_skin",
+        edited_result="real_to_render_intermediate/dense_active.png",
+        model_version="SKING_DDJ_v54",
+        pipeline_version="dense-pipeline-v1",
+        recoverable=False,
+        created_at=(
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=11)
+        ),
+    )
+    db.add(log)
+    db.commit()
+
+    class ActiveJob:
+        args = ("dense_active",)
+
+    class FakeQueue:
+        enqueued = []
+
+        def __init__(self, name, connection=None):
+            self.name = name
+            self.jobs = (
+                [ActiveJob()]
+                if name == "queue_render_to_uv"
+                else []
+            )
+
+        def enqueue(self, *args, **kwargs):
+            self.enqueued.append((self.name, args, kwargs))
+            return object()
+
+    class FakeRegistry:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def get_job_ids(self):
+            return []
+
+    import rq.registry
+
+    FakeQueue.enqueued.clear()
+    monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
+    monkeypatch.setattr(routers.generate, "SessionLocal", lambda: db)
+    monkeypatch.setattr(rq.registry, "StartedJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "DeferredJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "ScheduledJobRegistry", FakeRegistry)
+
+    routers.generate.re_enqueue_if_missing()
+
+    assert FakeQueue.enqueued == []
+
 
 def test_get_log_not_found(client):
     response = client.get("/skin/api/logs/non_existent_id")

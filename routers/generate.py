@@ -4,6 +4,7 @@ import json
 import os
 from PIL import Image
 from typing import Optional
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 import models
 import schemas
@@ -37,6 +38,13 @@ TWO_STAGE_GENERATION_MODES = {
 }
 LEGACY_SKIN_MODEL_VERSION = "sking_v73_flux_4b_000027000"
 DENSE_UV_MODEL_VERSION = "SKING_DDJ_v54"
+DENSE_UV_PIPELINE_VERSION = os.getenv(
+    "DENSE_UV_PIPELINE_VERSION",
+    "real2render-t41-t51-t52-sking-ddj-v54-v1",
+)
+RENDER_TO_UV_JOB_TIMEOUT_SECONDS = int(
+    os.getenv("RENDER_TO_UV_JOB_TIMEOUT_SECONDS", "120")
+)
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
 RESULT_PROCESSING_QUEUE_KEY = os.getenv("GENERATE_RESULT_PROCESSING_QUEUE_KEY", "generate_results_processing")
 GENERATION_RECOVERY_MIN_AGE_SECONDS = int(os.getenv("GENERATION_RECOVERY_MIN_AGE_SECONDS", "300"))
@@ -55,7 +63,7 @@ def get_generation_retry_policy() -> Retry:
 
 
 def get_generation_retry_policy_for_log(log: models.GenerationLog) -> Optional[Retry]:
-    """RQ retries and DB recovery are the same product policy."""
+    """Return the ordinary RQ retry policy for a generation."""
     if not log.recoverable:
         return None
     return get_generation_retry_policy()
@@ -151,6 +159,50 @@ def enqueue_real_to_render_task(
         result_ttl=10,
         failure_ttl=86400,
         job_id=make_generation_job_id(log.id, "real_to_render"),
+    )
+
+
+def enqueue_render_to_uv_task(
+    log: models.GenerationLog,
+    is_pro_active: bool,
+):
+    """Resume Dense UV from the persisted stage-1 image without resubmitting."""
+    if not uses_real_to_render_pipeline(log):
+        raise ValueError(
+            f"Generation {log.id} is not a {DENSE_UV_MODEL_VERSION} "
+            "image-to-skin task"
+        )
+    if not log.edited_result:
+        raise ValueError(
+            f"Cannot recover render_to_uv for {log.id}: "
+            "missing edited_result"
+        )
+
+    pipeline_version = (
+        log.pipeline_version or DENSE_UV_PIPELINE_VERSION
+    )
+    if not log.pipeline_version:
+        log.pipeline_version = pipeline_version
+
+    prefix = "high_" if is_pro_active else ""
+    queue = Queue(
+        f"{prefix}queue_render_to_uv",
+        connection=redis_conn,
+    )
+    return queue.enqueue(
+        "worker_tasks.task_render_to_uv",
+        args=(
+            log.id,
+            log.is_public,
+            log.edited_result,
+            "image/png",
+            pipeline_version,
+        ),
+        job_timeout=RENDER_TO_UV_JOB_TIMEOUT_SECONDS,
+        retry=None,
+        result_ttl=60,
+        failure_ttl=86400,
+        job_id=make_generation_job_id(log.id, "render_to_uv"),
     )
 
 
@@ -1332,6 +1384,8 @@ def collect_active_generation_log_ids(queues, registry_classes, job_class):
 
 def enqueue_recovered_generation_task(log: models.GenerationLog, is_pro_active: bool):
     if log.status in SECOND_STAGE_STATUSES:
+        if uses_real_to_render_pipeline(log):
+            return enqueue_render_to_uv_task(log, is_pro_active)
         if uses_image_to_skin_intermediate(log) and log.edited_result:
             return enqueue_image_to_skin_task(log, is_pro_active, "image/jpeg")
         if log.mode == "aigc_image_to_skin" and log.source:
@@ -1355,10 +1409,18 @@ def re_enqueue_if_missing():
             datetime.datetime.now(datetime.timezone.utc)
             - datetime.timedelta(seconds=GENERATION_RECOVERY_MIN_AGE_SECONDS)
         )
+        dense_uv_second_stage = and_(
+            models.GenerationLog.model_version == DENSE_UV_MODEL_VERSION,
+            models.GenerationLog.mode == "aigc_image_to_skin",
+            models.GenerationLog.status.in_(SECOND_STAGE_STATUSES),
+        )
         stale_logs = db.query(models.GenerationLog).filter(
             models.GenerationLog.status.in_(RECOVERABLE_GENERATION_STATUSES),
-            models.GenerationLog.recoverable == True,
-            models.GenerationLog.created_at < stale_before
+            or_(
+                models.GenerationLog.recoverable == True,
+                dense_uv_second_stage,
+            ),
+            models.GenerationLog.created_at < stale_before,
         ).all()
         
         if not stale_logs:
@@ -1373,6 +1435,10 @@ def re_enqueue_if_missing():
             Queue("high_queue_image_edit", connection=redis_conn),
             Queue("queue_image_to_skin", connection=redis_conn),
             Queue("high_queue_image_to_skin", connection=redis_conn),
+            Queue("queue_real_to_render", connection=redis_conn),
+            Queue("high_queue_real_to_render", connection=redis_conn),
+            Queue("queue_render_to_uv", connection=redis_conn),
+            Queue("high_queue_render_to_uv", connection=redis_conn),
         ]
         
         active_log_ids = collect_active_generation_log_ids(
