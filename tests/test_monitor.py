@@ -116,6 +116,8 @@ def test_unfinished_logs_admin_success(client, db):
         mode="aigc_text_to_image",
         status="failed",
         error_msg="Test failure details",
+        model_version="v2.5",
+        aux_model_version="sdxl",
         user_id="USER000000000001",
         created_at=now - datetime.timedelta(minutes=1)
     )
@@ -151,6 +153,8 @@ def test_unfinished_logs_admin_success(client, db):
     # Verify status fields
     assert items[0]["status"] == "failed"
     assert items[0]["error_msg"] == "Test failure details"
+    assert items[0]["model_version"] == "v2.5"
+    assert items[0]["aux_model_version"] == "sdxl"
     assert items[1]["status"] == "processing_skin"
     assert items[2]["status"] == "pending"
 
