@@ -173,6 +173,28 @@ async def update_minecraft_skin(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
+    if req.minecraft_skin_url:
+        from urllib.parse import urlparse
+        path = req.minecraft_skin_url
+        if path.startswith("http"):
+            path = urlparse(path).path.lstrip('/')
+            if 'generations/' in path:
+                path = 'generations/' + path.split('generations/', 1)[1]
+        
+        # Check if the skin is private
+        log = db.query(models.GenerationLog).filter(
+            (models.GenerationLog.result == req.minecraft_skin_url) |
+            (models.GenerationLog.edited_result == req.minecraft_skin_url) |
+            (models.GenerationLog.result == path) |
+            (models.GenerationLog.edited_result == path)
+        ).first()
+        
+        if log and not log.is_public:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot set a private skin as character"
+            )
+
     current_user.minecraft_skin_url = req.minecraft_skin_url
     db.commit()
     db.refresh(current_user)

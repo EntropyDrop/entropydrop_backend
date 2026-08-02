@@ -9,6 +9,7 @@ from models import User, GenerationLog, Order, CollectionItem, UserLike, UserFee
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import get_db
+from rate_limit import limiter
 
 router = APIRouter(
     prefix="/api/monitor",
@@ -19,6 +20,7 @@ router = APIRouter(
 redis_conn = Redis.from_url(settings.REDIS_URL)
 
 @router.get("/stats")
+@limiter.exempt
 async def get_monitor_stats(
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
@@ -210,6 +212,7 @@ async def get_monitor_stats(
 import math
 
 @router.get("/unfinished")
+@limiter.exempt
 async def get_unfinished_logs(
     page: int = 1,
     page_size: int = 10,
@@ -312,6 +315,7 @@ async def get_unfinished_logs(
 
 
 @router.delete("/logs/{id}")
+@limiter.exempt
 async def admin_delete_log(
     id: str,
     background_tasks: BackgroundTasks,
@@ -369,6 +373,7 @@ class ModeMaintenanceToggleRequest(BaseModel):
     enabled: bool
 
 @router.get("/mode_status")
+@limiter.exempt
 async def get_modes_status(
     admin: User = Depends(get_current_admin)
 ):
@@ -380,6 +385,7 @@ async def get_modes_status(
     }
 
 @router.post("/mode_status/{mode_name}")
+@limiter.exempt
 async def toggle_mode_status(
     mode_name: str,
     req: ModeMaintenanceToggleRequest,
@@ -404,6 +410,7 @@ class SetModelPriceRequest(BaseModel):
     credits: int
 
 @router.get("/daily_free_credits")
+@limiter.exempt
 async def get_daily_free_credits_endpoint(
     admin: User = Depends(get_current_admin)
 ):
@@ -411,6 +418,7 @@ async def get_daily_free_credits_endpoint(
     return {"credits": get_daily_free_credits()}
 
 @router.post("/daily_free_credits")
+@limiter.exempt
 async def set_daily_free_credits_endpoint(
     req: DailyFreeCreditsRequest,
     admin: User = Depends(get_current_admin)
@@ -425,6 +433,7 @@ async def set_daily_free_credits_endpoint(
 
 
 @router.get("/model_prices")
+@limiter.exempt
 async def get_model_prices_endpoint(
     admin: User = Depends(get_current_admin)
 ):
@@ -447,6 +456,7 @@ async def get_model_prices_endpoint(
 
 
 @router.post("/model_prices")
+@limiter.exempt
 async def set_model_price_endpoint(
     req: SetModelPriceRequest,
     admin: User = Depends(get_current_admin)
@@ -462,6 +472,7 @@ async def set_model_price_endpoint(
 
 
 @router.delete("/users/by-email")
+@limiter.exempt
 async def admin_delete_user_by_email(
     email: str,
     background_tasks: BackgroundTasks,
@@ -559,6 +570,7 @@ class GiftActiveUsersRequest(BaseModel):
 
 
 @router.post("/gift_active_users")
+@limiter.exempt
 async def gift_credits_to_seven_day_active_users(
     req: GiftActiveUsersRequest,
     admin: User = Depends(get_current_admin),
@@ -626,6 +638,7 @@ class GiftSpecificUserRequest(BaseModel):
 
 
 @router.post("/gift_specific_user")
+@limiter.exempt
 async def gift_credits_to_specific_user(
     req: GiftSpecificUserRequest,
     admin: User = Depends(get_current_admin),
@@ -684,6 +697,7 @@ async def gift_credits_to_specific_user(
 
 
 @router.get("/sking_ddj_generations")
+@limiter.exempt
 async def get_sking_ddj_generations(
     page: int = 1,
     page_size: int = 10,

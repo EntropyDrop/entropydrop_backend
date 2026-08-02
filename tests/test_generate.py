@@ -1034,6 +1034,227 @@ def test_re_enqueue_if_missing_does_not_resubmit_dense_uv_stage_one(
     assert FakeQueue.enqueued == []
 
 
+def test_re_enqueue_if_missing_requeues_dense_uv_stage_one_ghost(
+    monkeypatch,
+    db,
+):
+    log = GenerationLog(
+        id="dense_stage_one_ghost",
+        prompt="recover queued ghost",
+        user_id="test_user_generate",
+        mode="aigc_image_to_skin",
+        status="pending",
+        source="uploads/dense_stage_one_ghost.png",
+        model_version="SKING_DDJ_v54",
+        recoverable=False,
+        created_at=(
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=11)
+        ),
+    )
+    db.add(log)
+    db.commit()
+
+    class ExistingJob:
+        id = "generation_dense_stage_one_ghost_real_to_render"
+        args = ("dense_stage_one_ghost",)
+        func_name = "tasks.submit_real_to_render"
+        origin = "queue_real_to_render"
+
+        def get_status(self, refresh=False):
+            return "queued"
+
+    existing_job = ExistingJob()
+
+    class FakeQueue:
+        enqueued = []
+        requeued = []
+
+        def __init__(self, name, connection=None):
+            self.name = name
+            self.jobs = []
+
+        def enqueue(self, *args, **kwargs):
+            self.enqueued.append((self.name, args, kwargs))
+            return object()
+
+        def enqueue_job(self, job):
+            self.requeued.append((self.name, job))
+            return job
+
+    class FakeRegistry:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def get_job_ids(self):
+            return []
+
+    import rq.registry
+
+    FakeQueue.enqueued.clear()
+    FakeQueue.requeued.clear()
+    monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
+    monkeypatch.setattr(routers.generate, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        routers.generate.Job,
+        "fetch",
+        staticmethod(lambda job_id, connection=None: existing_job),
+    )
+    monkeypatch.setattr(rq.registry, "StartedJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "DeferredJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "ScheduledJobRegistry", FakeRegistry)
+
+    routers.generate.re_enqueue_if_missing()
+
+    assert FakeQueue.enqueued == []
+    assert FakeQueue.requeued == [
+        ("queue_real_to_render", existing_job),
+    ]
+
+
+def test_re_enqueue_if_missing_recreates_missing_dense_uv_stage_one_job(
+    monkeypatch,
+    db,
+):
+    log = GenerationLog(
+        id="dense_stage_one_missing",
+        prompt="recover missing job",
+        user_id="test_user_generate",
+        mode="aigc_image_to_skin",
+        status="pending",
+        source="uploads/dense_stage_one_missing.png",
+        model_version="SKING_DDJ_v54",
+        recoverable=False,
+        created_at=(
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=11)
+        ),
+    )
+    db.add(log)
+    db.commit()
+
+    class FakeQueue:
+        enqueued = []
+
+        def __init__(self, name, connection=None):
+            self.name = name
+            self.jobs = []
+
+        def enqueue(self, *args, **kwargs):
+            self.enqueued.append((self.name, args, kwargs))
+            return object()
+
+    class FakeRegistry:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def get_job_ids(self):
+            return []
+
+    import rq.registry
+
+    FakeQueue.enqueued.clear()
+    monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
+    monkeypatch.setattr(routers.generate, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        routers.generate.Job,
+        "fetch",
+        staticmethod(
+            lambda job_id, connection=None: (_ for _ in ()).throw(
+                routers.generate.NoSuchJobError()
+            )
+        ),
+    )
+    monkeypatch.setattr(rq.registry, "StartedJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "DeferredJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "ScheduledJobRegistry", FakeRegistry)
+
+    routers.generate.re_enqueue_if_missing()
+
+    assert len(FakeQueue.enqueued) == 1
+    queue_name, args, kwargs = FakeQueue.enqueued[0]
+    assert queue_name == "high_queue_real_to_render"
+    assert args[0] == "tasks.submit_real_to_render"
+    assert kwargs["job_id"] == (
+        "generation_dense_stage_one_missing_real_to_render"
+    )
+
+
+def test_re_enqueue_if_missing_treats_intermediate_job_as_active(
+    monkeypatch,
+    db,
+):
+    log = GenerationLog(
+        id="dense_stage_one_intermediate",
+        prompt="already dequeued",
+        user_id="test_user_generate",
+        mode="aigc_image_to_skin",
+        status="pending",
+        source="uploads/dense_stage_one_intermediate.png",
+        model_version="SKING_DDJ_v54",
+        recoverable=False,
+        created_at=(
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=11)
+        ),
+    )
+    db.add(log)
+    db.commit()
+
+    class ActiveJob:
+        args = ("dense_stage_one_intermediate",)
+
+    active_job = ActiveJob()
+
+    class FakeIntermediateQueue:
+        def __init__(self, job_ids):
+            self.job_ids = job_ids
+
+        def get_job_ids(self):
+            return self.job_ids
+
+    class FakeQueue:
+        enqueued = []
+
+        def __init__(self, name, connection=None):
+            self.name = name
+            self.jobs = []
+            self.intermediate_queue = FakeIntermediateQueue(
+                ["generation_dense_stage_one_intermediate_real_to_render"]
+                if name == "queue_real_to_render"
+                else []
+            )
+
+        def enqueue(self, *args, **kwargs):
+            self.enqueued.append((self.name, args, kwargs))
+            return object()
+
+    class FakeRegistry:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def get_job_ids(self):
+            return []
+
+    import rq.registry
+
+    FakeQueue.enqueued.clear()
+    monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
+    monkeypatch.setattr(routers.generate, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        routers.generate.Job,
+        "fetch",
+        staticmethod(lambda job_id, connection=None: active_job),
+    )
+    monkeypatch.setattr(rq.registry, "StartedJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "DeferredJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "ScheduledJobRegistry", FakeRegistry)
+
+    routers.generate.re_enqueue_if_missing()
+
+    assert FakeQueue.enqueued == []
+
+
 def test_re_enqueue_if_missing_does_not_duplicate_active_dense_uv_job(
     monkeypatch,
     db,

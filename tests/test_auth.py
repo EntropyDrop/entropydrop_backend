@@ -246,3 +246,92 @@ def test_get_my_credit_history(client, db):
     assert data["items"][1]["action"] == "daily_login"
 
     app.dependency_overrides.clear()
+
+
+def test_update_minecraft_skin_restrictions(client, db):
+    from datetime import datetime, timezone, timedelta
+    from models import GenerationLog, User
+    from main import app
+    
+    # 1. Create a user who is pro-active so they can call make_private
+    user = User(
+        id="test_restrict_user",
+        email="test_restrict@example.com",
+        username="Test Restrict User",
+        minecraft_skin_url=None,
+        pro_expires_at=datetime.now(timezone.utc) + timedelta(days=10),
+        pro_level="pro-plus"
+    )
+    db.add(user)
+    db.commit()
+
+    # 2. Mock logged-in user
+    def mock_get_current_user():
+        return user
+    app.dependency_overrides[get_current_user] = mock_get_current_user
+
+    # 3. Create a public log and a private log
+    pub_log = GenerationLog(
+        id="publog123",
+        prompt="public skin prompt",
+        mode="text",
+        result="generations/public_skin.png",
+        is_public=True,
+        user_id=user.id,
+        status="success"
+    )
+    priv_log = GenerationLog(
+        id="privlog123",
+        prompt="private skin prompt",
+        mode="text",
+        result="generations/private_skin.png",
+        is_public=False,
+        user_id=user.id,
+        status="success"
+    )
+    db.add(pub_log)
+    db.add(priv_log)
+    db.commit()
+
+    # Try setting private skin -> should fail (400)
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": "generations/private_skin.png"})
+    assert response.status_code == 400
+    assert "Cannot set a private skin" in response.json()["detail"]
+
+    # Try setting public skin -> should succeed
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": "generations/public_skin.png"})
+    assert response.status_code == 200
+    assert response.json()["minecraft_skin_url"] == "generations/public_skin.png"
+
+    # Make the public skin private -> should clear the character
+    import s3_utils
+    original_copy_object = s3_utils.s3_client.copy_object
+    original_delete_object = s3_utils.s3_client.delete_object
+    s3_utils.s3_client.copy_object = lambda **kwargs: {}
+    s3_utils.s3_client.delete_object = lambda **kwargs: {}
+
+    try:
+        response = client.post("/skin/api/logs/publog123/make_private")
+        assert response.status_code == 200
+        
+        # Verify user character is cleared in DB
+        db.refresh(user)
+        assert user.minecraft_skin_url is None
+    finally:
+        s3_utils.s3_client.copy_object = original_copy_object
+        s3_utils.s3_client.delete_object = original_delete_object
+
+    # Set user character back to public skin (we temporarily make pub_log public again)
+    pub_log.is_public = True
+    db.commit()
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": "generations/public_skin.png"})
+    assert response.status_code == 200
+    assert response.json()["minecraft_skin_url"] == "generations/public_skin.png"
+
+    # Soft-delete the log -> should clear the character
+    response = client.delete("/skin/api/logs/publog123")
+    assert response.status_code == 200
+    db.refresh(user)
+    assert user.minecraft_skin_url is None
+
+    app.dependency_overrides.clear()

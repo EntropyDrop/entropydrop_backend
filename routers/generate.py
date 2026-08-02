@@ -1290,6 +1290,20 @@ async def delete_log(
     if files_to_delete:
         background_tasks.add_task(delete_s3_files_task, files_to_delete)
 
+    # Clear user character settings if they set this skin as their character
+    if log.result or log.edited_result:
+        from sqlalchemy import or_
+        filters = []
+        if log.result:
+            filters.append(models.User.minecraft_skin_url.like(f"%{log.result}%"))
+        if log.edited_result:
+            filters.append(models.User.minecraft_skin_url.like(f"%{log.edited_result}%"))
+        if filters:
+            db.query(models.User).filter(or_(*filters)).update(
+                {"minecraft_skin_url": None},
+                synchronize_session=False
+            )
+
     # 3. Clean database attributes (soft delete)
     log.is_deleted = True
     log.prompt = None
@@ -1390,6 +1404,20 @@ async def make_log_private(
     # Also clear the parent of this skin itself
     log.parent = None
 
+    # Clear user character settings if they set this skin as their character
+    if log.result or log.edited_result:
+        from sqlalchemy import or_
+        filters = []
+        if log.result:
+            filters.append(models.User.minecraft_skin_url.like(f"%{log.result}%"))
+        if log.edited_result:
+            filters.append(models.User.minecraft_skin_url.like(f"%{log.edited_result}%"))
+        if filters:
+            db.query(models.User).filter(or_(*filters)).update(
+                {"minecraft_skin_url": None},
+                synchronize_session=False
+            )
+
     log.is_public = False
     db.commit()
 
@@ -1436,24 +1464,85 @@ async def create_log_feedback(
 
 def collect_active_generation_log_ids(queues, registry_classes, job_class):
     active_log_ids = set()
+
+    def add_job_log_id(job):
+        try:
+            if job and job.args:
+                active_log_ids.add(job.args[0])
+        except Exception:
+            pass
+
     for q in queues:
         for job in q.jobs:
+            add_job_log_id(job)
+
+        # RQ moves a dequeued job through an intermediate list before it is
+        # registered as started. Treat that list as active too, otherwise a
+        # recovery pass can duplicate a job during this short transition.
+        intermediate_queue = getattr(q, "intermediate_queue", None)
+        if intermediate_queue:
             try:
-                if job and job.args:
-                    active_log_ids.add(job.args[0])
+                for job_id in intermediate_queue.get_job_ids():
+                    add_job_log_id(
+                        job_class.fetch(job_id, connection=redis_conn)
+                    )
             except Exception:
                 pass
 
         for RegistryCls in registry_classes:
             registry = RegistryCls(name=q.name, connection=redis_conn)
-            for job_id in registry.get_job_ids():
+            try:
+                registry_job_ids = registry.get_job_ids(cleanup=False)
+            except TypeError:
+                registry_job_ids = registry.get_job_ids()
+            for job_id in registry_job_ids:
                 try:
-                    job = job_class.fetch(job_id, connection=redis_conn)
-                    if job and job.args:
-                        active_log_ids.add(job.args[0])
+                    add_job_log_id(
+                        job_class.fetch(job_id, connection=redis_conn)
+                    )
                 except Exception:
                     pass
     return active_log_ids
+
+
+def requeue_existing_dense_uv_stage_one_job(log: models.GenerationLog) -> bool:
+    """Put an orphaned queued job hash back on its original RQ queue.
+
+    Returns False only when the job hash no longer exists, allowing the caller
+    to recreate the deterministic job from the database record. Existing jobs
+    in any non-queued state are deliberately not resubmitted because stage one
+    calls a billable external provider.
+    """
+    job_id = make_generation_job_id(log.id, "real_to_render")
+    try:
+        job = Job.fetch(job_id, connection=redis_conn)
+    except NoSuchJobError:
+        return False
+
+    status = job.get_status(refresh=True)
+    status_value = getattr(status, "value", status)
+    if status_value != "queued":
+        raise RuntimeError(
+            f"Refusing to resubmit {job_id}: existing job status is "
+            f"{status_value!r}"
+        )
+    if job.func_name != "tasks.submit_real_to_render":
+        raise RuntimeError(
+            f"Refusing to resubmit {job_id}: unexpected function "
+            f"{job.func_name!r}"
+        )
+    if job.origin not in {
+        "queue_real_to_render",
+        "high_queue_real_to_render",
+    }:
+        raise RuntimeError(
+            f"Refusing to resubmit {job_id}: unexpected queue "
+            f"{job.origin!r}"
+        )
+
+    Queue(job.origin, connection=redis_conn).enqueue_job(job)
+    print(f"[*] Requeued orphaned RQ job {job_id} on {job.origin}.")
+    return True
 
 
 def enqueue_recovered_generation_task(log: models.GenerationLog, is_pro_active: bool):
@@ -1488,10 +1577,19 @@ def re_enqueue_if_missing():
             models.GenerationLog.mode == "aigc_image_to_skin",
             models.GenerationLog.status.in_(SECOND_STAGE_STATUSES),
         )
+        dense_uv_pending_stage_one = and_(
+            models.GenerationLog.model_version == DENSE_UV_MODEL_VERSION,
+            models.GenerationLog.mode == "aigc_image_to_skin",
+            models.GenerationLog.status == "pending",
+            models.GenerationLog.provider_task_id.is_(None),
+            models.GenerationLog.edited_result.is_(None),
+            models.GenerationLog.result.is_(None),
+        )
         stale_logs = db.query(models.GenerationLog).filter(
             models.GenerationLog.status.in_(RECOVERABLE_GENERATION_STATUSES),
             or_(
                 models.GenerationLog.recoverable == True,
+                dense_uv_pending_stage_one,
                 dense_uv_second_stage,
             ),
             models.GenerationLog.created_at < stale_before,
@@ -1528,7 +1626,22 @@ def re_enqueue_if_missing():
                 user = db.query(models.User).filter(models.User.id == log.user_id).first()
                 
                 try:
-                    enqueue_recovered_generation_task(log, bool(user and user.is_pro_active))
+                    reused_job = False
+                    if (
+                        log.model_version == DENSE_UV_MODEL_VERSION
+                        and log.mode == "aigc_image_to_skin"
+                        and log.status == "pending"
+                        and not log.provider_task_id
+                        and not log.edited_result
+                        and not log.result
+                    ):
+                        reused_job = requeue_existing_dense_uv_stage_one_job(log)
+
+                    if not reused_job:
+                        enqueue_recovered_generation_task(
+                            log,
+                            bool(user and user.is_pro_active),
+                        )
                     db.commit()
                     re_enqueued_count += 1
                 except Exception as e:
