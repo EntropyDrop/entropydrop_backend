@@ -72,7 +72,7 @@ def test_get_models(client):
 def test_get_generation_credit_cost(mock_credit_cost, client):
     response = client.get("/skin/api/generation_credit_cost")
     assert response.status_code == 200
-    assert response.json() == {"credits": 5}
+    assert response.json() == {"credits": 5, "is_pro": False}
     mock_credit_cost.assert_called_once()
 
 def test_get_generation_credit_cost_with_params(client):
@@ -84,15 +84,28 @@ def test_get_generation_credit_cost_with_params(client):
         # Test model_version only
         response = client.get("/skin/api/generation_credit_cost?model_version=SKING_DDJ_v54")
         assert response.status_code == 200
-        assert response.json() == {"credits": 3}
+        assert response.json() == {"credits": 3, "is_pro": False}
 
         # Test aux_model_version + model_version
         response = client.get("/skin/api/generation_credit_cost?aux_model_version=z_image&model_version=SKING_DDJ_v54")
         assert response.status_code == 200
-        assert response.json() == {"credits": 5}
+        assert response.json() == {"credits": 5, "is_pro": False}
     finally:
         backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v54")
         backend_utils.redis_conn.delete("config:model_price:z_image")
+
+def test_get_generation_credit_cost_pro_exclusive(client):
+    import backend_utils
+    backend_utils.redis_conn.set("config:model_price:SKING_DDJ_v54", "3")
+    backend_utils.redis_conn.set("config:model_pro:SKING_DDJ_v54", "1")
+
+    try:
+        response = client.get("/skin/api/generation_credit_cost?model_version=SKING_DDJ_v54")
+        assert response.status_code == 200
+        assert response.json() == {"credits": 3, "is_pro": True}
+    finally:
+        backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v54")
+        backend_utils.redis_conn.delete("config:model_pro:SKING_DDJ_v54")
 
 def test_get_active_generation_none(client, db):
     response = client.get("/skin/api/generate/active")

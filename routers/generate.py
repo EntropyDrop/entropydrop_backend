@@ -410,12 +410,17 @@ async def get_generation_credit_cost(
     aux_model_version: Optional[str] = Query(None),
     current_user: models.User = Depends(auth.get_current_user)
 ):
+    is_pro_exclusive = False
     if model_version:
         cost = backend_utils.get_model_credit_cost(model_version)
+        if backend_utils.is_model_pro_exclusive(model_version):
+            is_pro_exclusive = True
         if aux_model_version:
             cost += backend_utils.get_model_credit_cost(aux_model_version)
-        return {"credits": cost}
-    return {"credits": backend_utils.get_generation_credit_cost()}
+            if backend_utils.is_model_pro_exclusive(aux_model_version):
+                is_pro_exclusive = True
+        return {"credits": cost, "is_pro": is_pro_exclusive}
+    return {"credits": backend_utils.get_generation_credit_cost(), "is_pro": False}
 
 
 @router.get("/generate/active")
@@ -543,6 +548,16 @@ async def generate_image(
         raise HTTPException(status_code=429, detail="Server is busy. The queue is full, please try again later.")
 
     generation_credit_cost = 0
+
+    # Pro Exclusive Check
+    is_pro_exclusive = backend_utils.is_model_pro_exclusive(model_version) or (
+        aux_model_version and backend_utils.is_model_pro_exclusive(aux_model_version)
+    )
+    if is_pro_exclusive and not current_user.is_pro_active:
+        raise HTTPException(
+            status_code=403,
+            detail="The selected model is exclusive to Pro users. Please upgrade your subscription to access this model."
+        )
 
     # Quota Check
     generation_credit_cost = backend_utils.get_model_credit_cost(model_version)
