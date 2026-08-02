@@ -1422,8 +1422,25 @@ def test_get_discovery_random(client, db):
     routers.generate.discovery_cache_items = []
 
     for i in range(3):
-        log = GenerationLog(prompt=f"discover {i}", is_public=True, user_id="test_user_generate", mode="edit", result=f"res_{i}.png", status="success")
+        log = GenerationLog(
+            prompt=f"discover {i}",
+            is_public=True,
+            user_id="test_user_generate",
+            mode="edit",
+            result=f"res_{i}.png",
+            status="success",
+            model_version=f"SKING_DDJ_v{i}",
+        )
         db.add(log)
+    db.add(GenerationLog(
+        prompt="excluded discovery model",
+        is_public=True,
+        user_id="test_user_generate",
+        mode="edit",
+        result="excluded.png",
+        status="success",
+        model_version="sking_v73_flux_4b_000027000",
+    ))
     db.commit()
 
     response = client.get("/skin/api/discovery")
@@ -1432,8 +1449,75 @@ def test_get_discovery_random(client, db):
     assert response.headers["content-encoding"] == "gzip"
     data = response.json()
     assert len(data) >= 3
+    assert all(item["prompt"].startswith("discover ") for item in data)
     assert "creator" in data[0]
     assert "likes_count" in data[0]
+
+
+def test_discovery_search_filters_by_model_series(client, db):
+    logs = [
+        GenerationLog(
+            prompt="ddj series",
+            name="ddj series",
+            is_public=True,
+            user_id="test_user_generate",
+            mode="edit",
+            result="ddj.png",
+            status="success",
+            model_version="SKING_DDJ_v54",
+        ),
+        GenerationLog(
+            prompt="sking series",
+            name="sking series",
+            is_public=True,
+            user_id="test_user_generate",
+            mode="edit",
+            result="sking.png",
+            status="success",
+            model_version="sking_v73_flux_4b_000027000",
+        ),
+        GenerationLog(
+            prompt="other series",
+            name="other series",
+            is_public=True,
+            user_id="test_user_generate",
+            mode="edit",
+            result="other.png",
+            status="success",
+            model_version="other_v1",
+        ),
+    ]
+    db.add_all(logs)
+    db.commit()
+
+    response = client.get(
+        "/skin/api/discovery/search",
+        params={"model_series": "SKING_DDJ"},
+    )
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()["items"]} == {logs[0].id}
+
+    response = client.get(
+        "/skin/api/discovery/search",
+        params={"model_series": "sking"},
+    )
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()["items"]} == {logs[1].id}
+
+    response = client.get(
+        "/skin/api/discovery/search",
+        params={"model_series": ""},
+    )
+    assert response.status_code == 200
+    assert {item["id"] for item in response.json()["items"]} == {
+        log.id for log in logs
+    }
+
+    response = client.get(
+        "/skin/api/discovery/search",
+        params={"model_series": "invalid"},
+    )
+    assert response.status_code == 422
 
 
 # (Obsolete sort/search tests removed)

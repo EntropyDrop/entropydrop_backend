@@ -3,8 +3,8 @@ import io
 import json
 import os
 from PIL import Image
-from typing import Optional
-from sqlalchemy import and_, or_
+from typing import Literal, Optional
+from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 import models
 import schemas
@@ -379,8 +379,8 @@ def display_log_name(log):
 ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
 
 AVAILABLE_IMAGE_TO_SKIN_MODELS = [
-    LEGACY_SKIN_MODEL_VERSION,
     DENSE_UV_MODEL_VERSION,
+    LEGACY_SKIN_MODEL_VERSION,
 ]
 
 AVAILABlE_TEXT_TO_IMAGE_MODELS = [
@@ -1003,7 +1003,8 @@ def update_discovery_cache():
         eligible_ids_query = db.query(models.GenerationLog.id).filter(
             models.GenerationLog.is_public == True,
             models.GenerationLog.is_deleted == False,
-            models.GenerationLog.status == "success"
+            models.GenerationLog.status == "success",
+            models.GenerationLog.model_version.like("SKING_DDJ%")
         )
         all_ids = [row[0] for row in eligible_ids_query.all()]
         
@@ -1079,6 +1080,7 @@ async def search_discovery_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=30),
     sort_by: str = Query("created_at"),
+    model_series: Literal["", "SKING_DDJ", "sking"] = Query(""),
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(auth.get_current_user_optional)
 ):
@@ -1088,6 +1090,15 @@ async def search_discovery_logs(
         models.GenerationLog.is_deleted == False,
         models.GenerationLog.status == "success"
     )
+
+    if model_series:
+        query = query.filter(
+            func.substr(
+                models.GenerationLog.model_version,
+                1,
+                len(model_series),
+            ) == model_series
+        )
 
     if q:
         q_stripped = q.strip()
