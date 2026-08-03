@@ -116,7 +116,7 @@ def award_daily_login_credits(db: Session, user: models.User):
         if user.last_login_date == today_utc:
             return
             
-        # 1. Monthly Reward Check (All users, including Pro, receive 20 credits on first login of the month)
+        # 1. Monthly Reward Check (All users receive 10 credits on first login of the month)
         month_start = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         month_end = month_start + timedelta(days=32)
         month_end = month_end.replace(day=1) - timedelta(microseconds=1)
@@ -129,7 +129,7 @@ def award_daily_login_credits(db: Session, user: models.User):
         ).first() is not None
 
         if not already_claimed_monthly:
-            monthly_awarded = 20
+            monthly_awarded = 10
             user.credits = (user.credits or 0) + monthly_awarded
             
             # Record monthly credit log
