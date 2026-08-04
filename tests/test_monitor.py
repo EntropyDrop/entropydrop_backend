@@ -630,6 +630,8 @@ def test_get_sking_ddj_generations(client, db):
             mode="aigc_image_to_skin",
             status="failed",
             model_version="SKING_DDJ_v54",
+            provider_submission_state="unknown",
+            error_msg="provider acceptance is uncertain",
             source="source/img2.png",
             edited_result=None,
             result=None,
@@ -675,6 +677,10 @@ def test_get_sking_ddj_generations(client, db):
         assert len(data["items"]) == 1
         assert data["items"][0]["id"] == "LOG_DDJ_002"
         assert data["items"][0]["status"] == "failed"
+        assert data["items"][0]["provider_submission_state"] == "unknown"
+        assert data["items"][0]["error_msg"] == (
+            "provider acceptance is uncertain"
+        )
         assert data["items"][0]["source_url"] is not None
         assert data["items"][0]["edited_image_url"] is None
 
@@ -765,4 +771,3 @@ def test_gift_specific_user(client, db):
 
     finally:
         app.dependency_overrides.clear()
-

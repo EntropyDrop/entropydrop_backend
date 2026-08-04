@@ -256,12 +256,14 @@ def test_generation_result_update_persists_stage1_provider_metadata():
             "status": "processing",
             "stage": "real_to_render",
             "provider_task_id": "provider-task-123",
+            "provider_submission_state": "accepted",
             "pipeline_version": "sample-v0",
         },
     )
 
     assert updated is True
     assert log.provider_task_id == "provider-task-123"
+    assert log.provider_submission_state == "accepted"
     assert log.pipeline_version == "sample-v0"
 
 
@@ -990,11 +992,12 @@ def test_re_enqueue_if_missing_recovers_dense_uv_second_stage(
         "dense-pipeline-v1",
     )
     assert kwargs["job_timeout"] == 120
-    assert kwargs["retry"] is None
+    assert kwargs["retry"].max == 5
+    assert kwargs["retry"].intervals == [5, 15, 30, 60, 120]
     assert kwargs["job_id"] == "generation_unrecover_log_render_to_uv"
 
 
-def test_re_enqueue_if_missing_does_not_resubmit_dense_uv_stage_one(
+def test_re_enqueue_if_missing_resumes_accepted_dense_uv_stage_one(
     monkeypatch,
     db,
 ):
@@ -1006,6 +1009,65 @@ def test_re_enqueue_if_missing_does_not_resubmit_dense_uv_stage_one(
         status="processing",
         model_version="SKING_DDJ_v54",
         provider_task_id="provider-task",
+        recoverable=False,
+        created_at=(
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(minutes=11)
+        ),
+    )
+    db.add(log)
+    db.commit()
+
+    class FakeQueue:
+        enqueued = []
+
+        def __init__(self, name, connection=None):
+            self.name = name
+            self.jobs = []
+
+        def enqueue(self, *args, **kwargs):
+            self.enqueued.append((self.name, args, kwargs))
+            return object()
+
+    class FakeRegistry:
+        def __init__(self, name, connection=None):
+            self.name = name
+
+        def get_job_ids(self):
+            return []
+
+    import rq.registry
+
+    FakeQueue.enqueued.clear()
+    monkeypatch.setattr(routers.generate, "Queue", FakeQueue)
+    monkeypatch.setattr(routers.generate, "SessionLocal", lambda: db)
+    monkeypatch.setattr(rq.registry, "StartedJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "DeferredJobRegistry", FakeRegistry)
+    monkeypatch.setattr(rq.registry, "ScheduledJobRegistry", FakeRegistry)
+
+    routers.generate.re_enqueue_if_missing()
+
+    assert len(FakeQueue.enqueued) == 1
+    queue_name, args, kwargs = FakeQueue.enqueued[0]
+    assert queue_name == "high_queue_real_to_render"
+    assert args[0] == "tasks.resume_real_to_render"
+    assert kwargs["args"][-1] == "provider-task"
+    assert kwargs["retry"].max == 5
+
+
+def test_re_enqueue_if_missing_does_not_repeat_uncertain_provider_submit(
+    monkeypatch,
+    db,
+):
+    log = GenerationLog(
+        id="dense_submit_unknown",
+        prompt="submission may already be billed",
+        user_id="test_user_generate",
+        mode="aigc_image_to_skin",
+        status="processing",
+        source="uploads/dense_submit_unknown.png",
+        model_version="SKING_DDJ_v54",
+        provider_submission_state="unknown",
         recoverable=False,
         created_at=(
             datetime.datetime.now(datetime.timezone.utc)

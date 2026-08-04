@@ -224,7 +224,11 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Local deployment scripts contain environment-specific infrastructure details.
-tools/
+# The public-media exporter is credential-free and intentionally versioned.
+tools/*
+!tools/download_public_skins.py
 
 # Node dependencies
 node_modules/
+
+tools

@@ -46,6 +46,15 @@ DENSE_UV_PIPELINE_VERSION = os.getenv(
 RENDER_TO_UV_JOB_TIMEOUT_SECONDS = int(
     os.getenv("RENDER_TO_UV_JOB_TIMEOUT_SECONDS", "120")
 )
+RENDER_TO_UV_RETRY_MAX = int(os.getenv("RENDER_TO_UV_RETRY_MAX", "5"))
+RENDER_TO_UV_RETRY_INTERVALS_SECONDS = [
+    int(item.strip())
+    for item in os.getenv(
+        "RENDER_TO_UV_RETRY_INTERVALS_SECONDS",
+        "5,15,30,60,120",
+    ).split(",")
+    if item.strip()
+]
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
 RESULT_PROCESSING_QUEUE_KEY = os.getenv("GENERATE_RESULT_PROCESSING_QUEUE_KEY", "generate_results_processing")
 GENERATION_RECOVERY_MIN_AGE_SECONDS = int(os.getenv("GENERATION_RECOVERY_MIN_AGE_SECONDS", "300"))
@@ -88,6 +97,7 @@ def cancel_generation_jobs(log_id: str) -> list[str]:
             "image_edit",
             "image_to_skin",
             "real_to_render",
+            "real_to_render_resume",
             "render_to_uv",
         )
     }
@@ -137,6 +147,13 @@ def get_generation_retry_policy_for_log(log: models.GenerationLog) -> Optional[R
     if not log.recoverable:
         return None
     return get_generation_retry_policy()
+
+
+def get_render_to_uv_retry_policy() -> Retry:
+    return Retry(
+        max=RENDER_TO_UV_RETRY_MAX,
+        interval=RENDER_TO_UV_RETRY_INTERVALS_SECONDS,
+    )
 
 
 def uses_real_to_render_pipeline(log: models.GenerationLog) -> bool:
@@ -232,6 +249,35 @@ def enqueue_real_to_render_task(
     )
 
 
+def enqueue_real_to_render_resume_task(
+    log: models.GenerationLog,
+    is_pro_active: bool,
+):
+    """Resume an accepted provider task without issuing another POST."""
+    if not log.provider_task_id:
+        raise ValueError(
+            f"Cannot resume real_to_render for {log.id}: missing provider task id"
+        )
+    prefix = "high_" if is_pro_active else ""
+    queue = Queue(f"{prefix}queue_real_to_render", connection=redis_conn)
+    return queue.enqueue(
+        "tasks.resume_real_to_render",
+        args=(
+            log.id,
+            log.is_public,
+            log.source or "",
+            "image/png",
+            prefix,
+            log.provider_task_id,
+        ),
+        job_timeout="60s",
+        retry=Retry(max=5, interval=[5, 15, 30, 60, 120]),
+        result_ttl=10,
+        failure_ttl=86400,
+        job_id=make_generation_job_id(log.id, "real_to_render_resume"),
+    )
+
+
 def enqueue_render_to_uv_task(
     log: models.GenerationLog,
     is_pro_active: bool,
@@ -269,7 +315,7 @@ def enqueue_render_to_uv_task(
             pipeline_version,
         ),
         job_timeout=RENDER_TO_UV_JOB_TIMEOUT_SECONDS,
-        retry=None,
+        retry=get_render_to_uv_retry_policy(),
         result_ttl=60,
         failure_ttl=86400,
         job_id=make_generation_job_id(log.id, "render_to_uv"),
@@ -623,6 +669,11 @@ async def generate_image(
         aux_model_version=aux_model_version,
         credits_charged=generation_credit_cost,
         recoverable=(model_version == LEGACY_SKIN_MODEL_VERSION),
+        provider_submission_state=(
+            "not_started"
+            if model_version == DENSE_UV_MODEL_VERSION
+            else None
+        ),
         parent=parent,
         seed=seed,
         n_step=n_step,
@@ -726,6 +777,10 @@ def apply_generation_result_update(log: models.GenerationLog, data: dict) -> boo
         log.edited_result = data["edited_result"]
     if "provider_task_id" in data:
         log.provider_task_id = data["provider_task_id"]
+    if "provider_submission_state" in data:
+        log.provider_submission_state = data[
+            "provider_submission_state"
+        ]
     if "pipeline_version" in data:
         log.pipeline_version = data["pipeline_version"]
     if "error_msg" in data:
@@ -1584,6 +1639,9 @@ def enqueue_recovered_generation_task(log: models.GenerationLog, is_pro_active: 
         # to the persisted source and rerun stage 1 so the pipeline can rebuild it.
         log.status = "pending"
 
+    if uses_real_to_render_pipeline(log) and log.provider_task_id:
+        return enqueue_real_to_render_resume_task(log, is_pro_active)
+
     return enqueue_generation_task(log, is_pro_active, "image/png")
 
 
@@ -1606,8 +1664,21 @@ def re_enqueue_if_missing():
         dense_uv_pending_stage_one = and_(
             models.GenerationLog.model_version == DENSE_UV_MODEL_VERSION,
             models.GenerationLog.mode == "aigc_image_to_skin",
-            models.GenerationLog.status == "pending",
+            models.GenerationLog.status.in_({"pending", "processing"}),
             models.GenerationLog.provider_task_id.is_(None),
+            or_(
+                models.GenerationLog.provider_submission_state.is_(None),
+                models.GenerationLog.provider_submission_state
+                == "not_started",
+            ),
+            models.GenerationLog.edited_result.is_(None),
+            models.GenerationLog.result.is_(None),
+        )
+        dense_uv_accepted_stage_one = and_(
+            models.GenerationLog.model_version == DENSE_UV_MODEL_VERSION,
+            models.GenerationLog.mode == "aigc_image_to_skin",
+            models.GenerationLog.status.in_({"pending", "processing"}),
+            models.GenerationLog.provider_task_id.is_not(None),
             models.GenerationLog.edited_result.is_(None),
             models.GenerationLog.result.is_(None),
         )
@@ -1616,6 +1687,7 @@ def re_enqueue_if_missing():
             or_(
                 models.GenerationLog.recoverable == True,
                 dense_uv_pending_stage_one,
+                dense_uv_accepted_stage_one,
                 dense_uv_second_stage,
             ),
             models.GenerationLog.created_at < stale_before,
@@ -1656,7 +1728,7 @@ def re_enqueue_if_missing():
                     if (
                         log.model_version == DENSE_UV_MODEL_VERSION
                         and log.mode == "aigc_image_to_skin"
-                        and log.status == "pending"
+                        and log.status in {"pending", "processing"}
                         and not log.provider_task_id
                         and not log.edited_result
                         and not log.result
