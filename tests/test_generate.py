@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks
 from main import app
 from auth import get_current_user, get_current_user_optional
 from models import User, GenerationLog, UserFeedback, CreditLog
+from pipeline_registry import SKING_DDJ_V54, SKING_DDJ_V61
 import routers.generate
 
 pytestmark = pytest.mark.usefixtures("mock_auth", "mock_db_session")
@@ -267,6 +268,69 @@ def test_generation_result_update_persists_stage1_provider_metadata():
     assert log.pipeline_version == "sample-v0"
 
 
+def test_generation_result_update_rejects_model_version_change():
+    log = GenerationLog(
+        id="model_guard",
+        mode="aigc_image_to_skin",
+        model_version=SKING_DDJ_V54,
+        status="processing",
+    )
+
+    updated = routers.generate.apply_generation_result_update(
+        log,
+        {
+            "log_id": log.id,
+            "status": "success",
+            "stage": "render_to_uv",
+            "model_version": "unexpected-model",
+            "result": "generations/incorrect.png",
+        },
+    )
+
+    assert updated is False
+    assert log.status == "processing"
+    assert log.result is None
+    assert log.model_version == SKING_DDJ_V54
+
+
+def test_model_pipeline_mapping_is_immutable():
+    assert set(routers.generate.MODEL_PIPELINES) == {
+        SKING_DDJ_V54,
+        SKING_DDJ_V61,
+    }
+    pipeline = routers.generate.MODEL_PIPELINES[
+        SKING_DDJ_V54
+    ]
+    assert pipeline.prompt_file == "real_to_render.zh-hans.txt"
+    assert pipeline.template_files == (
+        "template41.png",
+        "template51.png",
+        "template52.png",
+    )
+    assert pipeline.provider_model == "nano-banana-pro"
+    assert pipeline.image_size == "1K"
+    assert pipeline.aspect_ratio == "1:1"
+    assert pipeline.dense_uv_checkpoint_file == "SKING_DDJ_v54.pt"
+    assert pipeline.DMR_mappings_dir == "mappings_256x512"
+    with pytest.raises(TypeError):
+        routers.generate.MODEL_PIPELINES[
+            SKING_DDJ_V54
+        ] = "replacement"
+
+
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V54, SKING_DDJ_V61])
+def test_identifies_sking_ddj_model_series(model_version):
+    assert routers.generate.is_sking_ddj_model(model_version) is True
+
+
+@pytest.mark.parametrize(
+    "model_version",
+    [None, "", "SKING_DDJ", "Sking_DDJ_v61", "sking_v73"],
+)
+def test_rejects_non_sking_ddj_model_prefixes(model_version):
+    assert routers.generate.is_sking_ddj_model(model_version) is False
+
+
 def test_unrecoverable_generation_has_no_rq_retry():
     log = GenerationLog(recoverable=False)
     assert routers.generate.get_generation_retry_policy_for_log(log) is None
@@ -279,7 +343,11 @@ def test_recoverable_generation_keeps_rq_retry():
     assert retry.max == 99999
 
 
-def test_dense_uv_model_routes_to_real_to_render_without_retry(monkeypatch):
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V54, SKING_DDJ_V61])
+def test_sking_ddj_model_routes_to_real_to_render_without_retry(
+    monkeypatch,
+    model_version,
+):
     enqueued = []
 
     class FakeQueue:
@@ -294,7 +362,7 @@ def test_dense_uv_model_routes_to_real_to_render_without_retry(monkeypatch):
     log = GenerationLog(
         id="dense-route",
         mode="aigc_image_to_skin",
-        model_version="SKING_DDJ_v54",
+        model_version=model_version,
         source="uploads/dense-route.png",
         is_public=False,
         recoverable=False,
@@ -316,6 +384,8 @@ def test_dense_uv_model_routes_to_real_to_render_without_retry(monkeypatch):
         "uploads/dense-route.png",
         "image/png",
         "high_",
+        model_version,
+        routers.generate.get_pipeline(model_version).to_task_payload(),
     )
     assert kwargs["retry"] is None
     assert kwargs["job_id"] == "generation_dense-route_real_to_render"
@@ -342,10 +412,12 @@ def test_dense_uv_model_is_rejected_for_text_to_skin(client):
     assert "Invalid model version combination" in response.json()["detail"]
 
 
-def test_dense_uv_generation_is_unrecoverable(
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V54, SKING_DDJ_V61])
+def test_sking_ddj_generation_is_unrecoverable(
     monkeypatch,
     client,
     db,
+    model_version,
 ):
     image = Image.new("RGB", (768, 768), color="red")
     image_file = io.BytesIO()
@@ -365,7 +437,7 @@ def test_dense_uv_generation_is_unrecoverable(
         "/skin/api/generate",
         data={
             "mode": "aigc_image_to_skin",
-            "model_version": "SKING_DDJ_v54",
+            "model_version": model_version,
         },
         files={
             "file": (
@@ -380,7 +452,9 @@ def test_dense_uv_generation_is_unrecoverable(
     log = db.query(GenerationLog).filter(
         GenerationLog.id == response.json()["id"]
     ).one()
-    assert log.model_version == "SKING_DDJ_v54"
+    assert log.model_version == model_version
+    assert log.pipeline_version is None
+    assert log.provider_submission_state == "not_started"
     assert log.source == f"uploads/{log.id}.png"
     assert log.edited_result is None
     assert log.recoverable is False
@@ -928,11 +1002,13 @@ def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
     assert kwargs["job_id"] == "generation_recover_log_image_to_skin"
 
 
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V54, SKING_DDJ_V61])
 @pytest.mark.parametrize("status", ["pending_skin", "processing_skin"])
 def test_re_enqueue_if_missing_recovers_dense_uv_second_stage(
     monkeypatch,
     db,
     status,
+    model_version,
 ):
     user = User(id="unrecover_user", email="unrecover@example.com", username="Unrecover")
     log = GenerationLog(
@@ -942,8 +1018,7 @@ def test_re_enqueue_if_missing_recovers_dense_uv_second_stage(
         mode="aigc_image_to_skin",
         status=status,
         edited_result="real_to_render_intermediate/unrecover.png",
-        model_version="SKING_DDJ_v54",
-        pipeline_version="dense-pipeline-v1",
+        model_version=model_version,
         aux_model_version="z_image",
         recoverable=False,
         created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=11),
@@ -989,7 +1064,11 @@ def test_re_enqueue_if_missing_recovers_dense_uv_second_stage(
         True,
         "real_to_render_intermediate/unrecover.png",
         "image/png",
-        "dense-pipeline-v1",
+        model_version,
+        routers.generate.get_pipeline(
+            model_version
+        ).dense_uv_checkpoint_file,
+        routers.generate.get_pipeline(model_version).DMR_mappings_dir,
     )
     assert kwargs["job_timeout"] == 120
     assert kwargs["retry"].max == 5
@@ -1051,7 +1130,11 @@ def test_re_enqueue_if_missing_resumes_accepted_dense_uv_stage_one(
     queue_name, args, kwargs = FakeQueue.enqueued[0]
     assert queue_name == "high_queue_real_to_render"
     assert args[0] == "tasks.resume_real_to_render"
-    assert kwargs["args"][-1] == "provider-task"
+    assert kwargs["args"][-3] == "provider-task"
+    assert kwargs["args"][-2] == SKING_DDJ_V54
+    assert kwargs["args"][-1] == routers.generate.get_pipeline(
+        SKING_DDJ_V54
+    ).to_task_payload()
     assert kwargs["retry"].max == 5
 
 
@@ -1250,6 +1333,9 @@ def test_re_enqueue_if_missing_recreates_missing_dense_uv_stage_one_job(
     queue_name, args, kwargs = FakeQueue.enqueued[0]
     assert queue_name == "high_queue_real_to_render"
     assert args[0] == "tasks.submit_real_to_render"
+    assert kwargs["args"][-1] == routers.generate.get_pipeline(
+        SKING_DDJ_V54
+    ).to_task_payload()
     assert kwargs["job_id"] == (
         "generation_dense_stage_one_missing_real_to_render"
     )

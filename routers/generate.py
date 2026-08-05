@@ -13,6 +13,12 @@ from database import get_db
 from s3_utils import get_cdn_url, get_s3_url, delete_from_s3, upload_to_s3, generate_presigned_url_get
 import backend_utils
 from config import settings
+from pipeline_registry import (
+    MODEL_PIPELINES,
+    SKING_DDJ_MODEL_PREFIX,
+    get_pipeline,
+    is_sking_ddj_model,
+)
 from redis import Redis
 from rq import Queue, Retry
 from rq.exceptions import InvalidJobOperation, NoSuchJobError
@@ -38,11 +44,6 @@ TWO_STAGE_GENERATION_MODES = {
     "aigc_image_to_skin",
 }
 LEGACY_SKIN_MODEL_VERSION = "sking_v73_flux_4b_000027000"
-DENSE_UV_MODEL_VERSION = "SKING_DDJ_v54"
-DENSE_UV_PIPELINE_VERSION = os.getenv(
-    "DENSE_UV_PIPELINE_VERSION",
-    "real2render-t41-t51-t52-sking-ddj-v54-v1",
-)
 RENDER_TO_UV_JOB_TIMEOUT_SECONDS = int(
     os.getenv("RENDER_TO_UV_JOB_TIMEOUT_SECONDS", "120")
 )
@@ -159,7 +160,18 @@ def get_render_to_uv_retry_policy() -> Retry:
 def uses_real_to_render_pipeline(log: models.GenerationLog) -> bool:
     return (
         log.mode == "aigc_image_to_skin"
-        and log.model_version == DENSE_UV_MODEL_VERSION
+        and is_sking_ddj_model(log.model_version)
+    )
+
+
+def sking_ddj_model_filter():
+    return (
+        func.substr(
+            models.GenerationLog.model_version,
+            1,
+            len(SKING_DDJ_MODEL_PREFIX),
+        )
+        == SKING_DDJ_MODEL_PREFIX
     )
 
 
@@ -214,13 +226,15 @@ def enqueue_real_to_render_task(
 ):
     if not uses_real_to_render_pipeline(log):
         raise ValueError(
-            f"Generation {log.id} is not a {DENSE_UV_MODEL_VERSION} "
+            f"Generation {log.id} is not a SKING_DDJ "
             "image-to-skin task"
         )
     if not log.source:
         raise ValueError(
             f"Cannot enqueue real_to_render for {log.id}: missing source image"
         )
+
+    pipeline = get_pipeline(log.model_version)
 
     prefix = "high_" if is_pro_active else ""
     queue = Queue(f"{prefix}queue_real_to_render", connection=redis_conn)
@@ -232,6 +246,8 @@ def enqueue_real_to_render_task(
             log.source,
             content_type,
             prefix,
+            log.model_version,
+            pipeline.to_task_payload(),
         ),
         job_timeout="60s",
         retry=None,
@@ -258,6 +274,7 @@ def enqueue_real_to_render_resume_task(
         raise ValueError(
             f"Cannot resume real_to_render for {log.id}: missing provider task id"
         )
+    pipeline = get_pipeline(log.model_version)
     prefix = "high_" if is_pro_active else ""
     queue = Queue(f"{prefix}queue_real_to_render", connection=redis_conn)
     return queue.enqueue(
@@ -269,6 +286,8 @@ def enqueue_real_to_render_resume_task(
             "image/png",
             prefix,
             log.provider_task_id,
+            log.model_version,
+            pipeline.to_task_payload(),
         ),
         job_timeout="60s",
         retry=Retry(max=5, interval=[5, 15, 30, 60, 120]),
@@ -285,7 +304,7 @@ def enqueue_render_to_uv_task(
     """Resume Dense UV from the persisted stage-1 image without resubmitting."""
     if not uses_real_to_render_pipeline(log):
         raise ValueError(
-            f"Generation {log.id} is not a {DENSE_UV_MODEL_VERSION} "
+            f"Generation {log.id} is not a SKING_DDJ "
             "image-to-skin task"
         )
     if not log.edited_result:
@@ -294,11 +313,7 @@ def enqueue_render_to_uv_task(
             "missing edited_result"
         )
 
-    pipeline_version = (
-        log.pipeline_version or DENSE_UV_PIPELINE_VERSION
-    )
-    if not log.pipeline_version:
-        log.pipeline_version = pipeline_version
+    pipeline = get_pipeline(log.model_version)
 
     prefix = "high_" if is_pro_active else ""
     queue = Queue(
@@ -312,7 +327,9 @@ def enqueue_render_to_uv_task(
             log.is_public,
             log.edited_result,
             "image/png",
-            pipeline_version,
+            log.model_version,
+            pipeline.dense_uv_checkpoint_file,
+            pipeline.DMR_mappings_dir,
         ),
         job_timeout=RENDER_TO_UV_JOB_TIMEOUT_SECONDS,
         retry=get_render_to_uv_retry_policy(),
@@ -325,7 +342,7 @@ def enqueue_render_to_uv_task(
 def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, content_type: str = "image/png"):
     prefix = "high_" if is_pro_active else ""
 
-    if log.model_version == DENSE_UV_MODEL_VERSION:
+    if is_sking_ddj_model(log.model_version):
         return enqueue_real_to_render_task(
             log,
             is_pro_active,
@@ -425,7 +442,7 @@ def display_log_name(log):
 ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
 
 AVAILABLE_IMAGE_TO_SKIN_MODELS = [
-    DENSE_UV_MODEL_VERSION,
+    *MODEL_PIPELINES,
     LEGACY_SKIN_MODEL_VERSION,
 ]
 
@@ -671,7 +688,7 @@ async def generate_image(
         recoverable=(model_version == LEGACY_SKIN_MODEL_VERSION),
         provider_submission_state=(
             "not_started"
-            if model_version == DENSE_UV_MODEL_VERSION
+            if is_sking_ddj_model(model_version)
             else None
         ),
         parent=parent,
@@ -766,6 +783,13 @@ def should_apply_generation_status(log: models.GenerationLog, data: dict) -> boo
 
 
 def apply_generation_result_update(log: models.GenerationLog, data: dict) -> bool:
+    incoming_model_version = data.get("model_version")
+    if (
+        incoming_model_version is not None
+        and incoming_model_version != log.model_version
+    ):
+        return False
+
     if not should_apply_generation_status(log, data):
         return False
 
@@ -781,7 +805,9 @@ def apply_generation_result_update(log: models.GenerationLog, data: dict) -> boo
         log.provider_submission_state = data[
             "provider_submission_state"
         ]
-    if "pipeline_version" in data:
+    # Accept legacy result messages while old queued jobs drain. New pipeline
+    # tasks report model_version and never select resources by pipeline_version.
+    if "pipeline_version" in data and log.pipeline_version is None:
         log.pipeline_version = data["pipeline_version"]
     if "error_msg" in data:
         log.error_msg = data["error_msg"]
@@ -1074,7 +1100,7 @@ def update_discovery_cache():
             models.GenerationLog.is_public == True,
             models.GenerationLog.is_deleted == False,
             models.GenerationLog.status == "success",
-            models.GenerationLog.model_version.like("SKING_DDJ%")
+            sking_ddj_model_filter()
         )
         all_ids = [row[0] for row in eligible_ids_query.all()]
         
@@ -1656,13 +1682,13 @@ def re_enqueue_if_missing():
             datetime.datetime.now(datetime.timezone.utc)
             - datetime.timedelta(seconds=GENERATION_RECOVERY_MIN_AGE_SECONDS)
         )
-        dense_uv_second_stage = and_(
-            models.GenerationLog.model_version == DENSE_UV_MODEL_VERSION,
+        sking_ddj_second_stage = and_(
+            sking_ddj_model_filter(),
             models.GenerationLog.mode == "aigc_image_to_skin",
             models.GenerationLog.status.in_(SECOND_STAGE_STATUSES),
         )
-        dense_uv_pending_stage_one = and_(
-            models.GenerationLog.model_version == DENSE_UV_MODEL_VERSION,
+        sking_ddj_pending_stage_one = and_(
+            sking_ddj_model_filter(),
             models.GenerationLog.mode == "aigc_image_to_skin",
             models.GenerationLog.status.in_({"pending", "processing"}),
             models.GenerationLog.provider_task_id.is_(None),
@@ -1674,8 +1700,8 @@ def re_enqueue_if_missing():
             models.GenerationLog.edited_result.is_(None),
             models.GenerationLog.result.is_(None),
         )
-        dense_uv_accepted_stage_one = and_(
-            models.GenerationLog.model_version == DENSE_UV_MODEL_VERSION,
+        sking_ddj_accepted_stage_one = and_(
+            sking_ddj_model_filter(),
             models.GenerationLog.mode == "aigc_image_to_skin",
             models.GenerationLog.status.in_({"pending", "processing"}),
             models.GenerationLog.provider_task_id.is_not(None),
@@ -1686,9 +1712,9 @@ def re_enqueue_if_missing():
             models.GenerationLog.status.in_(RECOVERABLE_GENERATION_STATUSES),
             or_(
                 models.GenerationLog.recoverable == True,
-                dense_uv_pending_stage_one,
-                dense_uv_accepted_stage_one,
-                dense_uv_second_stage,
+                sking_ddj_pending_stage_one,
+                sking_ddj_accepted_stage_one,
+                sking_ddj_second_stage,
             ),
             models.GenerationLog.created_at < stale_before,
         ).all()
@@ -1726,7 +1752,7 @@ def re_enqueue_if_missing():
                 try:
                     reused_job = False
                     if (
-                        log.model_version == DENSE_UV_MODEL_VERSION
+                        is_sking_ddj_model(log.model_version)
                         and log.mode == "aigc_image_to_skin"
                         and log.status in {"pending", "processing"}
                         and not log.provider_task_id
