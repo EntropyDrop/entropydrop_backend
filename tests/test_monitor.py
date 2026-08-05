@@ -51,6 +51,60 @@ def test_monitor_stats_includes_seven_day_active_users(client, db):
     assert [day["active_users"] for day in history[-2:]] == [2, 1]
     assert all(day["active_users"] == 0 for day in history[:-2])
 
+
+def test_backend_instances_requires_admin(client):
+    response = client.get("/skin/api/monitor/backend-instances")
+    assert response.status_code in (401, 403)
+
+
+def test_backend_instances_returns_aggregated_metrics(client, db):
+    admin_user = models.User(
+        id="ADMINMETRICS0001",
+        email="admin-metrics@entropydrop.com",
+        username="MetricsAdmin",
+    )
+    db.add(admin_user)
+    db.commit()
+    app.dependency_overrides[get_current_admin] = lambda: admin_user
+
+    payload = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "healthy_count": 2,
+        "total_instances": 2,
+        "instances": [
+            {"instance_id": "one", "status": "healthy"},
+            {"instance_id": "two", "status": "healthy"},
+        ],
+    }
+    with patch("routers.monitor.list_backend_instance_metrics", return_value=payload):
+        response = client.get("/skin/api/monitor/backend-instances")
+
+    assert response.status_code == 200
+    assert response.json() == payload
+
+
+def test_backend_instance_history_returns_series(client, db):
+    admin_user = models.User(
+        id="ADMINHISTORY001",
+        email="admin-history@entropydrop.com",
+        username="HistoryAdmin",
+    )
+    db.add(admin_user)
+    db.commit()
+    app.dependency_overrides[get_current_admin] = lambda: admin_user
+
+    payload = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "hours": 12,
+        "bucket_seconds": 300,
+        "series": [{"instance_id": "one", "display_name": "api-one", "samples": []}],
+    }
+    with patch("routers.monitor.list_backend_instance_history", return_value=payload):
+        response = client.get("/skin/api/monitor/backend-instances/history")
+
+    assert response.status_code == 200
+    assert response.json() == payload
+
 def test_unfinished_logs_non_admin(client):
     # If get_current_admin is not overridden, it will try to decode token and fail or raise 403/401
     response = client.get("/skin/api/monitor/unfinished")

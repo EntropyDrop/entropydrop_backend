@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import get_db
 from rate_limit import limiter
+from instance_monitor import list_backend_instance_history, list_backend_instance_metrics
 
 router = APIRouter(
     prefix="/api/monitor",
@@ -18,6 +19,29 @@ router = APIRouter(
 
 # Use the same connection params as in worker_tasks.py
 redis_conn = Redis.from_url(settings.REDIS_URL)
+
+
+@router.get("/backend-instances/history")
+@limiter.exempt
+async def get_backend_instance_history(
+    admin: User = Depends(get_current_admin),
+):
+    return list_backend_instance_history(
+        redis_conn,
+        history_hours=max(1, settings.BACKEND_METRICS_HISTORY_HOURS),
+        bucket_seconds=max(60, settings.BACKEND_METRICS_HISTORY_BUCKET_SECONDS),
+    )
+
+
+@router.get("/backend-instances")
+@limiter.exempt
+async def get_backend_instances(
+    admin: User = Depends(get_current_admin),
+):
+    return list_backend_instance_metrics(
+        redis_conn,
+        stale_after_seconds=max(1, settings.BACKEND_METRICS_STALE_AFTER_SECONDS),
+    )
 
 @router.get("/stats")
 @limiter.exempt

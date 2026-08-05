@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = 2
     DB_POOL_TIMEOUT: int = 30
     DB_POOL_RECYCLE: int = 1800
+
+    # Per-instance API resource monitoring. Each API task publishes a short
+    # heartbeat to Redis so the admin monitor can aggregate all replicas.
+    BACKEND_METRICS_INTERVAL_SECONDS: int = 10
+    BACKEND_METRICS_STALE_AFTER_SECONDS: int = 30
+    BACKEND_METRICS_TTL_SECONDS: int = 120
+    BACKEND_METRICS_HISTORY_HOURS: int = 12
+    BACKEND_METRICS_HISTORY_BUCKET_SECONDS: int = 300
     
     # JWT Auth Config
     JWT_SECRET_KEY: str = ""

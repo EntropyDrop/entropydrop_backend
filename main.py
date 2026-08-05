@@ -4,6 +4,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 from redis import Redis
 from sqlalchemy import text
 
@@ -11,6 +12,7 @@ from database import engine
 import models
 from routers import auth, generate, collections, address, order, webhooks, monitor, ledger, forum, credit
 from config import settings
+from instance_monitor import run_backend_instance_heartbeat
 
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
@@ -52,6 +54,35 @@ def check_readiness_dependencies():
     return status
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    interval_seconds = max(2, settings.BACKEND_METRICS_INTERVAL_SECONDS)
+    stale_after_seconds = max(1, settings.BACKEND_METRICS_STALE_AFTER_SECONDS)
+    task = asyncio.create_task(
+        run_backend_instance_heartbeat(
+            readiness_redis,
+            interval_seconds,
+            max(
+                settings.BACKEND_METRICS_TTL_SECONDS,
+                interval_seconds * 3,
+                stale_after_seconds + 1,
+            ),
+            check_readiness_dependencies,
+            max(1, settings.BACKEND_METRICS_HISTORY_HOURS),
+            max(60, settings.BACKEND_METRICS_HISTORY_BUCKET_SECONDS),
+        )
+    )
+    app.state.backend_instance_monitor_task = task
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 
 app = FastAPI(
     title="ED Backend API",
@@ -59,6 +90,7 @@ app = FastAPI(
     version="0.1.0",
     docs_url=None,
     redoc_url=None,
+    lifespan=lifespan,
 )
 
 app.state.limiter = limiter
