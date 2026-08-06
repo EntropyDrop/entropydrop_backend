@@ -172,6 +172,7 @@ def test_unfinished_logs_admin_success(client, db):
         error_msg="Test failure details",
         model_version="v2.5",
         aux_model_version="sdxl",
+        provider_submission_state="accepted",
         user_id="USER000000000001",
         created_at=now - datetime.timedelta(minutes=1)
     )
@@ -209,7 +210,9 @@ def test_unfinished_logs_admin_success(client, db):
     assert items[0]["error_msg"] == "Test failure details"
     assert items[0]["model_version"] == "v2.5"
     assert items[0]["aux_model_version"] == "sdxl"
+    assert items[0]["provider_submission_state"] == "accepted"
     assert items[1]["status"] == "processing_skin"
+    assert items[1]["provider_submission_state"] is None
     assert items[2]["status"] == "pending"
 
     # Verify data masking for the first item (USER000000000001 / john.doe@example.com / JohnDoe)

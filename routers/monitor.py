@@ -270,6 +270,7 @@ async def get_unfinished_logs(
         GenerationLog.aux_model_version,
         GenerationLog.created_at,
         GenerationLog.user_id,
+        GenerationLog.provider_submission_state,
         User.email,
         User.username
     ).outerjoin(
@@ -325,6 +326,7 @@ async def get_unfinished_logs(
             "user_id": masked_user_id,
             "user_email": masked_email,
             "user_username": masked_username,
+            "provider_submission_state": r.provider_submission_state,
         })
 
     total_pages = math.ceil(total_count / page_size) if total_count > 0 else 1
