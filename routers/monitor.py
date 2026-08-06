@@ -767,7 +767,6 @@ async def get_sking_ddj_generations(
             "model_version": log.model_version,
             "provider_task_id": log.provider_task_id,
             "provider_submission_state": log.provider_submission_state,
-            "pipeline_version": log.pipeline_version,
             "error_msg": log.error_msg,
             "created_at": log.created_at.isoformat() if log.created_at else None,
             "source_url": log.source_url if log.source else None,

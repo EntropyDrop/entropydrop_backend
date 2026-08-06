@@ -258,14 +258,12 @@ def test_generation_result_update_persists_stage1_provider_metadata():
             "stage": "real_to_render",
             "provider_task_id": "provider-task-123",
             "provider_submission_state": "accepted",
-            "pipeline_version": "sample-v0",
         },
     )
 
     assert updated is True
     assert log.provider_task_id == "provider-task-123"
     assert log.provider_submission_state == "accepted"
-    assert log.pipeline_version == "sample-v0"
 
 
 def test_generation_result_update_rejects_model_version_change():
@@ -453,7 +451,6 @@ def test_sking_ddj_generation_is_unrecoverable(
         GenerationLog.id == response.json()["id"]
     ).one()
     assert log.model_version == model_version
-    assert log.pipeline_version is None
     assert log.provider_submission_state == "not_started"
     assert log.source == f"uploads/{log.id}.png"
     assert log.edited_result is None
@@ -1428,7 +1425,6 @@ def test_re_enqueue_if_missing_does_not_duplicate_active_dense_uv_job(
         status="pending_skin",
         edited_result="real_to_render_intermediate/dense_active.png",
         model_version="SKING_DDJ_v54",
-        pipeline_version="dense-pipeline-v1",
         recoverable=False,
         created_at=(
             datetime.datetime.now(datetime.timezone.utc)

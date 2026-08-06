@@ -805,10 +805,6 @@ def apply_generation_result_update(log: models.GenerationLog, data: dict) -> boo
         log.provider_submission_state = data[
             "provider_submission_state"
         ]
-    # Accept legacy result messages while old queued jobs drain. New pipeline
-    # tasks report model_version and never select resources by pipeline_version.
-    if "pipeline_version" in data and log.pipeline_version is None:
-        log.pipeline_version = data["pipeline_version"]
     if "error_msg" in data:
         log.error_msg = data["error_msg"]
     elif status != "failed":
