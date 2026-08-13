@@ -3,6 +3,7 @@ from types import MappingProxyType
 
 
 SKING_DDJ_V66 = "SKING_DDJ_v66"
+SKING_DDJ_MODEL_PREFIX = "SKING_DDJ_"
 
 
 @dataclass(frozen=True)

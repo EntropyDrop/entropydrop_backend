@@ -302,9 +302,9 @@ def test_model_pipeline_mapping_is_immutable():
     assert pipeline.template_files == (
         "template41.png",
         "template51.png",
-        "template65.png",
         "template66.png",
         "template67.png",
+        "template68.png",
     )
     assert pipeline.provider_model == "nano-banana-pro"
     assert pipeline.image_size == "1K"
@@ -1595,7 +1595,7 @@ def test_get_discovery_random(client, db):
             mode="edit",
             result=f"res_{i}.png",
             status="success",
-            model_version=SKING_DDJ_V66,
+            model_version=f"SKING_DDJ_v{i}",
         )
         db.add(log)
     db.add(GenerationLog(
@@ -1923,4 +1923,3 @@ def test_generate_model_maintenance_block(client, db):
         assert "The selected model is under maintenance. Please choose another model." in response.json()["detail"]
     finally:
         backend_utils.redis_conn.delete("config:model_maintenance:sking_v73_flux_4b_000027000")
-
