@@ -80,6 +80,17 @@ def is_model_pro_exclusive(model_name: str) -> bool:
     return False
 
 
+def is_model_under_maintenance(model_name: str) -> bool:
+    try:
+        val = redis_conn.get(f"config:model_maintenance:{model_name}")
+        if val is not None:
+            return val == b"1"
+    except Exception as e:
+        print(f"Failed to check config:model_maintenance:{model_name} in Redis: {e}")
+    return False
+
+
+
 
 
 def award_daily_login_credits(db: Session, user: models.User):

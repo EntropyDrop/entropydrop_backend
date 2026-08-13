@@ -435,6 +435,7 @@ class SetModelPriceRequest(BaseModel):
     model_name: str
     credits: int
     is_pro: bool = False
+    under_maintenance: bool = False
 
 @router.get("/daily_free_credits")
 @limiter.exempt
@@ -469,7 +470,7 @@ async def get_model_prices_endpoint(
         AVAILABlE_TEXT_TO_IMAGE_MODELS,
         AVAILABLE_IMAGE_EDIT_MODELS
     )
-    from backend_utils import get_model_credit_cost, is_model_pro_exclusive
+    from backend_utils import get_model_credit_cost, is_model_pro_exclusive, is_model_under_maintenance
     
     all_models = (
         [m.replace(".safetensors", "") for m in AVAILABLE_IMAGE_TO_SKIN_MODELS] +
@@ -480,7 +481,8 @@ async def get_model_prices_endpoint(
     for m in all_models:
         prices[m] = {
             "credits": get_model_credit_cost(m),
-            "is_pro": is_model_pro_exclusive(m)
+            "is_pro": is_model_pro_exclusive(m),
+            "under_maintenance": is_model_under_maintenance(m)
         }
     return prices
 
@@ -496,7 +498,13 @@ async def set_model_price_endpoint(
     try:
         redis_conn.set(f"config:model_price:{req.model_name}", str(req.credits))
         redis_conn.set(f"config:model_pro:{req.model_name}", "1" if req.is_pro else "0")
-        return {"model_name": req.model_name, "credits": req.credits, "is_pro": req.is_pro}
+        redis_conn.set(f"config:model_maintenance:{req.model_name}", "1" if req.under_maintenance else "0")
+        return {
+            "model_name": req.model_name,
+            "credits": req.credits,
+            "is_pro": req.is_pro,
+            "under_maintenance": req.under_maintenance
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")
 

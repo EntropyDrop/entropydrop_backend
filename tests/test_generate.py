@@ -75,7 +75,7 @@ def test_get_models(client):
 def test_get_generation_credit_cost(mock_credit_cost, client):
     response = client.get("/skin/api/generation_credit_cost")
     assert response.status_code == 200
-    assert response.json() == {"credits": 5, "is_pro": False}
+    assert response.json() == {"credits": 5, "is_pro": False, "under_maintenance": False}
     mock_credit_cost.assert_called_once()
 
 def test_get_generation_credit_cost_with_params(client):
@@ -87,12 +87,12 @@ def test_get_generation_credit_cost_with_params(client):
         # Test model_version only
         response = client.get("/skin/api/generation_credit_cost?model_version=SKING_DDJ_v66")
         assert response.status_code == 200
-        assert response.json() == {"credits": 3, "is_pro": False}
+        assert response.json() == {"credits": 3, "is_pro": False, "under_maintenance": False}
 
         # Test aux_model_version + model_version
         response = client.get("/skin/api/generation_credit_cost?aux_model_version=z_image&model_version=SKING_DDJ_v66")
         assert response.status_code == 200
-        assert response.json() == {"credits": 5, "is_pro": False}
+        assert response.json() == {"credits": 5, "is_pro": False, "under_maintenance": False}
     finally:
         backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v66")
         backend_utils.redis_conn.delete("config:model_price:z_image")
@@ -105,7 +105,7 @@ def test_get_generation_credit_cost_pro_exclusive(client):
     try:
         response = client.get("/skin/api/generation_credit_cost?model_version=SKING_DDJ_v66")
         assert response.status_code == 200
-        assert response.json() == {"credits": 3, "is_pro": True}
+        assert response.json() == {"credits": 3, "is_pro": True, "under_maintenance": False}
     finally:
         backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v66")
         backend_utils.redis_conn.delete("config:model_pro:SKING_DDJ_v66")
@@ -301,9 +301,10 @@ def test_model_pipeline_mapping_is_immutable():
     assert pipeline.prompt_file == "real_to_render2.zh-hans.txt"
     assert pipeline.template_files == (
         "template41.png",
-        "template50.png",
         "template51.png",
-        "template52.png",
+        "template65.png",
+        "template66.png",
+        "template67.png",
     )
     assert pipeline.provider_model == "nano-banana-pro"
     assert pipeline.image_size == "1K"
@@ -1894,3 +1895,32 @@ def test_generate_image_edit_to_skin_maintenance_block(mock_is_enabled, client, 
     )
     assert response.status_code == 403
     assert "Image edit to skin generation is temporarily under maintenance." in response.json()["detail"]
+
+
+def test_generate_model_maintenance_block(client, db):
+    import backend_utils
+    # Set model under maintenance
+    backend_utils.redis_conn.set("config:model_maintenance:sking_v73_flux_4b_000027000", "1")
+    try:
+        # Create a dummy 768x768 image
+        img = Image.new('RGB', (768, 768), color='red')
+        img_io = io.BytesIO()
+        img.save(img_io, format='PNG')
+        img_data = img_io.getvalue()
+
+        payload = {
+            "prompt": "edit task",
+            "mode": "aigc_image_edit_to_skin",
+            "aux_model_version": "flux_4b",
+            "model_version": "sking_v73_flux_4b_000027000"
+        }
+        response = client.post(
+            "/skin/api/generate",
+            data=payload,
+            files={"file": ("test.png", img_data, "image/png")}
+        )
+        assert response.status_code == 403
+        assert "The selected model is under maintenance. Please choose another model." in response.json()["detail"]
+    finally:
+        backend_utils.redis_conn.delete("config:model_maintenance:sking_v73_flux_4b_000027000")
+
