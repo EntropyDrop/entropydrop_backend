@@ -10,7 +10,7 @@ from fastapi import BackgroundTasks
 from main import app
 from auth import get_current_user, get_current_user_optional
 from models import User, GenerationLog, UserFeedback, CreditLog
-from pipeline_registry import SKING_DDJ_V54, SKING_DDJ_V61
+from pipeline_registry import SKING_DDJ_V66
 import routers.generate
 
 pytestmark = pytest.mark.usefixtures("mock_auth", "mock_db_session")
@@ -63,7 +63,9 @@ def test_get_models(client):
     data = response.json()
     assert "image_to_skin_models" in data
     assert "sking_v73_flux_4b_000027000" in data["image_to_skin_models"]
-    assert "SKING_DDJ_v54" in data["image_to_skin_models"]
+    assert "SKING_DDJ_v66" in data["image_to_skin_models"]
+    assert "SKING_DDJ_v54" not in data["image_to_skin_models"]
+    assert "SKING_DDJ_v61" not in data["image_to_skin_models"]
     assert "SkingDDJ_v1" not in data["image_to_skin_models"]
     assert "text_to_image_models" in data
     assert "image_edit_models" in data
@@ -78,35 +80,35 @@ def test_get_generation_credit_cost(mock_credit_cost, client):
 
 def test_get_generation_credit_cost_with_params(client):
     import backend_utils
-    backend_utils.redis_conn.set("config:model_price:SKING_DDJ_v54", "3")
+    backend_utils.redis_conn.set("config:model_price:SKING_DDJ_v66", "3")
     backend_utils.redis_conn.set("config:model_price:z_image", "2")
 
     try:
         # Test model_version only
-        response = client.get("/skin/api/generation_credit_cost?model_version=SKING_DDJ_v54")
+        response = client.get("/skin/api/generation_credit_cost?model_version=SKING_DDJ_v66")
         assert response.status_code == 200
         assert response.json() == {"credits": 3, "is_pro": False}
 
         # Test aux_model_version + model_version
-        response = client.get("/skin/api/generation_credit_cost?aux_model_version=z_image&model_version=SKING_DDJ_v54")
+        response = client.get("/skin/api/generation_credit_cost?aux_model_version=z_image&model_version=SKING_DDJ_v66")
         assert response.status_code == 200
         assert response.json() == {"credits": 5, "is_pro": False}
     finally:
-        backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v54")
+        backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v66")
         backend_utils.redis_conn.delete("config:model_price:z_image")
 
 def test_get_generation_credit_cost_pro_exclusive(client):
     import backend_utils
-    backend_utils.redis_conn.set("config:model_price:SKING_DDJ_v54", "3")
-    backend_utils.redis_conn.set("config:model_pro:SKING_DDJ_v54", "1")
+    backend_utils.redis_conn.set("config:model_price:SKING_DDJ_v66", "3")
+    backend_utils.redis_conn.set("config:model_pro:SKING_DDJ_v66", "1")
 
     try:
-        response = client.get("/skin/api/generation_credit_cost?model_version=SKING_DDJ_v54")
+        response = client.get("/skin/api/generation_credit_cost?model_version=SKING_DDJ_v66")
         assert response.status_code == 200
         assert response.json() == {"credits": 3, "is_pro": True}
     finally:
-        backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v54")
-        backend_utils.redis_conn.delete("config:model_pro:SKING_DDJ_v54")
+        backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v66")
+        backend_utils.redis_conn.delete("config:model_pro:SKING_DDJ_v66")
 
 def test_get_active_generation_none(client, db):
     response = client.get("/skin/api/generate/active")
@@ -270,7 +272,7 @@ def test_generation_result_update_rejects_model_version_change():
     log = GenerationLog(
         id="model_guard",
         mode="aigc_image_to_skin",
-        model_version=SKING_DDJ_V54,
+        model_version=SKING_DDJ_V66,
         status="processing",
     )
 
@@ -288,42 +290,48 @@ def test_generation_result_update_rejects_model_version_change():
     assert updated is False
     assert log.status == "processing"
     assert log.result is None
-    assert log.model_version == SKING_DDJ_V54
+    assert log.model_version == SKING_DDJ_V66
 
 
 def test_model_pipeline_mapping_is_immutable():
-    assert set(routers.generate.MODEL_PIPELINES) == {
-        SKING_DDJ_V54,
-        SKING_DDJ_V61,
-    }
+    assert set(routers.generate.MODEL_PIPELINES) == {SKING_DDJ_V66}
     pipeline = routers.generate.MODEL_PIPELINES[
-        SKING_DDJ_V54
+        SKING_DDJ_V66
     ]
-    assert pipeline.prompt_file == "real_to_render.zh-hans.txt"
+    assert pipeline.prompt_file == "real_to_render2.zh-hans.txt"
     assert pipeline.template_files == (
         "template41.png",
+        "template50.png",
         "template51.png",
         "template52.png",
     )
     assert pipeline.provider_model == "nano-banana-pro"
     assert pipeline.image_size == "1K"
     assert pipeline.aspect_ratio == "1:1"
-    assert pipeline.dense_uv_checkpoint_file == "SKING_DDJ_v54.pt"
+    assert pipeline.dense_uv_checkpoint_file == "SKING_DDJ_v66.pt"
     assert pipeline.DMR_mappings_dir == "mappings_256x512"
     with pytest.raises(TypeError):
         routers.generate.MODEL_PIPELINES[
-            SKING_DDJ_V54
+            SKING_DDJ_V66
         ] = "replacement"
 
 
-@pytest.mark.parametrize("model_version", [SKING_DDJ_V54, SKING_DDJ_V61])
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V66])
 def test_identifies_sking_ddj_model_series(model_version):
     assert routers.generate.is_sking_ddj_model(model_version) is True
 
 
 @pytest.mark.parametrize(
     "model_version",
-    [None, "", "SKING_DDJ", "Sking_DDJ_v61", "sking_v73"],
+    [
+        None,
+        "",
+        "SKING_DDJ",
+        "SKING_DDJ_v54",
+        "SKING_DDJ_v61",
+        "Sking_DDJ_v61",
+        "sking_v73",
+    ],
 )
 def test_rejects_non_sking_ddj_model_prefixes(model_version):
     assert routers.generate.is_sking_ddj_model(model_version) is False
@@ -341,7 +349,7 @@ def test_recoverable_generation_keeps_rq_retry():
     assert retry.max == 99999
 
 
-@pytest.mark.parametrize("model_version", [SKING_DDJ_V54, SKING_DDJ_V61])
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V66])
 def test_sking_ddj_model_routes_to_real_to_render_without_retry(
     monkeypatch,
     model_version,
@@ -402,7 +410,7 @@ def test_dense_uv_model_is_rejected_for_text_to_skin(client):
             "prompt": "not a direct image pipeline",
             "mode": "aigc_text_to_skin",
             "aux_model_version": "z_image",
-            "model_version": "SKING_DDJ_v54",
+            "model_version": "SKING_DDJ_v66",
         },
     )
 
@@ -410,7 +418,7 @@ def test_dense_uv_model_is_rejected_for_text_to_skin(client):
     assert "Invalid model version combination" in response.json()["detail"]
 
 
-@pytest.mark.parametrize("model_version", [SKING_DDJ_V54, SKING_DDJ_V61])
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V66])
 def test_sking_ddj_generation_is_unrecoverable(
     monkeypatch,
     client,
@@ -999,7 +1007,7 @@ def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
     assert kwargs["job_id"] == "generation_recover_log_image_to_skin"
 
 
-@pytest.mark.parametrize("model_version", [SKING_DDJ_V54, SKING_DDJ_V61])
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V66])
 @pytest.mark.parametrize("status", ["pending_skin", "processing_skin"])
 def test_re_enqueue_if_missing_recovers_dense_uv_second_stage(
     monkeypatch,
@@ -1083,7 +1091,7 @@ def test_re_enqueue_if_missing_resumes_accepted_dense_uv_stage_one(
         user_id="test_user_generate",
         mode="aigc_image_to_skin",
         status="processing",
-        model_version="SKING_DDJ_v54",
+        model_version="SKING_DDJ_v66",
         provider_task_id="provider-task",
         recoverable=False,
         created_at=(
@@ -1128,9 +1136,9 @@ def test_re_enqueue_if_missing_resumes_accepted_dense_uv_stage_one(
     assert queue_name == "high_queue_real_to_render"
     assert args[0] == "tasks.resume_real_to_render"
     assert kwargs["args"][-3] == "provider-task"
-    assert kwargs["args"][-2] == SKING_DDJ_V54
+    assert kwargs["args"][-2] == SKING_DDJ_V66
     assert kwargs["args"][-1] == routers.generate.get_pipeline(
-        SKING_DDJ_V54
+        SKING_DDJ_V66
     ).to_task_payload()
     assert kwargs["retry"].max == 5
 
@@ -1146,7 +1154,7 @@ def test_re_enqueue_if_missing_does_not_repeat_uncertain_provider_submit(
         mode="aigc_image_to_skin",
         status="processing",
         source="uploads/dense_submit_unknown.png",
-        model_version="SKING_DDJ_v54",
+        model_version="SKING_DDJ_v66",
         provider_submission_state="unknown",
         recoverable=False,
         created_at=(
@@ -1200,7 +1208,7 @@ def test_re_enqueue_if_missing_requeues_dense_uv_stage_one_ghost(
         mode="aigc_image_to_skin",
         status="pending",
         source="uploads/dense_stage_one_ghost.png",
-        model_version="SKING_DDJ_v54",
+        model_version="SKING_DDJ_v66",
         recoverable=False,
         created_at=(
             datetime.datetime.now(datetime.timezone.utc)
@@ -1278,7 +1286,7 @@ def test_re_enqueue_if_missing_recreates_missing_dense_uv_stage_one_job(
         mode="aigc_image_to_skin",
         status="pending",
         source="uploads/dense_stage_one_missing.png",
-        model_version="SKING_DDJ_v54",
+        model_version="SKING_DDJ_v66",
         recoverable=False,
         created_at=(
             datetime.datetime.now(datetime.timezone.utc)
@@ -1331,7 +1339,7 @@ def test_re_enqueue_if_missing_recreates_missing_dense_uv_stage_one_job(
     assert queue_name == "high_queue_real_to_render"
     assert args[0] == "tasks.submit_real_to_render"
     assert kwargs["args"][-1] == routers.generate.get_pipeline(
-        SKING_DDJ_V54
+        SKING_DDJ_V66
     ).to_task_payload()
     assert kwargs["job_id"] == (
         "generation_dense_stage_one_missing_real_to_render"
@@ -1349,7 +1357,7 @@ def test_re_enqueue_if_missing_treats_intermediate_job_as_active(
         mode="aigc_image_to_skin",
         status="pending",
         source="uploads/dense_stage_one_intermediate.png",
-        model_version="SKING_DDJ_v54",
+        model_version="SKING_DDJ_v66",
         recoverable=False,
         created_at=(
             datetime.datetime.now(datetime.timezone.utc)
@@ -1424,7 +1432,7 @@ def test_re_enqueue_if_missing_does_not_duplicate_active_dense_uv_job(
         mode="aigc_image_to_skin",
         status="pending_skin",
         edited_result="real_to_render_intermediate/dense_active.png",
-        model_version="SKING_DDJ_v54",
+        model_version="SKING_DDJ_v66",
         recoverable=False,
         created_at=(
             datetime.datetime.now(datetime.timezone.utc)
@@ -1586,7 +1594,7 @@ def test_get_discovery_random(client, db):
             mode="edit",
             result=f"res_{i}.png",
             status="success",
-            model_version=f"SKING_DDJ_v{i}",
+            model_version=SKING_DDJ_V66,
         )
         db.add(log)
     db.add(GenerationLog(
@@ -1621,7 +1629,7 @@ def test_discovery_search_filters_by_model_series(client, db):
             mode="edit",
             result="ddj.png",
             status="success",
-            model_version="SKING_DDJ_v54",
+            model_version="SKING_DDJ_v66",
         ),
         GenerationLog(
             prompt="sking series",

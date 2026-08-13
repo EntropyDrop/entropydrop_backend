@@ -15,7 +15,6 @@ import backend_utils
 from config import settings
 from pipeline_registry import (
     MODEL_PIPELINES,
-    SKING_DDJ_MODEL_PREFIX,
     get_pipeline,
     is_sking_ddj_model,
 )
@@ -165,14 +164,7 @@ def uses_real_to_render_pipeline(log: models.GenerationLog) -> bool:
 
 
 def sking_ddj_model_filter():
-    return (
-        func.substr(
-            models.GenerationLog.model_version,
-            1,
-            len(SKING_DDJ_MODEL_PREFIX),
-        )
-        == SKING_DDJ_MODEL_PREFIX
-    )
+    return models.GenerationLog.model_version.in_(tuple(MODEL_PIPELINES))
 
 
 def uses_image_to_skin_intermediate(log: models.GenerationLog) -> bool:

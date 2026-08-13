@@ -2,9 +2,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 
-SKING_DDJ_V54 = "SKING_DDJ_v54"
-SKING_DDJ_V61 = "SKING_DDJ_v61"
-SKING_DDJ_MODEL_PREFIX = "SKING_DDJ_"
+SKING_DDJ_V66 = "SKING_DDJ_v66"
 
 
 @dataclass(frozen=True)
@@ -32,20 +30,7 @@ class SkinPipelineSpec:
 
 MODEL_PIPELINES = MappingProxyType(
     {
-        SKING_DDJ_V54: SkinPipelineSpec(
-            prompt_file="real_to_render.zh-hans.txt",
-            template_files=(
-                "template41.png",
-                "template51.png",
-                "template52.png",
-            ),
-            provider_model="nano-banana-pro",
-            image_size="1K",
-            aspect_ratio="1:1",
-            dense_uv_checkpoint_file="SKING_DDJ_v54.pt",
-            DMR_mappings_dir="mappings_256x512",
-        ),
-        SKING_DDJ_V61: SkinPipelineSpec(
+        SKING_DDJ_V66: SkinPipelineSpec(
             prompt_file="real_to_render2.zh-hans.txt",
             template_files=(
                 "template41.png",
@@ -57,7 +42,7 @@ MODEL_PIPELINES = MappingProxyType(
             provider_model="nano-banana-pro",
             image_size="1K",
             aspect_ratio="1:1",
-            dense_uv_checkpoint_file="SKING_DDJ_v61.pt",
+            dense_uv_checkpoint_file="SKING_DDJ_v66.pt",
             DMR_mappings_dir="mappings_256x512",
         ),
     }
@@ -65,10 +50,7 @@ MODEL_PIPELINES = MappingProxyType(
 
 
 def is_sking_ddj_model(model_version: str | None) -> bool:
-    return bool(
-        model_version
-        and model_version.startswith(SKING_DDJ_MODEL_PREFIX)
-    )
+    return bool(model_version and model_version in MODEL_PIPELINES)
 
 
 def get_pipeline(model_version: str) -> SkinPipelineSpec:
