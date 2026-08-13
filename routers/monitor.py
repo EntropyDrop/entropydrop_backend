@@ -671,6 +671,62 @@ async def gift_credits_to_seven_day_active_users(
         raise HTTPException(status_code=500, detail=f"Database error during gifting: {e}")
 
 
+@router.post("/gift_pro_users")
+@limiter.exempt
+async def gift_credits_to_pro_users(
+    req: GiftActiveUsersRequest,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    if req.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be positive")
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="Message is required")
+        
+    try:
+        all_users = db.query(User).filter(
+            User.pro_level != "free",
+            User.pro_expires_at.isnot(None)
+        ).all()
+        users = [u for u in all_users if u.is_pro]
+        print(f"Admin gifting {req.amount} credits to {len(users)} Pro users...")
+        
+        for u in users:
+            u.credits = (u.credits or 0) + req.amount
+            
+            # Generate a new CreditLog
+            gift_log = CreditLog(
+                user_id=u.id,
+                amount=req.amount,
+                action="system_gift",
+                source=req.message.strip()
+            )
+            db.add(gift_log)
+            db.flush() # Flush to get gift_log.id
+            
+            # Create system_gift ForumNotification
+            notif = ForumNotification(
+                user_id=u.id,
+                sender_id=None,
+                type="system_gift",
+                post_id=gift_log.id,
+                comment_id=str(req.amount),
+                is_read=False
+            )
+            db.add(notif)
+            
+        db.commit()
+        return {
+            "status": "success",
+            "gifted_users": len(users),
+            "message": f"Successfully gifted {req.amount} credits to {len(users)} Pro users"
+        }
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error during gifting: {e}")
+
+
 class GiftSpecificUserRequest(BaseModel):
     email: str
     amount: int

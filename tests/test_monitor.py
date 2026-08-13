@@ -654,6 +654,95 @@ def test_gift_credits_to_seven_day_active_users_success(client, db):
     app.dependency_overrides.clear()
 
 
+def test_gift_credits_to_pro_users_success(client, db):
+    # 1. Create admin user
+    admin_user = models.User(
+        id="ADMIN_GIFT_PRO",
+        email="admin-gift-pro@entropydrop.com",
+        username="AdminGiftPro",
+    )
+    db.add(admin_user)
+
+    # 2. Create target users (one pro user, one free user, one expired pro user)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    pro_user = models.User(
+        id="GIFT_PRO_001",
+        email="pro1@example.com",
+        username="ProOne",
+        credits=5,
+        pro_level="pro-plus",
+        pro_expires_at=now + datetime.timedelta(days=10)
+    )
+    free_user = models.User(
+        id="GIFT_FREE_001",
+        email="free1@example.com",
+        username="FreeOne",
+        credits=10,
+        pro_level="free",
+        pro_expires_at=None
+    )
+    expired_pro = models.User(
+        id="GIFT_PRO_EXPIRED",
+        email="pro_expired@example.com",
+        username="ProExpired",
+        credits=8,
+        pro_level="pro-plus",
+        pro_expires_at=now - datetime.timedelta(days=1)
+    )
+    db.add(pro_user)
+    db.add(free_user)
+    db.add(expired_pro)
+    db.commit()
+
+    # 3. Mock admin override
+    def mock_get_current_admin():
+        return admin_user
+    app.dependency_overrides[get_current_admin] = mock_get_current_admin
+
+    # 4. Attempt validation errors
+    # Negative amount
+    response = client.post("/skin/api/monitor/gift_pro_users", json={"amount": -5, "message": "Test"})
+    assert response.status_code == 400
+
+    # Empty message
+    response = client.post("/skin/api/monitor/gift_pro_users", json={"amount": 15, "message": "   "})
+    assert response.status_code == 400
+
+    # 5. Execute successful gift request
+    response = client.post("/skin/api/monitor/gift_pro_users", json={"amount": 25, "message": "Pro Perks Gift"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert response.json()["gifted_users"] == 1
+
+    # 6. Verify credits updated in database
+    db.refresh(pro_user)
+    db.refresh(free_user)
+    db.refresh(expired_pro)
+    assert pro_user.credits == 30
+    assert free_user.credits == 10
+    assert expired_pro.credits == 8
+
+    # 7. Verify only the active pro user gets a credit log.
+    pro_logs = db.query(models.CreditLog).filter(
+        models.CreditLog.action == "system_gift",
+        models.CreditLog.user_id == pro_user.id
+    ).all()
+    assert len(pro_logs) == 1
+    assert pro_logs[0].amount == 25
+    assert pro_logs[0].source == "Pro Perks Gift"
+
+    # 8. Verify notifications created
+    notifs = db.query(models.ForumNotification).filter(
+        models.ForumNotification.type == "system_gift",
+        models.ForumNotification.user_id == pro_user.id
+    ).all()
+    assert len(notifs) == 1
+    assert notifs[0].comment_id == "25"
+
+    # Clean up
+    app.dependency_overrides.clear()
+
+
 def test_get_sking_ddj_generations(client, db):
     # 1. Test unauthorized access
     response = client.get("/skin/api/monitor/sking_ddj_generations")
