@@ -361,6 +361,10 @@ async def admin_delete_log(
         files_to_delete.append((log.result, log.is_public))
     if log.edited_result:
         files_to_delete.append((log.edited_result, log.is_public))
+    if log.image_to_skin_edited_result:
+        files_to_delete.append(
+            (log.image_to_skin_edited_result, log.is_public)
+        )
 
     # 2. Trigger background cleaning task
     from routers.generate import cancel_generation_jobs, delete_s3_files_task
@@ -375,6 +379,7 @@ async def admin_delete_log(
     log.source = None
     log.result = None
     log.edited_result = None
+    log.image_to_skin_edited_result = None
     log.status = "deleted"
 
     # 4. Delete associated collection items
@@ -541,6 +546,10 @@ async def admin_delete_user_by_email(
             files_to_delete.append((log.result, log.is_public))
         if log.edited_result:
             files_to_delete.append((log.edited_result, log.is_public))
+        if log.image_to_skin_edited_result:
+            files_to_delete.append(
+                (log.image_to_skin_edited_result, log.is_public)
+            )
 
     if files_to_delete:
         from routers.generate import delete_s3_files_task
@@ -835,6 +844,11 @@ async def get_sking_ddj_generations(
             "created_at": log.created_at.isoformat() if log.created_at else None,
             "source_url": log.source_url if log.source else None,
             "edited_image_url": log.edited_image_url if log.edited_result else None,
+            "image_to_skin_edited_image_url": (
+                log.image_to_skin_edited_image_url
+                if log.image_to_skin_edited_result
+                else None
+            ),
             "result_url": log.result_url if log.result else None,
         })
 

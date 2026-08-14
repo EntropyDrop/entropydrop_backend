@@ -191,9 +191,13 @@ def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, c
     intermediate_filename = None
 
     if uses_image_to_skin_intermediate(log):
-        source = log.edited_result
-        skin_content_type = "image/jpeg"
-        intermediate_filename = log.edited_result
+        if uses_real_to_render_pipeline(log):
+            source = log.image_to_skin_edited_result
+            skin_content_type = "image/png"
+        else:
+            source = log.edited_result
+            skin_content_type = "image/jpeg"
+        intermediate_filename = source
 
     if not source:
         raise Exception(f"Cannot enqueue image_to_skin for {log.id}: missing source image")
@@ -307,10 +311,10 @@ def enqueue_render_to_uv_task(
             f"Generation {log.id} is not a SKING_DDJ "
             "image-to-skin task"
         )
-    if not log.edited_result:
+    if not log.image_to_skin_edited_result:
         raise ValueError(
             f"Cannot recover render_to_uv for {log.id}: "
-            "missing edited_result"
+            "missing image_to_skin_edited_result"
         )
 
     pipeline = get_pipeline(log.model_version)
@@ -325,7 +329,7 @@ def enqueue_render_to_uv_task(
         args=(
             log.id,
             log.is_public,
-            log.edited_result,
+            log.image_to_skin_edited_result,
             "image/png",
             log.model_version,
             pipeline.dense_uv_checkpoint_file,
@@ -812,8 +816,21 @@ def apply_generation_result_update(log: models.GenerationLog, data: dict) -> boo
     log.status = status
     if "result" in data:
         log.result = data["result"]
+    if "image_to_skin_edited_result" in data:
+        log.image_to_skin_edited_result = data[
+            "image_to_skin_edited_result"
+        ]
     if "edited_result" in data:
-        log.edited_result = data["edited_result"]
+        # Accept legacy SKING_DDJ worker payloads during a rolling deploy
+        # without allowing their internal image-to-skin artifact to overwrite
+        # the text/image-edit intermediate.
+        if (
+            is_sking_ddj_model(log.model_version)
+            and data.get("stage") in {"real_to_render", "render_to_uv"}
+        ):
+            log.image_to_skin_edited_result = data["edited_result"]
+        else:
+            log.edited_result = data["edited_result"]
     if "provider_task_id" in data:
         log.provider_task_id = data["provider_task_id"]
     if "provider_submission_state" in data:
@@ -1013,6 +1030,9 @@ async def get_history(
         result_url = log.result_url
         source_url = log.source_url
         edited_image_url = log.edited_image_url
+        image_to_skin_edited_image_url = (
+            log.image_to_skin_edited_image_url
+        )
         
         queue_pos = get_queue_position(db, log.id) if log.status in ACTIVE_GENERATION_STATUSES else 0
         
@@ -1024,6 +1044,9 @@ async def get_history(
             "source": source_url,
             "result": result_url,
             "edited_image_url": edited_image_url,
+            "image_to_skin_edited_image_url": (
+                image_to_skin_edited_image_url
+            ),
             "is_public": log.is_public,
             "status": log.status or "success",
             "error_msg": log.error_msg,
@@ -1292,6 +1315,7 @@ async def get_log(
     result_url = log.result_url
     source_url = log.source_url
     edited_image_url = log.edited_image_url
+    image_to_skin_edited_image_url = log.image_to_skin_edited_image_url
             
     queue_pos = get_queue_position(db, log.id) if log.status in ACTIVE_GENERATION_STATUSES else 0
     has_feedback = False
@@ -1309,6 +1333,7 @@ async def get_log(
         "result": result_url,
         "source": source_url,
         "edited_image_url": edited_image_url,
+        "image_to_skin_edited_image_url": image_to_skin_edited_image_url,
         "is_public": log.is_public,
         "status": log.status or "success",
         "error_msg": log.error_msg,
@@ -1403,19 +1428,29 @@ async def delete_log(
         files_to_delete.append((log.result, log.is_public))
     if log.edited_result:
         files_to_delete.append((log.edited_result, log.is_public))
+    if log.image_to_skin_edited_result:
+        files_to_delete.append(
+            (log.image_to_skin_edited_result, log.is_public)
+        )
 
     # 2. Trigger background cleaning task
     if files_to_delete:
         background_tasks.add_task(delete_s3_files_task, files_to_delete)
 
     # Clear user character settings if they set this skin as their character
-    if log.result or log.edited_result:
+    if log.result or log.edited_result or log.image_to_skin_edited_result:
         from sqlalchemy import or_
         filters = []
         if log.result:
             filters.append(models.User.minecraft_skin_url.like(f"%{log.result}%"))
         if log.edited_result:
             filters.append(models.User.minecraft_skin_url.like(f"%{log.edited_result}%"))
+        if log.image_to_skin_edited_result:
+            filters.append(
+                models.User.minecraft_skin_url.like(
+                    f"%{log.image_to_skin_edited_result}%"
+                )
+            )
         if filters:
             db.query(models.User).filter(or_(*filters)).update(
                 {"minecraft_skin_url": None},
@@ -1429,6 +1464,7 @@ async def delete_log(
     log.source = None
     log.result = None
     log.edited_result = None
+    log.image_to_skin_edited_result = None
     log.status = "deleted"
 
     # 4. Delete associated collection items
@@ -1501,6 +1537,7 @@ async def make_log_private(
     move_file(log.source)
     move_file(log.result)
     move_file(log.edited_result)
+    move_file(log.image_to_skin_edited_result)
 
     # Remove from any public collections since private skins cannot be in public collections
     public_col_items = db.query(models.CollectionItem).join(
@@ -1523,13 +1560,19 @@ async def make_log_private(
     log.parent = None
 
     # Clear user character settings if they set this skin as their character
-    if log.result or log.edited_result:
+    if log.result or log.edited_result or log.image_to_skin_edited_result:
         from sqlalchemy import or_
         filters = []
         if log.result:
             filters.append(models.User.minecraft_skin_url.like(f"%{log.result}%"))
         if log.edited_result:
             filters.append(models.User.minecraft_skin_url.like(f"%{log.edited_result}%"))
+        if log.image_to_skin_edited_result:
+            filters.append(
+                models.User.minecraft_skin_url.like(
+                    f"%{log.image_to_skin_edited_result}%"
+                )
+            )
         if filters:
             db.query(models.User).filter(or_(*filters)).update(
                 {"minecraft_skin_url": None},
@@ -1708,7 +1751,7 @@ def re_enqueue_if_missing():
                 models.GenerationLog.provider_submission_state
                 == "not_started",
             ),
-            models.GenerationLog.edited_result.is_(None),
+            models.GenerationLog.image_to_skin_edited_result.is_(None),
             models.GenerationLog.result.is_(None),
         )
         sking_ddj_accepted_stage_one = and_(
@@ -1716,7 +1759,7 @@ def re_enqueue_if_missing():
             models.GenerationLog.mode == "aigc_image_to_skin",
             models.GenerationLog.status.in_({"pending", "processing"}),
             models.GenerationLog.provider_task_id.is_not(None),
-            models.GenerationLog.edited_result.is_(None),
+            models.GenerationLog.image_to_skin_edited_result.is_(None),
             models.GenerationLog.result.is_(None),
         )
         stale_logs = db.query(models.GenerationLog).filter(
@@ -1767,7 +1810,7 @@ def re_enqueue_if_missing():
                         and log.mode == "aigc_image_to_skin"
                         and log.status in {"pending", "processing"}
                         and not log.provider_task_id
-                        and not log.edited_result
+                        and not log.image_to_skin_edited_result
                         and not log.result
                     ):
                         reused_job = requeue_existing_dense_uv_stage_one_job(log)

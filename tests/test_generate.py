@@ -268,6 +268,60 @@ def test_generation_result_update_persists_stage1_provider_metadata():
     assert log.provider_submission_state == "accepted"
 
 
+@pytest.mark.parametrize("stage", ["real_to_render", "render_to_uv"])
+def test_legacy_ddj_intermediate_does_not_overwrite_text_intermediate(stage):
+    log = GenerationLog(
+        id="separate_intermediates",
+        mode="aigc_text_to_skin",
+        model_version=SKING_DDJ_V66,
+        status="processing",
+        edited_result="text_to_image_intermediate/original.jpg",
+    )
+
+    updated = routers.generate.apply_generation_result_update(
+        log,
+        {
+            "log_id": log.id,
+            "status": "pending_skin",
+            "stage": stage,
+            "edited_result": "real_to_render_intermediate/normalized.png",
+        },
+    )
+
+    assert updated is True
+    assert log.edited_result == "text_to_image_intermediate/original.jpg"
+    assert log.image_to_skin_edited_result == (
+        "real_to_render_intermediate/normalized.png"
+    )
+
+
+def test_generation_result_update_persists_image_to_skin_intermediate():
+    log = GenerationLog(
+        id="new_intermediate_field",
+        mode="aigc_image_to_skin",
+        model_version=SKING_DDJ_V66,
+        status="processing",
+    )
+
+    updated = routers.generate.apply_generation_result_update(
+        log,
+        {
+            "log_id": log.id,
+            "status": "pending_skin",
+            "stage": "real_to_render",
+            "image_to_skin_edited_result": (
+                "real_to_render_intermediate/normalized.png"
+            ),
+        },
+    )
+
+    assert updated is True
+    assert log.edited_result is None
+    assert log.image_to_skin_edited_result == (
+        "real_to_render_intermediate/normalized.png"
+    )
+
+
 def test_generation_result_update_rejects_model_version_change():
     log = GenerationLog(
         id="model_guard",
@@ -690,6 +744,10 @@ def test_delete_log(mock_add_task, mock_cancel_jobs, client, db):
         mode="edit",
         source="uploads/source.png",
         result="generations/result.png",
+        edited_result="text_to_image_intermediate/edited.jpg",
+        image_to_skin_edited_result=(
+            "real_to_render_intermediate/render.png"
+        ),
         is_public=True
     )
     db.add(log)
@@ -707,6 +765,8 @@ def test_delete_log(mock_add_task, mock_cancel_jobs, client, db):
     assert log.status == "deleted"
     assert log.source is None
     assert log.result is None
+    assert log.edited_result is None
+    assert log.image_to_skin_edited_result is None
     mock_cancel_jobs.assert_called_once_with(log.id)
 
     # Verify S3 cleanup background task triggered
@@ -716,6 +776,8 @@ def test_delete_log(mock_add_task, mock_cancel_jobs, client, db):
     files_list = args[1]
     assert ("uploads/source.png", True) in files_list
     assert ("generations/result.png", True) in files_list
+    assert ("text_to_image_intermediate/edited.jpg", True) in files_list
+    assert ("real_to_render_intermediate/render.png", True) in files_list
 
 def test_delete_log_quota_limit(client, db):
     # Change status to non-Pro user
@@ -1023,7 +1085,9 @@ def test_re_enqueue_if_missing_recovers_dense_uv_second_stage(
         user_id=user.id,
         mode="aigc_image_to_skin",
         status=status,
-        edited_result="real_to_render_intermediate/unrecover.png",
+        image_to_skin_edited_result=(
+            "real_to_render_intermediate/unrecover.png"
+        ),
         model_version=model_version,
         aux_model_version="z_image",
         recoverable=False,
@@ -1432,7 +1496,9 @@ def test_re_enqueue_if_missing_does_not_duplicate_active_dense_uv_job(
         user_id="test_user_generate",
         mode="aigc_image_to_skin",
         status="pending_skin",
-        edited_result="real_to_render_intermediate/dense_active.png",
+        image_to_skin_edited_result=(
+            "real_to_render_intermediate/dense_active.png"
+        ),
         model_version="SKING_DDJ_v66",
         recoverable=False,
         created_at=(

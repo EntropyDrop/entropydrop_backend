@@ -185,8 +185,10 @@ async def update_minecraft_skin(
         log = db.query(models.GenerationLog).filter(
             (models.GenerationLog.result == req.minecraft_skin_url) |
             (models.GenerationLog.edited_result == req.minecraft_skin_url) |
+            (models.GenerationLog.image_to_skin_edited_result == req.minecraft_skin_url) |
             (models.GenerationLog.result == path) |
-            (models.GenerationLog.edited_result == path)
+            (models.GenerationLog.edited_result == path) |
+            (models.GenerationLog.image_to_skin_edited_result == path)
         ).first()
         
         if log and not log.is_public:

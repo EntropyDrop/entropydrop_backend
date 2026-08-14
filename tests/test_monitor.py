@@ -765,7 +765,7 @@ def test_get_sking_ddj_generations(client, db):
             status="success",
             model_version="SKING_DDJ_v66",
             source="source/img1.png",
-            edited_result="edited/img1.png",
+            image_to_skin_edited_result="edited/img1.png",
             result="result/img1.png",
             is_deleted=False,
             created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=10)
@@ -802,7 +802,7 @@ def test_get_sking_ddj_generations(client, db):
             status="success",
             model_version="SKING_DDJ_v66",
             source="source/img4.png",
-            edited_result="edited/img4.png",
+            image_to_skin_edited_result="edited/img4.png",
             result="result/img4.png",
             is_deleted=True,
             created_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)
@@ -829,6 +829,7 @@ def test_get_sking_ddj_generations(client, db):
         )
         assert data["items"][0]["source_url"] is not None
         assert data["items"][0]["edited_image_url"] is None
+        assert data["items"][0]["image_to_skin_edited_image_url"] is None
 
         # 6. Fetch second page
         response = client.get("/skin/api/monitor/sking_ddj_generations?page=2&page_size=1")
@@ -836,7 +837,8 @@ def test_get_sking_ddj_generations(client, db):
         data = response.json()
         assert len(data["items"]) == 1
         assert data["items"][0]["id"] == "LOG_DDJ_001"
-        assert data["items"][0]["edited_image_url"] is not None
+        assert data["items"][0]["edited_image_url"] is None
+        assert data["items"][0]["image_to_skin_edited_image_url"] is not None
 
     finally:
         app.dependency_overrides.clear()

@@ -71,10 +71,11 @@ class GenerationLog(Base):
     id = Column(String(16), primary_key=True, default=generate_base58_id, index=True)
     prompt = Column(String(500), nullable=True)
     name = Column(String(100), nullable=True)
-    mode = Column(String(50), nullable=False) # 'aigc_image_to_image', 'aigc_text_to_image', 'aigc_image_edit', 'human_edit', 'human_upload'
+    mode = Column(String(50), nullable=False) # 'aigc_image_to_skin', 'aigc_text_to_skin', 'aigc_image_edit_to_skin', 'human_edit', 'human_upload'
     source = Column(String(500), nullable=True) # Source image key in S3
     result = Column(String(500), nullable=True) # Generated image key, can be null (pending)
     edited_result = Column(String(500), nullable=True) # Intermediate edited image key
+    image_to_skin_edited_result = Column(String(500), nullable=True) # Image-to-skin pipeline intermediate key
     user_id = Column(String(16), index=True, nullable=True) # Associated user ID
     is_public = Column(Boolean, default=True, index=True)
     likes_count = Column(Integer, default=0)
@@ -113,6 +114,11 @@ class GenerationLog(Base):
     def edited_image_url(self):
         from s3_utils import get_s3_url
         return get_s3_url(self.edited_result, self.is_public)
+
+    @property
+    def image_to_skin_edited_image_url(self):
+        from s3_utils import get_s3_url
+        return get_s3_url(self.image_to_skin_edited_result, self.is_public)
 
 
 class Collection(Base):
@@ -378,5 +384,4 @@ class CreditLog(Base):
     action = Column(String(50), nullable=False)
     source = Column(String(100), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
-
 
