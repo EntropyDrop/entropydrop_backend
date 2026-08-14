@@ -336,6 +336,149 @@ def test_delete_log_non_admin_rejects(client, db):
     assert response.status_code in (401, 403)
 
 
+@patch("routers.generate.cancel_generation_jobs")
+@patch("routers.generate.BackgroundTasks.add_task")
+def test_delete_all_failed_tasks_admin_success(
+    mock_add_task,
+    mock_cancel_jobs,
+    client,
+    db,
+):
+    # 1. Create mock admin user
+    admin_user = models.User(
+        id="ADMIN_DEL_FAILED_0001",
+        email="admin-del-failed@entropydrop.com",
+        username="AdminDelFailed",
+    )
+    db.add(admin_user)
+    
+    # 2. Create targets (failed logs)
+    log1 = models.GenerationLog(
+        id="LOGFAIL00001",
+        prompt="Fail 1",
+        user_id="USER000000000001",
+        mode="aigc_text_to_image",
+        status="failed",
+        source="uploads/source1.png",
+        result="generations/result1.png",
+        is_public=True
+    )
+    log2 = models.GenerationLog(
+        id="LOGFAIL00002",
+        prompt="Fail 2",
+        user_id="USER000000000001",
+        mode="aigc_text_to_image",
+        status="failed",
+        source="uploads/source2.png",
+        result=None,
+        is_public=True
+    )
+    # Log that is not failed (pending) - should not be deleted
+    log3 = models.GenerationLog(
+        id="LOGPEND00003",
+        prompt="Pending",
+        user_id="USER000000000001",
+        mode="aigc_text_to_image",
+        status="pending",
+        source="uploads/source3.png",
+        is_public=True
+    )
+    db.add_all([log1, log2, log3])
+    db.commit()
+
+    # 3. Create related entities for log1 and log2
+    col_item1 = models.CollectionItem(
+        id="COLITEM000000001",
+        collection_id="COL0000000000001",
+        log_id=log1.id
+    )
+    col_item2 = models.CollectionItem(
+        id="COLITEM000000002",
+        collection_id="COL0000000000001",
+        log_id=log2.id
+    )
+    like1 = models.UserLike(
+        id="LIKE0000000000001",
+        user_id="USER000000000001",
+        log_id=log1.id
+    )
+    feedback2 = models.UserFeedback(
+        id="FB000000000000002",
+        log_id=log2.id,
+        is_good=False
+    )
+    db.add_all([col_item1, col_item2, like1, feedback2])
+    db.commit()
+
+    # 4. Verify relations exist
+    assert db.query(models.CollectionItem).filter(models.CollectionItem.log_id.in_([log1.id, log2.id])).count() == 2
+    assert db.query(models.UserLike).filter(models.UserLike.log_id == log1.id).count() == 1
+    assert db.query(models.UserFeedback).filter(models.UserFeedback.log_id == log2.id).count() == 1
+
+    # 5. Mock admin authorization
+    def mock_get_current_admin():
+        return admin_user
+    app.dependency_overrides[get_current_admin] = mock_get_current_admin
+
+    # 6. Execute delete request
+    response = client.delete("/skin/api/monitor/failed-tasks")
+    assert response.status_code == 200
+    assert response.json()["deleted_count"] == 2
+
+    # 7. Verify soft deletion & cleared attributes in DB for failed logs
+    db.refresh(log1)
+    db.refresh(log2)
+    db.refresh(log3)
+
+    assert log1.is_deleted is True
+    assert log1.prompt is None
+    assert log1.name == "Deleted"
+    assert log1.status == "deleted"
+    assert log1.source is None
+    assert log1.result is None
+
+    assert log2.is_deleted is True
+    assert log2.prompt is None
+    assert log2.name == "Deleted"
+    assert log2.status == "deleted"
+    assert log2.source is None
+    assert log2.result is None
+
+    # Verify pending log is untouched
+    assert log3.is_deleted is False
+    assert log3.prompt == "Pending"
+    assert log3.status == "pending"
+
+    # Verify cancel jobs was called for log1 and log2
+    assert mock_cancel_jobs.call_count == 2
+
+    # 8. Verify S3 cleanup background task was scheduled
+    mock_add_task.assert_called_once()
+    args = mock_add_task.call_args[0]
+    assert args[0].__name__ == "delete_s3_files_task"
+    files_list = args[1]
+    # S3 files for log1 and log2 should be queued
+    assert ("uploads/source1.png", True) in files_list
+    assert ("generations/result1.png", True) in files_list
+    assert ("uploads/source2.png", True) in files_list
+    # Pending log S3 file should not be in deletion list
+    assert ("uploads/source3.png", True) not in files_list
+
+    # 9. Verify relations are deleted
+    assert db.query(models.CollectionItem).filter(models.CollectionItem.log_id.in_([log1.id, log2.id])).count() == 0
+    assert db.query(models.UserLike).filter(models.UserLike.log_id == log1.id).count() == 0
+    assert db.query(models.UserFeedback).filter(models.UserFeedback.log_id == log2.id).count() == 0
+
+    app.dependency_overrides.clear()
+
+
+def test_delete_all_failed_tasks_non_admin_rejects(client, db):
+    # No dependency overrides set for get_current_admin, should reject
+    response = client.delete("/skin/api/monitor/failed-tasks")
+    assert response.status_code in (401, 403)
+
+
+
 def test_daily_free_credits_endpoints(client, db):
     admin_user = models.User(
         id="ADMIN_FREE_CREDITS_001",

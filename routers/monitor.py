@@ -396,6 +396,69 @@ async def admin_delete_log(
     return {"message": f"Creation {id} soft-deleted, properties cleared, and files queued for S3 deletion by admin"}
 
 
+@router.delete("/failed-tasks")
+@limiter.exempt
+async def admin_delete_all_failed_tasks(
+    background_tasks: BackgroundTasks,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    """Admin-only: Soft-delete all failed generation tasks and clean their associated files and data"""
+    failed_logs = db.query(GenerationLog).filter(
+        GenerationLog.status == "failed",
+        GenerationLog.is_deleted == False
+    ).all()
+    
+    if not failed_logs:
+        return {"message": "No failed tasks to delete", "deleted_count": 0}
+        
+    from routers.generate import cancel_generation_jobs, delete_s3_files_task
+    
+    files_to_delete = []
+    log_ids = []
+    
+    for log in failed_logs:
+        log_ids.append(log.id)
+        # Collect S3 files that need cleaning
+        if log.source:
+            files_to_delete.append((log.source, log.is_public))
+        if log.result:
+            files_to_delete.append((log.result, log.is_public))
+        if log.edited_result:
+            files_to_delete.append((log.edited_result, log.is_public))
+        if log.image_to_skin_edited_result:
+            files_to_delete.append((log.image_to_skin_edited_result, log.is_public))
+            
+        # Cancel generation jobs
+        cancel_generation_jobs(log.id)
+        
+        # Clean database attributes (soft delete)
+        log.is_deleted = True
+        log.prompt = None
+        log.name = "Deleted"
+        log.source = None
+        log.result = None
+        log.edited_result = None
+        log.image_to_skin_edited_result = None
+        log.status = "deleted"
+        
+    if files_to_delete:
+        background_tasks.add_task(delete_s3_files_task, files_to_delete)
+        
+    # Delete associated relations in bulk
+    db.query(CollectionItem).filter(CollectionItem.log_id.in_(log_ids)).delete(synchronize_session=False)
+    db.query(UserLike).filter(UserLike.log_id.in_(log_ids)).delete(synchronize_session=False)
+    db.query(UserFeedback).filter(UserFeedback.log_id.in_(log_ids)).delete(synchronize_session=False)
+        
+    db.commit()
+    
+    return {
+        "message": f"Successfully soft-deleted {len(failed_logs)} failed tasks",
+        "deleted_count": len(failed_logs)
+    }
+
+
+
 from pydantic import BaseModel
 
 
