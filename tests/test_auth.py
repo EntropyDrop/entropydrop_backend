@@ -109,15 +109,26 @@ def test_update_minecraft_skin(client, db):
     response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": ""})
     assert response.status_code == 422
 
-    # Valid payload should succeed
+    # Valid payload should succeed with slim model
     new_skin_url = "https://s3.amazonaws.com/mybucket/skins/123.png"
-    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": new_skin_url})
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": new_skin_url, "minecraft_skin_model": "slim"})
     assert response.status_code == 200
     data = response.json()
     assert data["minecraft_skin_url"] == new_skin_url
+    assert data["minecraft_skin_model"] == "slim"
 
     db.refresh(user)
     assert user.minecraft_skin_url == new_skin_url
+    assert user.minecraft_skin_model == "slim"
+
+    # Valid payload should succeed with strong model
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": new_skin_url, "minecraft_skin_model": "strong"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["minecraft_skin_model"] == "strong"
+
+    db.refresh(user)
+    assert user.minecraft_skin_model == "strong"
 
     # Null payload should reset the character
     response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": None})

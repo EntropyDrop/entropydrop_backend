@@ -10,6 +10,7 @@ class UpdateUsernameRequest(BaseModel):
 
 class UpdateMinecraftSkinRequest(BaseModel):
     minecraft_skin_url: Optional[str] = Field(None, min_length=1, max_length=500)
+    minecraft_skin_model: Optional[str] = Field("strong", max_length=20)
 
 class UserResponse(BaseModel):
     id: str
@@ -18,6 +19,7 @@ class UserResponse(BaseModel):
     picture: Optional[str] = None
     google_id: Optional[str] = None
     minecraft_skin_url: Optional[str] = None
+    minecraft_skin_model: Optional[str] = "strong"
     
     # Priority fields
     terms_agreed: Optional[bool] = False

@@ -68,7 +68,8 @@ async def google_login(req: schemas.GoogleAuthRequest, db: Session = Depends(get
         "credits": user.credits,
         "paypal_subscription_id": user.paypal_subscription_id,
         "paypal_subscription_status": user.paypal_subscription_status,
-        "minecraft_skin_url": user.minecraft_skin_url
+        "minecraft_skin_url": user.minecraft_skin_url,
+        "minecraft_skin_model": user.minecraft_skin_model or "strong"
     }
     return {"access_token": access_token, "token_type": "bearer", "user": user_res}
 
@@ -91,7 +92,8 @@ async def get_my_profile(db: Session = Depends(get_db), current_user: models.Use
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
         "paypal_subscription_status": current_user.paypal_subscription_status,
-        "minecraft_skin_url": current_user.minecraft_skin_url
+        "minecraft_skin_url": current_user.minecraft_skin_url,
+        "minecraft_skin_model": current_user.minecraft_skin_model or "strong"
     }
     return user_res
 
@@ -117,7 +119,8 @@ async def agree_terms(db: Session = Depends(get_db), current_user: models.User =
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
         "paypal_subscription_status": current_user.paypal_subscription_status,
-        "minecraft_skin_url": current_user.minecraft_skin_url
+        "minecraft_skin_url": current_user.minecraft_skin_url,
+        "minecraft_skin_model": current_user.minecraft_skin_model or "strong"
     }
 
 @router.post("/api/users/me/cancel_subscription")
@@ -164,7 +167,8 @@ async def update_username(
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
         "paypal_subscription_status": current_user.paypal_subscription_status,
-        "minecraft_skin_url": current_user.minecraft_skin_url
+        "minecraft_skin_url": current_user.minecraft_skin_url,
+        "minecraft_skin_model": current_user.minecraft_skin_model or "strong"
     }
 
 @router.post("/api/users/me/minecraft_skin", response_model=schemas.UserResponse)
@@ -198,6 +202,8 @@ async def update_minecraft_skin(
             )
 
     current_user.minecraft_skin_url = req.minecraft_skin_url
+    if req.minecraft_skin_model is not None:
+        current_user.minecraft_skin_model = "slim" if req.minecraft_skin_model.lower() in ["slim", "alex"] else "strong"
     db.commit()
     db.refresh(current_user)
     return {
@@ -217,7 +223,8 @@ async def update_minecraft_skin(
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
         "paypal_subscription_status": current_user.paypal_subscription_status,
-        "minecraft_skin_url": current_user.minecraft_skin_url
+        "minecraft_skin_url": current_user.minecraft_skin_url,
+        "minecraft_skin_model": current_user.minecraft_skin_model or "strong"
     }
 
 @router.get("/api/users/me/credits/history")
