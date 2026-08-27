@@ -4,7 +4,7 @@ import secrets
 import uuid
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
@@ -14,9 +14,13 @@ import auth
 import models
 from config import settings
 from database import get_db
+from rate_limit import limiter
 
 
 router = APIRouter(prefix="/space/api/v2", tags=["space"])
+
+# 20x ordinary API rate limits (ordinary is 60/min, 1000/hr, 4000/day)
+SPACE_HIGH_FREQ_RATE_LIMIT = "1200/minute; 20000/hour; 80000/day"
 
 SPACE_CHUNK_SIZE = 16
 SPACE_WORLD_HEIGHT = 128
@@ -344,8 +348,16 @@ def _get_or_create_player_profile(
         return existing
 
 
+@router.get("/ping")
+@limiter.exempt
+def ping_space():
+    return {"status": "ok"}
+
+
 @router.post("/bootstrap", response_model=SpaceBootstrapResponse)
+@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
 def bootstrap_space(
+    request: Request,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
@@ -398,9 +410,11 @@ def bootstrap_space(
 
 
 @router.put("/worlds/{world_id}/players/me/position")
+@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
 def update_player_position(
+    request: Request,
     world_id: uuid.UUID,
-    request: PlayerPositionUpdateRequest,
+    position_request: PlayerPositionUpdateRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
@@ -408,10 +422,10 @@ def update_player_position(
     world = _require_world_membership(db, str(world_id), current_user)
     position = _validate_player_position(
         world,
-        request.x_cm,
-        request.y_cm,
-        request.z_cm,
-        request.yaw_q15,
+        position_request.x_cm,
+        position_request.y_cm,
+        position_request.z_cm,
+        position_request.yaw_q15,
     )
     encoded = _encode_player_snapshot(position)
     snapshot = db.query(models.SpacePlayerSnapshot).filter(
@@ -457,7 +471,9 @@ def update_player_position(
 
 
 @router.get("/worlds/{world_id}/terrain-edits")
+@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
 def list_terrain_edits(
+    request: Request,
     world_id: uuid.UUID,
     cursor: str | None = Query(default=None, max_length=32),
     limit: int = Query(default=MAX_SNAPSHOT_PAGE_SIZE, ge=1, le=MAX_SNAPSHOT_PAGE_SIZE),
@@ -502,15 +518,17 @@ def list_terrain_edits(
 
 
 @router.post("/worlds/{world_id}/terrain-edits/batches")
+@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
 def apply_terrain_mutation_batch(
+    request: Request,
     world_id: uuid.UUID,
-    request: TerrainMutationBatchRequest,
+    batch_request: TerrainMutationBatchRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
     """Atomically apply at most 256 idempotent terrain mutations."""
     world = _require_world_membership(db, str(world_id), current_user)
-    batch_id = str(request.batch_id)
+    batch_id = str(batch_request.batch_id)
     receipt = db.query(models.SpaceTerrainMutationBatch).filter(
         models.SpaceTerrainMutationBatch.world_id == world.id,
         models.SpaceTerrainMutationBatch.batch_id == batch_id,
@@ -520,7 +538,7 @@ def apply_terrain_mutation_batch(
 
     normalized: list[tuple] = []
     touched_chunks: set[tuple[int, int]] = set()
-    for mutation in request.mutations:
+    for mutation in batch_request.mutations:
         if mutation.kind == "set_standard":
             x, y, z = _standard_cell(mutation, world)
             block = mutation.block
@@ -625,7 +643,7 @@ def apply_terrain_mutation_batch(
     result = {
         "world_id": str(world.id),
         "batch_id": batch_id,
-        "applied": len(request.mutations),
+        "applied": len(batch_request.mutations),
         "chunks": revisions,
     }
     db.add(models.SpaceTerrainMutationBatch(

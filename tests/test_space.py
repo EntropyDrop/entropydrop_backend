@@ -25,6 +25,18 @@ def _user(db, user_id: str, skin_url: str | None):
     return user
 
 
+def test_space_ping_returns_ok_without_authentication(client):
+    response = client.get("/space/api/v2/ping")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_space_ping_is_exempt_from_rate_limit(client):
+    for _ in range(70):
+        response = client.get("/space/api/v2/ping")
+        assert response.status_code == 200
+
+
 def test_space_bootstrap_requires_shared_login(client):
     response = client.post("/space/api/v2/bootstrap")
     assert response.status_code in (401, 403)
