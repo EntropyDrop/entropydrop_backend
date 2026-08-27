@@ -222,6 +222,21 @@ COMMENT ON COLUMN chunk_snapshots.revision IS
 CREATE INDEX chunk_snapshots_resume_idx
     ON chunk_snapshots (world_id, last_event_id);
 
+CREATE INDEX ix_chunk_snapshots_world_revision
+    ON chunk_snapshots (world_id, revision);
+
+-- Transitional REST bridge idempotency receipts. The authoritative WebSocket
+-- worker later deduplicates with world_events.client_op_id instead, but keeping
+-- a stable batch UUID is required while clients upload edits over FastAPI.
+CREATE TABLE space_terrain_mutation_batches (
+    world_id     UUID        NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+    batch_id     UUID        NOT NULL,
+    actor_user_id VARCHAR(16) REFERENCES users(id) ON DELETE SET NULL,
+    result       JSONB       NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (world_id, batch_id)
+);
+
 -- -----------------------------------------------------------------------------
 -- 4. Ordered durable mutation log
 --

@@ -1,9 +1,10 @@
 # Space Multiplayer V2: Real-Time Backend and Persistence Design
 
-> Status: the shared-user bootstrap and durable birth-point slice are implemented;
-> the authoritative gateway/worker, persistence stream and queue below are the
-> target architecture. No deployed Space data exists, so there is no legacy table
-> compatibility layer.
+> Status: shared-user bootstrap, durable birth points, paginated authored chunk
+> overlays, and idempotent terrain mutation batches are implemented. The current
+> client uses authenticated REST as a transitional persistence transport. The
+> authoritative gateway/worker, event stream, and queue below remain the target
+> real-time architecture.
 >
 > Contracts: see [`space/contracts/schema.sql`](../space/contracts/schema.sql) for the
 > database and [`space/contracts/protocol.proto`](../space/contracts/protocol.proto)
@@ -351,6 +352,12 @@ compressed overlay:
 
 Untouched chunks have no `chunk_snapshots` row. Workers generate base terrain from
 `seed + terrain_generator_version`, then apply the overlay.
+
+The transitional FastAPI slice stores the same logical standard/micro overlay as
+canonical raw JSON (`codec=0`) and verifies its SHA-256 on read. This makes cross-browser
+persistence available before the worker and packed codec ship without introducing
+per-cell database rows. The packed codec can replace payload encoding in place while
+preserving the table, revisions, and REST response model.
 
 This is logically complete persistence of every block, including microblocks: procedural
 cells are reproduced exactly by immutable seed/generator version, while every authored
@@ -726,11 +733,13 @@ numbers, but no entity count may silently erase the aggregate cap.
 
 ### 11.1 REST Control Plane
 
-`POST /space/api/v2/bootstrap` is implemented in the current FastAPI service.
-The remaining endpoints in this list belong to the gateway/worker delivery phases.
+The bootstrap and terrain-overlay endpoints are implemented in the current FastAPI
+service. The remaining endpoints belong to the gateway/worker delivery phases.
 
 ```text
 POST   /space/api/v2/bootstrap                  Existing Bearer user + skin gate + durable spawn
+GET    /space/api/v2/worlds/{id}/terrain-edits  Paginated durable authored chunk overlays
+POST   /space/api/v2/worlds/{id}/terrain-edits/batches  Idempotent batch of 1-256 mutations
 POST   /space/api/v2/worlds/{id}/join-ticket    Issue a short-lived real-time ticket
 GET    /space/api/v2/worlds/{id}                Read metadata and membership permissions
 GET    /space/api/v2/worlds/{id}/members        List members with permission
@@ -742,10 +751,11 @@ GET    /space/api/v2/jobs/{id}                  Read job status
 ```
 
 Authentication remains on the existing EntropyDrop `/skin/api/auth/*` routes;
-Space must not add a login/session API. Movement, terrain edits, entity commands, AOI, and state
-synchronization never use REST. REST serves immutable bytes/control-plane work; there is
-deliberately no inventory/backpack endpoint. Asset responses require current world access,
-use immutable cache headers plus ETag, and never expose raw object-storage keys.
+Space must not add a login/session API. Until the authoritative WebSocket worker ships,
+terrain snapshots and bounded mutation batches use the authenticated REST bridge above;
+movement, entities, AOI, and physics state do not. There is deliberately no
+inventory/backpack endpoint. Asset responses require current world access, use immutable
+cache headers plus ETag, and never expose raw object-storage keys.
 
 ### 11.2 Real-Time Channel
 

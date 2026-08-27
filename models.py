@@ -4,7 +4,7 @@ from datetime import timezone
 import uuid
 import random
 import secrets
-from sqlalchemy import Column, Integer, String, DateTime, Text, JSON, Boolean, Float, Index, UniqueConstraint, Date, ForeignKey, Uuid
+from sqlalchemy import Column, Integer, BigInteger, SmallInteger, String, DateTime, Text, JSON, Boolean, Float, Index, UniqueConstraint, Date, ForeignKey, Uuid, LargeBinary
 from database import Base
 
 def generate_base58_id(length=16):
@@ -96,6 +96,47 @@ class SpaceWorldPlayerProfile(Base):
     spawn_yaw_q15 = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
+
+
+class SpaceChunkSnapshot(Base):
+    """Packed player-authored voxel overlay for one Space terrain chunk."""
+    __tablename__ = "chunk_snapshots"
+    __table_args__ = (
+        Index("ix_chunk_snapshots_world_revision", "world_id", "revision"),
+        Index("chunk_snapshots_resume_idx", "world_id", "last_event_id"),
+    )
+
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
+    chunk_x = Column(Integer, primary_key=True)
+    chunk_z = Column(Integer, primary_key=True)
+    revision = Column(BigInteger, nullable=False, default=0)
+    last_event_id = Column(BigInteger, nullable=False, default=0)
+    codec = Column(SmallInteger, nullable=False, default=0)
+    codec_version = Column(SmallInteger, nullable=False, default=1)
+    uncompressed_size = Column(Integer, nullable=False, default=0)
+    content_hash = Column(LargeBinary(32), nullable=False)
+    payload = Column(LargeBinary, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+
+
+class SpaceTerrainMutationBatch(Base):
+    """Idempotency receipt for one accepted client terrain mutation batch."""
+    __tablename__ = "space_terrain_mutation_batches"
+
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
+    batch_id = Column(Uuid(as_uuid=False), primary_key=True)
+    actor_user_id = Column(String(16), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    result = Column(JSON, nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
 
 class GenerationLog(Base):
     """Generation log model"""

@@ -1,8 +1,12 @@
+import hashlib
+import json
 import secrets
 import uuid
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
+from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -13,6 +17,13 @@ from database import get_db
 
 
 router = APIRouter(prefix="/space/api/v2", tags=["space"])
+
+SPACE_CHUNK_SIZE = 16
+SPACE_WORLD_HEIGHT = 128
+SPACE_MICRO_DIVISIONS = 5
+MAX_TERRAIN_MUTATIONS_PER_BATCH = 256
+MAX_CHUNK_SNAPSHOT_BYTES = 4 * 1024 * 1024
+MAX_SNAPSHOT_PAGE_SIZE = 256
 
 
 class SpaceWorldResponse(BaseModel):
@@ -41,6 +52,154 @@ class SpaceBootstrapResponse(BaseModel):
     websocket_url: str
     world: SpaceWorldResponse
     player: SpacePlayerResponse
+
+
+class TerrainMutation(BaseModel):
+    kind: Literal["set_standard", "set_micro", "remove_micro", "clear_micro_cell"]
+    x: int | None = None
+    y: int | None = None
+    z: int | None = None
+    mx: int | None = None
+    my: int | None = None
+    mz: int | None = None
+    block: int | None = None
+    color: int | None = None
+    part: str | None = Field(default=None, max_length=64)
+
+
+class TerrainMutationBatchRequest(BaseModel):
+    batch_id: uuid.UUID
+    mutations: list[TerrainMutation] = Field(
+        min_length=1,
+        max_length=MAX_TERRAIN_MUTATIONS_PER_BATCH,
+    )
+
+
+def _empty_chunk_overlay() -> dict:
+    return {"standard": [], "micro": []}
+
+
+def _decode_chunk_overlay(snapshot: models.SpaceChunkSnapshot | None) -> dict:
+    if snapshot is None or not snapshot.payload:
+        return _empty_chunk_overlay()
+    if (
+        snapshot.codec != 0
+        or snapshot.uncompressed_size != len(snapshot.payload)
+        or snapshot.content_hash != hashlib.sha256(snapshot.payload).digest()
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "世界区块快照校验失败。"},
+        )
+    try:
+        payload = json.loads(snapshot.payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "世界区块快照损坏。"},
+        ) from exc
+    return {
+        "standard": payload.get("standard", []) if isinstance(payload.get("standard"), list) else [],
+        "micro": payload.get("micro", []) if isinstance(payload.get("micro"), list) else [],
+    }
+
+
+def _encode_chunk_overlay(payload: dict) -> tuple[bytes, bytes]:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > MAX_CHUNK_SNAPSHOT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "CHUNK_OVERLAY_TOO_LARGE", "message": "单个区块的方块修改数据过大。"},
+        )
+    return encoded, hashlib.sha256(encoded).digest()
+
+
+def _require_world_membership(
+    db: Session,
+    world_id: str,
+    user: models.User,
+) -> models.SpaceWorld:
+    world = db.query(models.SpaceWorld).filter(models.SpaceWorld.id == world_id).first()
+    if world is None:
+        raise HTTPException(status_code=404, detail={"code": "WORLD_NOT_FOUND"})
+    membership = db.query(models.SpaceWorldPlayerProfile).filter(
+        models.SpaceWorldPlayerProfile.world_id == world.id,
+        models.SpaceWorldPlayerProfile.user_id == user.id,
+    ).first()
+    if membership is None:
+        raise HTTPException(status_code=403, detail={"code": "WORLD_MEMBERSHIP_REQUIRED"})
+    return world
+
+
+def _parse_snapshot_cursor(cursor: str | None) -> tuple[int, int] | None:
+    if not cursor:
+        return None
+    try:
+        cx, cz = (int(part) for part in cursor.split(",", 1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail={"code": "INVALID_CURSOR"})
+    if cx < 0 or cz < 0:
+        raise HTTPException(status_code=422, detail={"code": "INVALID_CURSOR"})
+    return cx, cz
+
+
+def _standard_cell(mutation: TerrainMutation, world: models.SpaceWorld) -> tuple[int, int, int]:
+    if mutation.x is None or mutation.y is None or mutation.z is None:
+        raise HTTPException(status_code=422, detail={"code": "INVALID_TERRAIN_MUTATION"})
+    max_x = world.width_chunks * SPACE_CHUNK_SIZE
+    max_z = world.length_chunks * SPACE_CHUNK_SIZE
+    if not (0 <= mutation.x < max_x and 0 <= mutation.y < SPACE_WORLD_HEIGHT and 0 <= mutation.z < max_z):
+        raise HTTPException(status_code=422, detail={"code": "TERRAIN_POSITION_OUT_OF_BOUNDS"})
+    return mutation.x, mutation.y, mutation.z
+
+
+def _micro_cell(mutation: TerrainMutation, world: models.SpaceWorld) -> tuple[int, int, int]:
+    if mutation.mx is None or mutation.my is None or mutation.mz is None:
+        raise HTTPException(status_code=422, detail={"code": "INVALID_TERRAIN_MUTATION"})
+    max_mx = world.width_chunks * SPACE_CHUNK_SIZE * SPACE_MICRO_DIVISIONS
+    max_mz = world.length_chunks * SPACE_CHUNK_SIZE * SPACE_MICRO_DIVISIONS
+    max_my = SPACE_WORLD_HEIGHT * SPACE_MICRO_DIVISIONS
+    if not (0 <= mutation.mx < max_mx and 0 <= mutation.my < max_my and 0 <= mutation.mz < max_mz):
+        raise HTTPException(status_code=422, detail={"code": "TERRAIN_POSITION_OUT_OF_BOUNDS"})
+    return mutation.mx, mutation.my, mutation.mz
+
+
+def _chunk_for_standard(x: int, z: int) -> tuple[int, int]:
+    return x // SPACE_CHUNK_SIZE, z // SPACE_CHUNK_SIZE
+
+
+def _chunk_for_micro(mx: int, mz: int) -> tuple[int, int]:
+    divisor = SPACE_CHUNK_SIZE * SPACE_MICRO_DIVISIONS
+    return mx // divisor, mz // divisor
+
+
+def _overlay_maps(payload: dict) -> tuple[dict[str, list], dict[str, list]]:
+    standard = {
+        f"{int(edit[0])},{int(edit[1])},{int(edit[2])}": list(edit[:5])
+        for edit in payload["standard"]
+        if isinstance(edit, list) and len(edit) >= 5
+    }
+    micro = {
+        f"{int(edit[0])},{int(edit[1])},{int(edit[2])}": list(edit[:5])
+        for edit in payload["micro"]
+        if isinstance(edit, list) and len(edit) >= 4
+    }
+    return standard, micro
+
+
+def _clear_micro_parent(micro: dict[str, list], x: int, y: int, z: int) -> None:
+    base_x = x * SPACE_MICRO_DIVISIONS
+    base_y = y * SPACE_MICRO_DIVISIONS
+    base_z = z * SPACE_MICRO_DIVISIONS
+    for dx in range(SPACE_MICRO_DIVISIONS):
+        for dy in range(SPACE_MICRO_DIVISIONS):
+            for dz in range(SPACE_MICRO_DIVISIONS):
+                micro.pop(f"{base_x + dx},{base_y + dy},{base_z + dz}", None)
 
 
 def _get_or_create_default_world(db: Session) -> models.SpaceWorld:
@@ -170,3 +329,198 @@ def bootstrap_space(
             "spawn_yaw_q15": profile.spawn_yaw_q15,
         },
     }
+
+
+@router.get("/worlds/{world_id}/terrain-edits")
+def list_terrain_edits(
+    world_id: uuid.UUID,
+    cursor: str | None = Query(default=None, max_length=32),
+    limit: int = Query(default=MAX_SNAPSHOT_PAGE_SIZE, ge=1, le=MAX_SNAPSHOT_PAGE_SIZE),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Return durable authored chunk overlays in stable, paginated chunk order."""
+    world = _require_world_membership(db, str(world_id), current_user)
+    parsed_cursor = _parse_snapshot_cursor(cursor)
+    query = db.query(models.SpaceChunkSnapshot).filter(
+        models.SpaceChunkSnapshot.world_id == world.id
+    )
+    if parsed_cursor is not None:
+        cursor_x, cursor_z = parsed_cursor
+        query = query.filter(or_(
+            models.SpaceChunkSnapshot.chunk_x > cursor_x,
+            and_(
+                models.SpaceChunkSnapshot.chunk_x == cursor_x,
+                models.SpaceChunkSnapshot.chunk_z > cursor_z,
+            ),
+        ))
+    rows = query.order_by(
+        models.SpaceChunkSnapshot.chunk_x,
+        models.SpaceChunkSnapshot.chunk_z,
+    ).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    chunks = []
+    for row in rows:
+        overlay = _decode_chunk_overlay(row)
+        chunks.append({
+            "chunk_x": row.chunk_x,
+            "chunk_z": row.chunk_z,
+            "revision": row.revision,
+            "standard": overlay["standard"],
+            "micro": overlay["micro"],
+        })
+    next_cursor = None
+    if has_more and rows:
+        next_cursor = f"{rows[-1].chunk_x},{rows[-1].chunk_z}"
+    return {"world_id": str(world.id), "chunks": chunks, "next_cursor": next_cursor}
+
+
+@router.post("/worlds/{world_id}/terrain-edits/batches")
+def apply_terrain_mutation_batch(
+    world_id: uuid.UUID,
+    request: TerrainMutationBatchRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Atomically apply at most 256 idempotent terrain mutations."""
+    world = _require_world_membership(db, str(world_id), current_user)
+    batch_id = str(request.batch_id)
+    receipt = db.query(models.SpaceTerrainMutationBatch).filter(
+        models.SpaceTerrainMutationBatch.world_id == world.id,
+        models.SpaceTerrainMutationBatch.batch_id == batch_id,
+    ).first()
+    if receipt is not None:
+        return receipt.result
+
+    normalized: list[tuple] = []
+    touched_chunks: set[tuple[int, int]] = set()
+    for mutation in request.mutations:
+        if mutation.kind == "set_standard":
+            x, y, z = _standard_cell(mutation, world)
+            block = mutation.block
+            color = mutation.color
+            if block not in (0, 1) or color is None or not (0 <= color <= 0xFFFFFF):
+                raise HTTPException(status_code=422, detail={"code": "INVALID_TERRAIN_MUTATION"})
+            chunk = _chunk_for_standard(x, z)
+            normalized.append((mutation.kind, chunk, x, y, z, block, color))
+        elif mutation.kind == "set_micro":
+            mx, my, mz = _micro_cell(mutation, world)
+            color = mutation.color
+            if color is None or not (0 <= color <= 0xFFFFFF):
+                raise HTTPException(status_code=422, detail={"code": "INVALID_TERRAIN_MUTATION"})
+            chunk = _chunk_for_micro(mx, mz)
+            normalized.append((mutation.kind, chunk, mx, my, mz, color, mutation.part))
+        elif mutation.kind == "remove_micro":
+            mx, my, mz = _micro_cell(mutation, world)
+            chunk = _chunk_for_micro(mx, mz)
+            normalized.append((mutation.kind, chunk, mx, my, mz))
+        else:
+            x, y, z = _standard_cell(mutation, world)
+            chunk = _chunk_for_standard(x, z)
+            normalized.append((mutation.kind, chunk, x, y, z))
+        touched_chunks.add(chunk)
+
+    rows = db.query(models.SpaceChunkSnapshot).filter(
+        models.SpaceChunkSnapshot.world_id == world.id,
+        or_(*[
+            and_(
+                models.SpaceChunkSnapshot.chunk_x == chunk_x,
+                models.SpaceChunkSnapshot.chunk_z == chunk_z,
+            )
+            for chunk_x, chunk_z in touched_chunks
+        ]),
+    ).with_for_update().all()
+    row_by_chunk = {(row.chunk_x, row.chunk_z): row for row in rows}
+    state_by_chunk: dict[tuple[int, int], tuple[models.SpaceChunkSnapshot, dict, dict]] = {}
+    empty_encoded, empty_hash = _encode_chunk_overlay(_empty_chunk_overlay())
+    for chunk in touched_chunks:
+        row = row_by_chunk.get(chunk)
+        if row is None:
+            row = models.SpaceChunkSnapshot(
+                world_id=world.id,
+                chunk_x=chunk[0],
+                chunk_z=chunk[1],
+                revision=0,
+                last_event_id=0,
+                codec=0,
+                codec_version=1,
+                uncompressed_size=len(empty_encoded),
+                content_hash=empty_hash,
+                payload=empty_encoded,
+            )
+            db.add(row)
+        standard, micro = _overlay_maps(_decode_chunk_overlay(row))
+        state_by_chunk[chunk] = row, standard, micro
+
+    for mutation in normalized:
+        kind, chunk, *values = mutation
+        _, standard, micro = state_by_chunk[chunk]
+        if kind == "set_standard":
+            x, y, z, block, color = values
+            standard[f"{x},{y},{z}"] = [x, y, z, block, color]
+            if block != 0:
+                _clear_micro_parent(micro, x, y, z)
+        elif kind == "set_micro":
+            mx, my, mz, color, part = values
+            parent_key = (
+                f"{mx // SPACE_MICRO_DIVISIONS},"
+                f"{my // SPACE_MICRO_DIVISIONS},"
+                f"{mz // SPACE_MICRO_DIVISIONS}"
+            )
+            if standard.get(parent_key, [None, None, None, 0])[3] != 0:
+                raise HTTPException(status_code=409, detail={"code": "STANDARD_CELL_OCCUPIED"})
+            packed = [mx, my, mz, color]
+            if part:
+                packed.append(part)
+            micro[f"{mx},{my},{mz}"] = packed
+        elif kind == "remove_micro":
+            mx, my, mz = values
+            micro.pop(f"{mx},{my},{mz}", None)
+        else:
+            x, y, z = values
+            _clear_micro_parent(micro, x, y, z)
+
+    revisions = []
+    for chunk in sorted(touched_chunks):
+        row, standard, micro = state_by_chunk[chunk]
+        overlay = {
+            "standard": sorted(standard.values(), key=lambda edit: (edit[0], edit[1], edit[2])),
+            "micro": sorted(micro.values(), key=lambda edit: (edit[0], edit[1], edit[2])),
+        }
+        encoded, content_hash = _encode_chunk_overlay(overlay)
+        row.revision = int(row.revision or 0) + 1
+        row.codec = 0
+        row.codec_version = 1
+        row.uncompressed_size = len(encoded)
+        row.content_hash = content_hash
+        row.payload = encoded
+        revisions.append({"chunk_x": chunk[0], "chunk_z": chunk[1], "revision": row.revision})
+
+    result = {
+        "world_id": str(world.id),
+        "batch_id": batch_id,
+        "applied": len(request.mutations),
+        "chunks": revisions,
+    }
+    db.add(models.SpaceTerrainMutationBatch(
+        world_id=world.id,
+        batch_id=batch_id,
+        actor_user_id=current_user.id,
+        result=result,
+    ))
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        duplicate = db.query(models.SpaceTerrainMutationBatch).filter(
+            models.SpaceTerrainMutationBatch.world_id == world.id,
+            models.SpaceTerrainMutationBatch.batch_id == batch_id,
+        ).first()
+        if duplicate is not None:
+            return duplicate.result
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TERRAIN_BATCH_RETRY", "message": "世界正在更新，请重试同一批次。"},
+        ) from exc
+    return result
