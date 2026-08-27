@@ -9,7 +9,8 @@ WORKDIR /app
 COPY requirements.txt .
 
 # 安装依赖
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade "pip>=26.2" "setuptools>=83" \
+    && pip install --no-cache-dir -r requirements.txt
 
 # 复制代码到容器
 COPY . .

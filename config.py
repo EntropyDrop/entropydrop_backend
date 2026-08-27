@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = ""
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 0
+
+    # Space uses the same JWT/users table. These settings identify the initial
+    # persistent world and the separately deployed authoritative WSS gateway.
+    SPACE_DEFAULT_WORLD_ID: str = "00000000-0000-4000-8000-000000000001"
+    SPACE_WORLD_SEED: int = 20260827
+    SPACE_WS_URL: str = "wss://entropydrop.com/space/ws/v2"
     
     # Google OAuth
     GOOGLE_CLIENT_ID: str = ""

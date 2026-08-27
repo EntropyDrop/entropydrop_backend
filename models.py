@@ -4,7 +4,7 @@ from datetime import timezone
 import uuid
 import random
 import secrets
-from sqlalchemy import Column, Integer, String, DateTime, Text, JSON, Boolean, Float, Index, UniqueConstraint, Date
+from sqlalchemy import Column, Integer, String, DateTime, Text, JSON, Boolean, Float, Index, UniqueConstraint, Date, ForeignKey, Uuid
 from database import Base
 
 def generate_base58_id(length=16):
@@ -59,6 +59,43 @@ class User(Base):
     @property
     def is_pro_active(self):
         return self.is_pro
+
+
+class SpaceWorld(Base):
+    """Space world control-plane metadata; user identity remains in users."""
+    __tablename__ = "worlds"
+
+    id = Column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_user_id = Column(String(16), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, index=True)
+    name = Column(String(128), nullable=False, default="EntropyDrop Space")
+    seed = Column(Integer, nullable=False)
+    terrain_generator_version = Column(Integer, nullable=False, default=1)
+    protocol_version = Column(Integer, nullable=False, default=2)
+    width_chunks = Column(Integer, nullable=False, default=1024)
+    length_chunks = Column(Integer, nullable=False, default=128)
+    zone_size_chunks = Column(Integer, nullable=False, default=32)
+    max_online_players = Column(Integer, nullable=False, default=32)
+    status = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
+
+
+class SpaceWorldPlayerProfile(Base):
+    """Immutable Space identity and random birth point for an existing user."""
+    __tablename__ = "world_player_profiles"
+    __table_args__ = (
+        UniqueConstraint("world_id", "player_entity_id", name="uq_world_player_entity"),
+    )
+
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(String(16), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    player_entity_id = Column(Uuid(as_uuid=False), default=lambda: str(uuid.uuid4()), nullable=False)
+    spawn_x_cm = Column(Integer, nullable=False)
+    spawn_y_cm = Column(Integer, nullable=False)
+    spawn_z_cm = Column(Integer, nullable=False)
+    spawn_yaw_q15 = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
 
 class GenerationLog(Base):
     """Generation log model"""
@@ -385,4 +422,3 @@ class CreditLog(Base):
     action = Column(String(50), nullable=False)
     source = Column(String(100), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
-

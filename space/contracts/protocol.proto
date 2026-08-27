@@ -1,0 +1,492 @@
+syntax = "proto3";
+
+package space.multiplayer.v2;
+
+// Browser transport: one length-prefixed ClientPacket/ServerPacket per binary
+// WebSocket message. World/session/entity UUID values are exactly 16 bytes.
+// EntropyDrop user ids are the existing Base58 VARCHAR(16) values and therefore
+// use protobuf string fields. Snapshot payloads use a separate bit-packed codec
+// and may be zstd-compressed before being placed in bytes fields below.
+
+enum Compression {
+  COMPRESSION_NONE = 0;
+  COMPRESSION_ZSTD = 1;
+}
+
+enum CommandStatus {
+  COMMAND_STATUS_UNSPECIFIED = 0;
+  COMMAND_STATUS_ACCEPTED = 1;
+  COMMAND_STATUS_DUPLICATE = 2;
+  COMMAND_STATUS_CONFLICT = 3;
+  COMMAND_STATUS_FORBIDDEN = 4;
+  COMMAND_STATUS_INVALID = 5;
+  COMMAND_STATUS_RATE_LIMITED = 6;
+  COMMAND_STATUS_RESYNC_REQUIRED = 7;
+}
+
+enum VoxelMutationKind {
+  VOXEL_MUTATION_UNSPECIFIED = 0;
+  VOXEL_SET_STANDARD = 1;
+  VOXEL_CLEAR_STANDARD = 2;
+  VOXEL_SET_MICRO = 3;
+  VOXEL_CLEAR_MICRO = 4;
+}
+
+enum QueueState {
+  QUEUE_STATE_UNSPECIFIED = 0;
+  QUEUE_STATE_WAITING = 1;
+  QUEUE_STATE_ADMISSION_RESERVED = 2;
+}
+
+enum PlayerPose {
+  PLAYER_POSE_UNSPECIFIED = 0;
+  PLAYER_POSE_STANDING = 1;
+  PLAYER_POSE_WALKING = 2;
+  PLAYER_POSE_RUNNING = 3;
+  PLAYER_POSE_JUMPING = 4;
+  PLAYER_POSE_CROUCHING = 5;
+  PLAYER_POSE_SEATED = 6;
+}
+
+enum LocalBuildKind {
+  LOCAL_BUILD_UNSPECIFIED = 0;
+  LOCAL_BUILD_ENTITY = 1;
+  LOCAL_BUILD_BLOCK_SET = 2;
+}
+
+enum DisconnectCode {
+  DISCONNECT_CODE_UNSPECIFIED = 0;
+  DISCONNECT_PROTOCOL_MISMATCH = 1;
+  DISCONNECT_INVALID_JOIN_TICKET = 2;
+  DISCONNECT_ALREADY_CONNECTED = 3;
+  DISCONNECT_QUEUE_EXPIRED = 4;
+  DISCONNECT_SESSION_EXPIRED = 5;
+  DISCONNECT_SLOW_CLIENT = 6;
+  DISCONNECT_RATE_LIMITED = 7;
+  DISCONNECT_SERVER_MAINTENANCE = 8;
+  DISCONNECT_SERVER_OVERLOADED = 9;
+}
+
+enum PlayerPresenceKind {
+  PLAYER_PRESENCE_UNSPECIFIED = 0;
+  PLAYER_ENTER_AOI = 1;
+  PLAYER_LEAVE_AOI = 2;
+  PLAYER_IDENTITY_CHANGED = 3;
+}
+
+enum EntityPresenceKind {
+  ENTITY_PRESENCE_UNSPECIFIED = 0;
+  ENTITY_ENTER_AOI = 1;
+  ENTITY_LEAVE_AOI = 2;
+  ENTITY_DEFINITION_CHANGED = 3;
+  ENTITY_RUN_STATE_CHANGED = 4;
+}
+
+enum EntityDesiredRunState {
+  ENTITY_RUN_DISABLED = 0;
+  ENTITY_RUN_ENABLED = 1;
+}
+
+enum EntityRuntimeHealth {
+  ENTITY_HEALTHY = 0;
+  ENTITY_RETRYABLE_FAULT = 1;
+  ENTITY_SCRIPTS_DISABLED = 2;
+  ENTITY_QUARANTINED = 3;
+}
+
+// Power-of-two values used in RemotePlayerDelta.changed_mask.
+enum RemotePlayerChangedField {
+  REMOTE_PLAYER_CHANGED_NONE = 0;
+  REMOTE_PLAYER_CHANGED_POSITION = 1;
+  REMOTE_PLAYER_CHANGED_VELOCITY = 2;
+  REMOTE_PLAYER_CHANGED_BODY_ROTATION = 4;
+  REMOTE_PLAYER_CHANGED_LOOK = 8;
+  REMOTE_PLAYER_CHANGED_POSE = 16;
+  REMOTE_PLAYER_CHANGED_ANIMATION = 32;
+  REMOTE_PLAYER_CHANGED_SKIN = 64;
+}
+
+message ClientPacket {
+  uint32 protocol_version = 1;
+  uint64 packet_sequence = 2;
+  oneof body {
+    ClientHello hello = 10;
+    InputBatch input = 11;
+    InterestUpdate interest = 12;
+    WorldCommand command = 13;
+    ClientAck ack = 14;
+    Ping ping = 15;
+    LeaveWorld leave = 16;
+  }
+}
+
+message ServerPacket {
+  uint32 protocol_version = 1;
+  uint64 packet_sequence = 2;
+  uint64 server_tick = 3;
+  oneof body {
+    ServerHello hello = 10;
+    StateFrame state = 11;
+    ChunkSnapshotBatch chunks = 12;
+    WorldEventBatch events = 13;
+    CommandResult command_result = 14;
+    InterestReset interest_reset = 15;
+    Pong pong = 16;
+    Disconnect disconnect = 17;
+    QueueStatus queue_status = 18;
+    PlayerPresenceBatch player_presence = 19;
+    EntityPresenceBatch entity_presence = 20;
+  }
+}
+
+message ClientHello {
+  bytes world_id = 1;
+  // Short-lived, single-world join ticket issued by the REST control plane.
+  // This is not a general user access token.
+  string join_ticket = 2;
+  bytes resume_token = 3;
+  uint64 last_received_event_id = 4;
+  uint64 last_received_server_tick = 5;
+  repeated Compression supported_compression = 6;
+}
+
+message ServerHello {
+  bytes session_id = 1;
+  string user_id = 2;
+  bytes player_entity_id = 3;
+  uint32 simulation_hz = 4;
+  uint32 snapshot_hz = 5;
+  uint32 input_hz = 6;
+  uint32 chunk_size = 7;
+  uint32 micro_divisions = 8;
+  uint32 world_width_chunks = 9;
+  uint32 world_length_chunks = 10;
+  uint32 zone_size_chunks = 11;
+  uint32 terrain_generator_version = 12;
+  sint32 terrain_seed = 13;
+  Compression selected_compression = 14;
+  bytes resume_token = 15;
+  uint32 online_player_limit = 16;
+  uint32 online_player_count = 17;
+  uint32 admission_slot = 18;
+  uint32 max_interest_radius_chunks = 19;
+  uint32 default_interest_radius_chunks = 20;
+  string minecraft_skin_url = 21;
+  string minecraft_skin_model = 22;
+}
+
+// Queue packets are valid before ServerHello, when server_tick is zero. A
+// queued socket creates no player entity or AOI subscription. Position is
+// one-based and may move by more than one when earlier tickets expire.
+message QueueStatus {
+  bytes queue_ticket_id = 1;
+  QueueState state = 2;
+  uint32 position = 3;
+  uint32 online_player_count = 4;
+  uint32 online_player_limit = 5;
+  uint32 heartbeat_interval_ms = 6;
+}
+
+// Inputs are redundant: every batch contains the newest frame plus a small
+// tail of prior frames. This tolerates reconnects and future datagram transport.
+message InputBatch {
+  repeated InputFrame frames = 1;
+}
+
+message InputFrame {
+  uint64 input_sequence = 1;
+  uint64 client_tick = 2;
+  uint32 buttons = 3;
+  sint32 move_x_q15 = 4;
+  sint32 move_z_q15 = 5;
+  sint32 look_yaw_q15 = 6;
+  sint32 look_pitch_q15 = 7;
+}
+
+message InterestUpdate {
+  sint32 center_chunk_x = 1;
+  sint32 center_chunk_z = 2;
+  uint32 chunk_radius = 3;
+  repeated KnownChunk known_chunks = 4;
+  uint64 interest_sequence = 5;
+}
+
+message KnownChunk {
+  sint32 chunk_x = 1;
+  sint32 chunk_z = 2;
+  uint64 revision = 3;
+}
+
+message ExpectedChunkRevision {
+  sint32 chunk_x = 1;
+  sint32 chunk_z = 2;
+  uint64 revision = 3;
+}
+
+message WorldCommand {
+  bytes operation_id = 1;
+  uint64 input_sequence = 2;
+  uint64 client_tick = 3;
+  repeated ExpectedChunkRevision expected_chunks = 4;
+  oneof payload {
+    TerrainMutationBatch terrain = 10;
+    EntityCommand entity = 11;
+    ScriptCommand script = 12;
+    LocalBuildPlacement local_build = 13;
+  }
+  reserved 14;
+}
+
+// The backpack itself remains in browser localStorage and has no cloud slot id.
+// Placement sends bounded canonical source content; the server independently
+// decodes, validates and persists only the resulting world mutation/entity.
+message LocalBuildPlacement {
+  LocalBuildKind kind = 1;
+  Compression compression = 2;
+  uint32 codec_version = 3;
+  uint32 uncompressed_size = 4;
+  bytes payload_sha256 = 5;
+  bytes payload = 6;
+  sint32 target_x_cm = 7;
+  sint32 target_y_cm = 8;
+  sint32 target_z_cm = 9;
+  uint32 target_rotation_packed = 10;
+}
+
+message TerrainMutationBatch {
+  // Interactive commands must belong to one authority zone. Large offline
+  // imports use a separate job API and never block a real-time tick.
+  repeated VoxelMutation mutations = 1;
+}
+
+message VoxelMutation {
+  VoxelMutationKind kind = 1;
+  sint32 x = 2;
+  sint32 y = 3;
+  sint32 z = 4;
+  uint32 micro_x = 5;
+  uint32 micro_y = 6;
+  uint32 micro_z = 7;
+  uint32 color_rgb = 8;
+}
+
+message EntityCommand {
+  bytes entity_id = 1;
+  uint64 expected_entity_revision = 2;
+  oneof action {
+    SetEntityRunState set_run_state = 10;
+    MountEntity mount = 11;
+    DismountEntity dismount = 12;
+  }
+}
+
+message ScriptCommand {
+  bytes entity_id = 1;
+  bytes component_id_utf8 = 2;
+  uint64 expected_entity_revision = 3;
+  oneof action {
+    SetComponentScriptEnabled set_enabled = 10;
+    InstallComponentScriptBundle install_bundle = 11;
+  }
+}
+
+message SetEntityRunState {
+  EntityDesiredRunState desired_run_state = 1;
+}
+
+message MountEntity {
+  bytes seat_component_id_utf8 = 1;
+}
+
+message DismountEntity {}
+
+message SetComponentScriptEnabled {
+  bool enabled = 1;
+}
+
+message InstallComponentScriptBundle {
+  bytes script_bundle_id = 1;
+  bytes expected_source_hash = 2;
+}
+
+message ClientAck {
+  uint64 server_packet_sequence = 1;
+  uint64 world_event_id = 2;
+  uint64 server_tick = 3;
+  uint64 player_presence_epoch = 4;
+  uint64 entity_presence_epoch = 5;
+}
+
+message StateFrame {
+  uint64 acknowledged_input_sequence = 1;
+  PlayerState local_player = 2;
+  repeated EntityDelta entities = 3;
+  repeated bytes removed_entity_ids = 4;
+  repeated RemotePlayerDelta remote_players = 5;
+  repeated bytes removed_player_entity_ids = 6;
+  uint64 interest_sequence = 7;
+  uint64 player_presence_epoch = 8;
+  uint64 entity_presence_epoch = 9;
+}
+
+message PlayerState {
+  // Position is centimetres relative to the current authority zone origin.
+  sint32 position_x_cm = 1;
+  sint32 position_y_cm = 2;
+  sint32 position_z_cm = 3;
+  sint32 velocity_x_cms = 4;
+  sint32 velocity_y_cms = 5;
+  sint32 velocity_z_cms = 6;
+  uint32 rotation_packed = 7;
+}
+
+message EntityDelta {
+  bytes entity_id = 1;
+  uint64 revision = 2;
+  uint32 changed_mask = 3;
+  bytes packed_state = 4;
+}
+
+// The first AOI frame sets every changed bit. Later frames send only changed
+// fields. Skin bytes never travel on the real-time channel. The immutable
+// minecraft_skin_url is sent only on AOI entry/identity change and is then
+// browser-cached; ordinary 20 Hz frames do not resend the PNG.
+message RemotePlayerDelta {
+  bytes player_entity_id = 1;
+  uint32 changed_mask = 2;
+  sint32 position_x_cm = 3;
+  sint32 position_y_cm = 4;
+  sint32 position_z_cm = 5;
+  sint32 velocity_x_cms = 6;
+  sint32 velocity_y_cms = 7;
+  sint32 velocity_z_cms = 8;
+  uint32 body_rotation_packed = 9;
+  sint32 look_yaw_q15 = 10;
+  sint32 look_pitch_q15 = 11;
+  PlayerPose pose = 12;
+  uint32 animation_state = 13;
+  string minecraft_skin_url = 14;
+  string minecraft_skin_model = 15;
+}
+
+// Presence is reliable application data and is never superseded like StateFrame.
+// On connect/resume/InterestReset, full_reset=true and the client first clears
+// its matching presence set. ENTER contains identity plus a full initial delta.
+message PlayerPresenceBatch {
+  uint64 presence_epoch = 1;
+  bool full_reset = 2;
+  repeated PlayerPresenceEvent events = 3;
+}
+
+message PlayerPresenceEvent {
+  PlayerPresenceKind kind = 1;
+  bytes player_entity_id = 2;
+  string display_name = 3;
+  string minecraft_skin_url = 4;
+  string minecraft_skin_model = 5;
+  RemotePlayerDelta initial_state = 6;
+}
+
+// Entity definitions are immutable and fetched by authenticated HTTPS using the
+// id/hash below. Runtime deltas remain on WebSocket. ENTER always contains a full
+// initial runtime delta so a dropped StateFrame cannot create a half-known entity.
+message EntityPresenceBatch {
+  uint64 presence_epoch = 1;
+  bool full_reset = 2;
+  repeated EntityPresenceEvent events = 3;
+}
+
+message EntityPresenceEvent {
+  EntityPresenceKind kind = 1;
+  bytes entity_id = 2;
+  bytes definition_asset_id = 3;
+  bytes definition_content_hash = 4;
+  uint64 entity_revision = 5;
+  EntityDesiredRunState desired_run_state = 6;
+  EntityRuntimeHealth runtime_health = 7;
+  EntityDelta initial_state = 8;
+}
+
+message ChunkSnapshotBatch {
+  repeated ChunkSnapshot chunks = 1;
+}
+
+message ChunkSnapshot {
+  sint32 chunk_x = 1;
+  sint32 chunk_z = 2;
+  uint64 revision = 3;
+  uint64 last_event_id = 4;
+  Compression compression = 5;
+  uint32 codec_version = 6;
+  uint32 uncompressed_size = 7;
+  // One compressed snapshot can span several ChunkSnapshot messages. A
+  // single-fragment snapshot still sets fragment_index=0 and fragment_count=1.
+  bytes payload = 8;
+  bytes snapshot_id = 9;
+  uint32 fragment_index = 10;
+  uint32 fragment_count = 11;
+  uint32 compressed_size = 12;
+  // SHA-256 of the complete compressed snapshot, repeated on every fragment.
+  bytes payload_sha256 = 13;
+  uint64 interest_sequence = 14;
+}
+
+message WorldEventBatch {
+  repeated WorldEvent events = 1;
+}
+
+message WorldEvent {
+  uint64 event_id = 1;
+  uint64 server_tick = 2;
+  uint32 event_kind = 3;
+  string actor_user_id = 4;
+  bytes payload = 5;
+  repeated ChunkRevision chunks = 6;
+  uint32 payload_version = 7;
+}
+
+message ChunkRevision {
+  sint32 chunk_x = 1;
+  sint32 chunk_z = 2;
+  uint64 revision = 3;
+}
+
+message CommandResult {
+  bytes operation_id = 1;
+  CommandStatus status = 2;
+  uint64 event_id = 3;
+  uint64 applied_server_tick = 4;
+  repeated ChunkRevision chunks = 5;
+  string reason = 6;
+  reserved 7;
+  uint64 entity_revision = 8;
+}
+
+message InterestReset {
+  uint64 minimum_available_event_id = 1;
+  string reason = 2;
+  uint64 interest_sequence = 3;
+  uint64 player_presence_epoch = 4;
+  uint64 entity_presence_epoch = 5;
+}
+
+message Ping {
+  uint64 client_time_ms = 1;
+}
+
+message LeaveWorld {
+  // Explicit menu leave frees the admission slot immediately. Ordinary socket
+  // loss retains it for reconnect grace and ignores this flag.
+  bool waive_reconnect_grace = 1;
+}
+
+message Pong {
+  uint64 client_time_ms = 1;
+  uint64 server_time_ms = 2;
+}
+
+message Disconnect {
+  DisconnectCode code = 1;
+  string reason = 2;
+  bool may_resume = 3;
+}
