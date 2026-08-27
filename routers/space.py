@@ -410,6 +410,7 @@ def bootstrap_space(
 
 
 @router.put("/worlds/{world_id}/players/me/position")
+@router.post("/worlds/{world_id}/players/me/position")
 @limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
 def update_player_position(
     request: Request,
