@@ -90,6 +90,7 @@ class PlayerPositionUpdateRequest(BaseModel):
     y_cm: int = Field(ge=MIN_PLAYER_Y_CM, le=MAX_PLAYER_Y_CM)
     z_cm: int
     yaw_q15: int = Field(ge=-32767, le=32767)
+    pitch_q15: int = Field(default=0, ge=-32767, le=32767)
 
 
 class SpaceHeartbeatRequest(BaseModel):
@@ -97,6 +98,7 @@ class SpaceHeartbeatRequest(BaseModel):
     y_cm: int | None = Field(default=None, ge=MIN_PLAYER_Y_CM, le=MAX_PLAYER_Y_CM)
     z_cm: int | None = None
     yaw_q15: int | None = Field(default=None, ge=-32767, le=32767)
+    pitch_q15: int | None = Field(default=0, ge=-32767, le=32767)
     since_terrain_revision: int = Field(default=0, ge=0)
 
 
@@ -167,6 +169,7 @@ def _validate_player_position(
     y_cm: int,
     z_cm: int,
     yaw_q15: int,
+    pitch_q15: int = 0,
 ) -> dict[str, int]:
     width_cm = world.width_chunks * SPACE_CHUNK_SIZE * 100
     length_cm = world.length_chunks * SPACE_CHUNK_SIZE * 100
@@ -175,6 +178,7 @@ def _validate_player_position(
         and MIN_PLAYER_Y_CM <= y_cm <= MAX_PLAYER_Y_CM
         and 0 <= z_cm < length_cm
         and -32767 <= yaw_q15 <= 32767
+        and -32767 <= pitch_q15 <= 32767
     ):
         raise HTTPException(status_code=422, detail={"code": "PLAYER_POSITION_OUT_OF_BOUNDS"})
     return {
@@ -182,6 +186,7 @@ def _validate_player_position(
         "y_cm": y_cm,
         "z_cm": z_cm,
         "yaw_q15": yaw_q15,
+        "pitch_q15": pitch_q15,
     }
 
 
@@ -208,6 +213,7 @@ def _decode_player_snapshot(
             int(position["y_cm"]),
             int(position["z_cm"]),
             int(position["yaw_q15"]),
+            int(position.get("pitch_q15", 0)),
         )
     except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError, HTTPException):
         # A bad or future snapshot must not prevent login. The immutable birth
@@ -445,6 +451,7 @@ def update_player_position(
         position_request.y_cm,
         position_request.z_cm,
         position_request.yaw_q15,
+        position_request.pitch_q15,
     )
     encoded = _encode_player_snapshot(position)
     snapshot = db.query(models.SpacePlayerSnapshot).filter(
@@ -514,6 +521,7 @@ def space_heartbeat(
             heartbeat_req.y_cm,
             heartbeat_req.z_cm,
             heartbeat_req.yaw_q15,
+            heartbeat_req.pitch_q15 or 0,
         )
         encoded = _encode_player_snapshot(position)
         snapshot = db.query(models.SpacePlayerSnapshot).filter(
@@ -576,6 +584,7 @@ def space_heartbeat(
             continue
         skin_url = (user.minecraft_skin_url or "").strip() or "/skin/default.png"
         yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
+        pitch_rad = (pos.get("pitch_q15", 0) / 32767.0) * math.pi
         skin_model = "slim" if (user.minecraft_skin_model or "").lower() == "slim" else "strong"
         players.append({
             "user_id": user.id,
@@ -587,6 +596,7 @@ def space_heartbeat(
             "y": pos["y_cm"] / 100.0,
             "z": pos["z_cm"] / 100.0,
             "yaw": yaw_rad,
+            "pitch": pitch_rad,
             "is_self": user.id == current_user.id,
             "updated_at": snap.updated_at.isoformat() if snap.updated_at else None,
         })
@@ -666,6 +676,7 @@ def list_world_players(
             continue
         skin_url = (user.minecraft_skin_url or "").strip() or "/skin/default.png"
         yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
+        pitch_rad = (pos.get("pitch_q15", 0) / 32767.0) * math.pi
         skin_model = "slim" if (user.minecraft_skin_model or "").lower() == "slim" else "strong"
         players.append({
             "user_id": user.id,
@@ -677,6 +688,7 @@ def list_world_players(
             "y": pos["y_cm"] / 100.0,
             "z": pos["z_cm"] / 100.0,
             "yaw": yaw_rad,
+            "pitch": pitch_rad,
             "is_self": user.id == current_user.id,
             "updated_at": snap.updated_at.isoformat() if snap.updated_at else None,
         })
