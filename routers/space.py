@@ -24,6 +24,8 @@ SPACE_MICRO_DIVISIONS = 5
 MAX_TERRAIN_MUTATIONS_PER_BATCH = 256
 MAX_CHUNK_SNAPSHOT_BYTES = 4 * 1024 * 1024
 MAX_SNAPSHOT_PAGE_SIZE = 256
+MIN_PLAYER_Y_CM = -100_000
+MAX_PLAYER_Y_CM = 1_000_000
 
 
 class SpaceWorldResponse(BaseModel):
@@ -43,6 +45,10 @@ class SpacePlayerResponse(BaseModel):
     spawn_y_cm: int
     spawn_z_cm: int
     spawn_yaw_q15: int
+    resume_x_cm: int | None = None
+    resume_y_cm: int | None = None
+    resume_z_cm: int | None = None
+    resume_yaw_q15: int | None = None
 
 
 class SpaceBootstrapResponse(BaseModel):
@@ -73,6 +79,13 @@ class TerrainMutationBatchRequest(BaseModel):
         min_length=1,
         max_length=MAX_TERRAIN_MUTATIONS_PER_BATCH,
     )
+
+
+class PlayerPositionUpdateRequest(BaseModel):
+    x_cm: int
+    y_cm: int = Field(ge=MIN_PLAYER_Y_CM, le=MAX_PLAYER_Y_CM)
+    z_cm: int
+    yaw_q15: int = Field(ge=-32767, le=32767)
 
 
 def _empty_chunk_overlay() -> dict:
@@ -134,6 +147,60 @@ def _require_world_membership(
     if membership is None:
         raise HTTPException(status_code=403, detail={"code": "WORLD_MEMBERSHIP_REQUIRED"})
     return world
+
+
+def _validate_player_position(
+    world: models.SpaceWorld,
+    x_cm: int,
+    y_cm: int,
+    z_cm: int,
+    yaw_q15: int,
+) -> dict[str, int]:
+    width_cm = world.width_chunks * SPACE_CHUNK_SIZE * 100
+    length_cm = world.length_chunks * SPACE_CHUNK_SIZE * 100
+    if not (
+        0 <= x_cm < width_cm
+        and MIN_PLAYER_Y_CM <= y_cm <= MAX_PLAYER_Y_CM
+        and 0 <= z_cm < length_cm
+        and -32767 <= yaw_q15 <= 32767
+    ):
+        raise HTTPException(status_code=422, detail={"code": "PLAYER_POSITION_OUT_OF_BOUNDS"})
+    return {
+        "x_cm": x_cm,
+        "y_cm": y_cm,
+        "z_cm": z_cm,
+        "yaw_q15": yaw_q15,
+    }
+
+
+def _encode_player_snapshot(position: dict[str, int]) -> bytes:
+    return json.dumps(
+        {"position": position},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def _decode_player_snapshot(
+    snapshot: models.SpacePlayerSnapshot | None,
+    world: models.SpaceWorld,
+) -> dict[str, int] | None:
+    if snapshot is None or snapshot.state_version != 1:
+        return None
+    try:
+        payload = json.loads(snapshot.state.decode("utf-8"))
+        position = payload["position"]
+        return _validate_player_position(
+            world,
+            int(position["x_cm"]),
+            int(position["y_cm"]),
+            int(position["z_cm"]),
+            int(position["yaw_q15"]),
+        )
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError, HTTPException):
+        # A bad or future snapshot must not prevent login. The immutable birth
+        # point remains the safe fallback.
+        return None
 
 
 def _parse_snapshot_cursor(cursor: str | None) -> tuple[int, int] | None:
@@ -290,7 +357,7 @@ def bootstrap_space(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    """Gate Space entry and return this EntropyDrop user's stable birth point."""
+    """Gate Space entry and return stable birth plus the latest reconnect position."""
     skin_url = (current_user.minecraft_skin_url or "").strip()
     if not skin_url:
         raise HTTPException(
@@ -304,6 +371,11 @@ def bootstrap_space(
 
     world = _get_or_create_default_world(db)
     profile = _get_or_create_player_profile(db, world, current_user)
+    snapshot = db.query(models.SpacePlayerSnapshot).filter(
+        models.SpacePlayerSnapshot.world_id == world.id,
+        models.SpacePlayerSnapshot.user_id == current_user.id,
+    ).first()
+    resume_position = _decode_player_snapshot(snapshot, world)
     skin_model = "slim" if (current_user.minecraft_skin_model or "").lower() == "slim" else "strong"
 
     return {
@@ -327,7 +399,70 @@ def bootstrap_space(
             "spawn_y_cm": profile.spawn_y_cm,
             "spawn_z_cm": profile.spawn_z_cm,
             "spawn_yaw_q15": profile.spawn_yaw_q15,
+            "resume_x_cm": resume_position["x_cm"] if resume_position else None,
+            "resume_y_cm": resume_position["y_cm"] if resume_position else None,
+            "resume_z_cm": resume_position["z_cm"] if resume_position else None,
+            "resume_yaw_q15": resume_position["yaw_q15"] if resume_position else None,
         },
+    }
+
+
+@router.put("/worlds/{world_id}/players/me/position")
+def update_player_position(
+    world_id: uuid.UUID,
+    request: PlayerPositionUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Persist the authenticated player's latest small reconnect checkpoint."""
+    world = _require_world_membership(db, str(world_id), current_user)
+    position = _validate_player_position(
+        world,
+        request.x_cm,
+        request.y_cm,
+        request.z_cm,
+        request.yaw_q15,
+    )
+    encoded = _encode_player_snapshot(position)
+    snapshot = db.query(models.SpacePlayerSnapshot).filter(
+        models.SpacePlayerSnapshot.world_id == world.id,
+        models.SpacePlayerSnapshot.user_id == current_user.id,
+    ).with_for_update().first()
+    if snapshot is None:
+        snapshot = models.SpacePlayerSnapshot(
+            world_id=world.id,
+            user_id=current_user.id,
+            revision=1,
+            last_event_id=0,
+            state_version=1,
+            state=encoded,
+        )
+        db.add(snapshot)
+    else:
+        snapshot.revision = int(snapshot.revision or 0) + 1
+        snapshot.state_version = 1
+        snapshot.state = encoded
+    try:
+        db.commit()
+    except IntegrityError:
+        # Several lifecycle events (hidden/pagehide/beforeunload) may race on a
+        # player's very first checkpoint. One insert wins; update that durable
+        # row instead of turning a harmless duplicate insert into a 500.
+        db.rollback()
+        snapshot = db.query(models.SpacePlayerSnapshot).filter(
+            models.SpacePlayerSnapshot.world_id == world.id,
+            models.SpacePlayerSnapshot.user_id == current_user.id,
+        ).with_for_update().first()
+        if snapshot is None:
+            raise
+        snapshot.revision = int(snapshot.revision or 0) + 1
+        snapshot.state_version = 1
+        snapshot.state = encoded
+        db.commit()
+    return {
+        "world_id": str(world.id),
+        "revision": snapshot.revision,
+        **position,
     }
 
 

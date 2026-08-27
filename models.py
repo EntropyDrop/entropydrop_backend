@@ -98,6 +98,24 @@ class SpaceWorldPlayerProfile(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
 
 
+class SpacePlayerSnapshot(Base):
+    """Latest durable reconnect state for one player in one Space world."""
+    __tablename__ = "player_snapshots"
+
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
+    user_id = Column(String(16), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    revision = Column(BigInteger, nullable=False, default=0)
+    last_event_id = Column(BigInteger, nullable=False, default=0)
+    state_version = Column(SmallInteger, nullable=False, default=1)
+    state = Column(LargeBinary, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+
+
 class SpaceChunkSnapshot(Base):
     """Packed player-authored voxel overlay for one Space terrain chunk."""
     __tablename__ = "chunk_snapshots"

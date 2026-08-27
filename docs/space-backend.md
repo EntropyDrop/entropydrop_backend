@@ -254,8 +254,11 @@ After reservation, every join reads `world_player_profiles`. On the first join t
 samples bounded random X/Z candidates, derives terrain height, rejects water/solid/entity
 overlap and unsafe headroom, then atomically `INSERT ... ON CONFLICT DO NOTHING`; the
 winning row fixes `player_entity_id` and spawn coordinates. Initial spawn and respawn use
-that stable point. A valid reconnect may restore the newer `player_snapshots` position,
-but it still reads the profile and never accepts a client-supplied spawn.
+that stable point. Browser clients checkpoint their wrapped position and yaw to
+`player_snapshots` every two seconds and with a small keepalive request before page
+suspension. A later bootstrap restores that newer per-user snapshot, while a missing or
+invalid snapshot falls back to the stable birth point; checkpoint writes can never modify
+the birth point itself.
 
 ### 6.3 Input Prediction and Reconciliation
 
@@ -738,6 +741,7 @@ service. The remaining endpoints belong to the gateway/worker delivery phases.
 
 ```text
 POST   /space/api/v2/bootstrap                  Existing Bearer user + skin gate + durable spawn
+PUT    /space/api/v2/worlds/{id}/players/me/position  Save latest per-user reconnect position
 GET    /space/api/v2/worlds/{id}/terrain-edits  Paginated durable authored chunk overlays
 POST   /space/api/v2/worlds/{id}/terrain-edits/batches  Idempotent batch of 1-256 mutations
 POST   /space/api/v2/worlds/{id}/join-ticket    Issue a short-lived real-time ticket

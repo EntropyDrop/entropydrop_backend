@@ -2,7 +2,13 @@ import uuid
 
 from auth import get_current_user
 from main import app
-from models import SpaceChunkSnapshot, SpaceTerrainMutationBatch, SpaceWorldPlayerProfile, User
+from models import (
+    SpaceChunkSnapshot,
+    SpacePlayerSnapshot,
+    SpaceTerrainMutationBatch,
+    SpaceWorldPlayerProfile,
+    User,
+)
 
 
 def _user(db, user_id: str, skin_url: str | None):
@@ -66,6 +72,81 @@ def test_space_bootstrap_reuses_user_skin_and_stable_random_spawn(client, db):
         for key in ("spawn_x_cm", "spawn_y_cm", "spawn_z_cm", "spawn_yaw_q15")
     }
     assert db.query(SpaceWorldPlayerProfile).count() == 1
+
+
+def test_space_bootstrap_restores_latest_position_without_changing_birth_point(client, db):
+    user = _user(db, "pos-user-001", "https://cdn.entropydrop.com/skins/position.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    first = client.post("/space/api/v2/bootstrap")
+    first_player = first.json()["player"]
+    world_id = first.json()["world"]["id"]
+
+    assert first.status_code == 200
+    assert {
+        key: first_player[key]
+        for key in ("resume_x_cm", "resume_y_cm", "resume_z_cm", "resume_yaw_q15")
+    } == {
+        "resume_x_cm": None,
+        "resume_y_cm": None,
+        "resume_z_cm": None,
+        "resume_yaw_q15": None,
+    }
+
+    position = {"x_cm": 123456, "y_cm": 4587, "z_cm": 65432, "yaw_q15": -12345}
+    saved = client.put(
+        f"/space/api/v2/worlds/{world_id}/players/me/position",
+        json=position,
+    )
+    latest_position = {"x_cm": 123499, "y_cm": 4601, "z_cm": 65480, "yaw_q15": 2345}
+    saved_latest = client.put(
+        f"/space/api/v2/worlds/{world_id}/players/me/position",
+        json=latest_position,
+    )
+    resumed = client.post("/space/api/v2/bootstrap")
+
+    assert saved.status_code == 200
+    assert saved.json()["revision"] == 1
+    assert saved_latest.status_code == 200
+    assert saved_latest.json()["revision"] == 2
+    assert resumed.status_code == 200
+    resumed_player = resumed.json()["player"]
+    assert {
+        "x_cm": resumed_player["resume_x_cm"],
+        "y_cm": resumed_player["resume_y_cm"],
+        "z_cm": resumed_player["resume_z_cm"],
+        "yaw_q15": resumed_player["resume_yaw_q15"],
+    } == latest_position
+    assert {
+        key: resumed_player[key]
+        for key in ("spawn_x_cm", "spawn_y_cm", "spawn_z_cm", "spawn_yaw_q15")
+    } == {
+        key: first_player[key]
+        for key in ("spawn_x_cm", "spawn_y_cm", "spawn_z_cm", "spawn_yaw_q15")
+    }
+    assert db.query(SpacePlayerSnapshot).count() == 1
+
+    second_user = _user(db, "pos-user-002", "https://cdn.entropydrop.com/skins/position-2.png")
+    app.dependency_overrides[get_current_user] = lambda: second_user
+    second_player = client.post("/space/api/v2/bootstrap").json()["player"]
+    assert second_player["resume_x_cm"] is None
+    assert second_player["resume_y_cm"] is None
+    assert second_player["resume_z_cm"] is None
+    assert second_player["resume_yaw_q15"] is None
+
+
+def test_space_position_rejects_out_of_bounds_checkpoint(client, db):
+    user = _user(db, "pos-limit-001", "https://cdn.entropydrop.com/skins/position-limit.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+
+    response = client.put(
+        f"/space/api/v2/worlds/{world_id}/players/me/position",
+        json={"x_cm": -1, "y_cm": 3200, "z_cm": 100, "yaw_q15": 0},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {"code": "PLAYER_POSITION_OUT_OF_BOUNDS"}
+    assert db.query(SpacePlayerSnapshot).count() == 0
 
 
 def test_space_terrain_edits_are_durable_and_visible_to_another_browser_user(client, db):
