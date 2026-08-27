@@ -574,17 +574,15 @@ def space_heartbeat(
         pos = _decode_player_snapshot(snap, world)
         if not pos:
             continue
-        skin_url = user.minecraft_skin_url or settings.DEFAULT_SKIN_URL or "/skin/default.png"
-        if skin_url.startswith("/"):
-            skin_url = f"{settings.API_DOMAIN.rstrip('/')}{skin_url}"
-
+        skin_url = (user.minecraft_skin_url or "").strip() or "/skin/default.png"
         yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
+        skin_model = "slim" if (user.minecraft_skin_model or "").lower() == "slim" else "strong"
         players.append({
             "user_id": user.id,
             "username": user.username or f"Player-{user.id[:6]}",
             "player_entity_id": str(entity_id or user.id),
             "minecraft_skin_url": skin_url,
-            "minecraft_skin_model": user.minecraft_skin_model or "strong",
+            "minecraft_skin_model": skin_model,
             "x": pos["x_cm"] / 100.0,
             "y": pos["y_cm"] / 100.0,
             "z": pos["z_cm"] / 100.0,
@@ -666,17 +664,15 @@ def list_world_players(
         pos = _decode_player_snapshot(snap, world)
         if not pos:
             continue
-        skin_url = user.minecraft_skin_url or settings.DEFAULT_SKIN_URL or "/skin/default.png"
-        if skin_url.startswith("/"):
-            skin_url = f"{settings.API_DOMAIN.rstrip('/')}{skin_url}"
-
+        skin_url = (user.minecraft_skin_url or "").strip() or "/skin/default.png"
         yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
+        skin_model = "slim" if (user.minecraft_skin_model or "").lower() == "slim" else "strong"
         players.append({
             "user_id": user.id,
             "username": user.username or f"Player-{user.id[:6]}",
             "player_entity_id": str(entity_id or user.id),
             "minecraft_skin_url": skin_url,
-            "minecraft_skin_model": user.minecraft_skin_model or "strong",
+            "minecraft_skin_model": skin_model,
             "x": pos["x_cm"] / 100.0,
             "y": pos["y_cm"] / 100.0,
             "z": pos["z_cm"] / 100.0,
