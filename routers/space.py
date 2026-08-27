@@ -1,5 +1,7 @@
+import datetime
 import hashlib
 import json
+import math
 import secrets
 import uuid
 from typing import Literal
@@ -87,6 +89,14 @@ class PlayerPositionUpdateRequest(BaseModel):
     y_cm: int = Field(ge=MIN_PLAYER_Y_CM, le=MAX_PLAYER_Y_CM)
     z_cm: int
     yaw_q15: int = Field(ge=-32767, le=32767)
+
+
+class SpaceHeartbeatRequest(BaseModel):
+    x_cm: int | None = None
+    y_cm: int | None = Field(default=None, ge=MIN_PLAYER_Y_CM, le=MAX_PLAYER_Y_CM)
+    z_cm: int | None = None
+    yaw_q15: int | None = Field(default=None, ge=-32767, le=32767)
+    since_terrain_revision: int = 0
 
 
 def _empty_chunk_overlay() -> dict:
@@ -468,6 +478,193 @@ def update_player_position(
         "revision": snapshot.revision,
         **position,
     }
+
+
+@router.post("/worlds/{world_id}/heartbeat")
+@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
+def space_heartbeat(
+    request: Request,
+    world_id: uuid.UUID,
+    heartbeat_req: SpaceHeartbeatRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Update caller position and return other active players + latest terrain chunk changes."""
+    world = _require_world_membership(db, str(world_id), current_user)
+
+    # 1. Update self position if provided
+    if (
+        heartbeat_req.x_cm is not None
+        and heartbeat_req.y_cm is not None
+        and heartbeat_req.z_cm is not None
+        and heartbeat_req.yaw_q15 is not None
+    ):
+        position = _validate_player_position(
+            world,
+            heartbeat_req.x_cm,
+            heartbeat_req.y_cm,
+            heartbeat_req.z_cm,
+            heartbeat_req.yaw_q15,
+        )
+        encoded = _encode_player_snapshot(position)
+        snapshot = db.query(models.SpacePlayerSnapshot).filter(
+            models.SpacePlayerSnapshot.world_id == world.id,
+            models.SpacePlayerSnapshot.user_id == current_user.id,
+        ).with_for_update().first()
+        if snapshot is None:
+            snapshot = models.SpacePlayerSnapshot(
+                world_id=world.id,
+                user_id=current_user.id,
+                revision=1,
+                last_event_id=0,
+                state_version=1,
+                state=encoded,
+            )
+            db.add(snapshot)
+        else:
+            snapshot.revision = int(snapshot.revision or 0) + 1
+            snapshot.state_version = 1
+            snapshot.state = encoded
+            snapshot.updated_at = datetime.datetime.now(datetime.timezone.utc)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            snapshot = db.query(models.SpacePlayerSnapshot).filter(
+                models.SpacePlayerSnapshot.world_id == world.id,
+                models.SpacePlayerSnapshot.user_id == current_user.id,
+            ).with_for_update().first()
+            if snapshot is not None:
+                snapshot.revision = int(snapshot.revision or 0) + 1
+                snapshot.state_version = 1
+                snapshot.state = encoded
+                snapshot.updated_at = datetime.datetime.now(datetime.timezone.utc)
+                db.commit()
+
+    # 2. Query active players in this world (active within last 30s)
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
+    active_snapshots = db.query(
+        models.SpacePlayerSnapshot,
+        models.User,
+        models.SpaceWorldPlayerProfile.player_entity_id,
+    ).join(
+        models.User, models.User.id == models.SpacePlayerSnapshot.user_id
+    ).outerjoin(
+        models.SpaceWorldPlayerProfile,
+        and_(
+            models.SpaceWorldPlayerProfile.world_id == models.SpacePlayerSnapshot.world_id,
+            models.SpaceWorldPlayerProfile.user_id == models.SpacePlayerSnapshot.user_id,
+        )
+    ).filter(
+        models.SpacePlayerSnapshot.world_id == world.id,
+        models.SpacePlayerSnapshot.updated_at >= cutoff,
+    ).all()
+
+    players = []
+    for snap, user, entity_id in active_snapshots:
+        pos = _decode_player_snapshot(snap, world)
+        if not pos:
+            continue
+        skin_url = user.minecraft_skin_url or settings.DEFAULT_SKIN_URL or "/skin/default.png"
+        if skin_url.startswith("/"):
+            skin_url = f"{settings.API_DOMAIN.rstrip('/')}{skin_url}"
+
+        yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
+        players.append({
+            "user_id": user.id,
+            "username": user.username or f"Player-{user.id[:6]}",
+            "player_entity_id": str(entity_id or user.id),
+            "minecraft_skin_url": skin_url,
+            "minecraft_skin_model": user.minecraft_skin_model or "strong",
+            "x": pos["x_cm"] / 100.0,
+            "y": pos["y_cm"] / 100.0,
+            "z": pos["z_cm"] / 100.0,
+            "yaw": yaw_rad,
+            "is_self": user.id == current_user.id,
+            "updated_at": snap.updated_at.isoformat() if snap.updated_at else None,
+        })
+
+    # 3. Query modified terrain chunks since requested revision
+    modified_chunks = []
+    max_revision = int(heartbeat_req.since_terrain_revision or 0)
+    if heartbeat_req.since_terrain_revision >= 0:
+        chunk_rows = db.query(models.SpaceChunkSnapshot).filter(
+            models.SpaceChunkSnapshot.world_id == world.id,
+            models.SpaceChunkSnapshot.revision > heartbeat_req.since_terrain_revision,
+        ).order_by(models.SpaceChunkSnapshot.revision.asc()).limit(128).all()
+
+        for row in chunk_rows:
+            if int(row.revision or 0) > max_revision:
+                max_revision = int(row.revision or 0)
+            overlay = _decode_chunk_overlay(row)
+            modified_chunks.append({
+                "chunk_x": row.chunk_x,
+                "chunk_z": row.chunk_z,
+                "revision": row.revision,
+                "standard": overlay["standard"],
+                "micro": overlay["micro"],
+            })
+
+    return {
+        "world_id": str(world.id),
+        "players": players,
+        "terrain_chunks": modified_chunks,
+        "max_terrain_revision": max_revision,
+    }
+
+
+@router.get("/worlds/{world_id}/players")
+@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
+def list_world_players(
+    request: Request,
+    world_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Return active online players in the specified world."""
+    world = _require_world_membership(db, str(world_id), current_user)
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
+    active_snapshots = db.query(
+        models.SpacePlayerSnapshot,
+        models.User,
+        models.SpaceWorldPlayerProfile.player_entity_id,
+    ).join(
+        models.User, models.User.id == models.SpacePlayerSnapshot.user_id
+    ).outerjoin(
+        models.SpaceWorldPlayerProfile,
+        and_(
+            models.SpaceWorldPlayerProfile.world_id == models.SpacePlayerSnapshot.world_id,
+            models.SpaceWorldPlayerProfile.user_id == models.SpacePlayerSnapshot.user_id,
+        )
+    ).filter(
+        models.SpacePlayerSnapshot.world_id == world.id,
+        models.SpacePlayerSnapshot.updated_at >= cutoff,
+    ).all()
+
+    players = []
+    for snap, user, entity_id in active_snapshots:
+        pos = _decode_player_snapshot(snap, world)
+        if not pos:
+            continue
+        skin_url = user.minecraft_skin_url or settings.DEFAULT_SKIN_URL or "/skin/default.png"
+        if skin_url.startswith("/"):
+            skin_url = f"{settings.API_DOMAIN.rstrip('/')}{skin_url}"
+
+        yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
+        players.append({
+            "user_id": user.id,
+            "username": user.username or f"Player-{user.id[:6]}",
+            "player_entity_id": str(entity_id or user.id),
+            "minecraft_skin_url": skin_url,
+            "minecraft_skin_model": user.minecraft_skin_model or "strong",
+            "x": pos["x_cm"] / 100.0,
+            "y": pos["y_cm"] / 100.0,
+            "z": pos["z_cm"] / 100.0,
+            "yaw": yaw_rad,
+            "is_self": user.id == current_user.id,
+            "updated_at": snap.updated_at.isoformat() if snap.updated_at else None,
+        })
+    return {"world_id": str(world.id), "players": players}
 
 
 @router.get("/worlds/{world_id}/terrain-edits")
