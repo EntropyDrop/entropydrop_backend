@@ -94,6 +94,20 @@ class SpaceWorldPlayerProfile(Base):
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
 
 
+class SpaceWorldEventStream(Base):
+    """Per-world monotonic cursor for reliable incremental terrain delivery."""
+    __tablename__ = "world_event_streams"
+
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
+    last_event_id = Column(BigInteger, nullable=False, default=0)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+
+
 class SpacePlayerSnapshot(Base):
     """Latest durable reconnect state for one player in one Space world."""
     __tablename__ = "player_snapshots"

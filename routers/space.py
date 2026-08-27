@@ -39,6 +39,7 @@ class SpaceWorldResponse(BaseModel):
     name: str
     seed: int
     terrain_generator_version: int
+    terrain_revision: int
 
 
 class SpacePlayerResponse(BaseModel):
@@ -96,7 +97,7 @@ class SpaceHeartbeatRequest(BaseModel):
     y_cm: int | None = Field(default=None, ge=MIN_PLAYER_Y_CM, le=MAX_PLAYER_Y_CM)
     z_cm: int | None = None
     yaw_q15: int | None = Field(default=None, ge=-32767, le=32767)
-    since_terrain_revision: int = 0
+    since_terrain_revision: int = Field(default=0, ge=0)
 
 
 def _empty_chunk_overlay() -> dict:
@@ -310,6 +311,13 @@ def _get_or_create_default_world(db: Session) -> models.SpaceWorld:
         return existing
 
 
+def _world_terrain_revision(db: Session, world: models.SpaceWorld) -> int:
+    stream = db.query(models.SpaceWorldEventStream).filter(
+        models.SpaceWorldEventStream.world_id == world.id,
+    ).first()
+    return int(stream.last_event_id or 0) if stream is not None else 0
+
+
 def _random_initial_position(world: models.SpaceWorld) -> dict[str, int]:
     # Keep the initial position one zone away from the coordinate boundary. The
     # authoritative world generator validates/refines safe ground when the
@@ -402,6 +410,7 @@ def bootstrap_space(
             "name": world.name,
             "seed": world.seed,
             "terrain_generator_version": world.terrain_generator_version,
+            "terrain_revision": _world_terrain_revision(db, world),
         },
         "player": {
             "user_id": current_user.id,
@@ -587,20 +596,31 @@ def space_heartbeat(
     # 3. Query modified terrain chunks since requested revision
     modified_chunks = []
     max_revision = int(heartbeat_req.since_terrain_revision or 0)
-    if heartbeat_req.since_terrain_revision >= 0:
+    # Chunk revision is local to one chunk and therefore cannot be a world
+    # cursor. Page complete event ids instead, so a first edit in a different
+    # chunk is never hidden just because both chunks happen to be revision 1.
+    event_rows = db.query(models.SpaceChunkSnapshot.last_event_id).filter(
+        models.SpaceChunkSnapshot.world_id == world.id,
+        models.SpaceChunkSnapshot.last_event_id > heartbeat_req.since_terrain_revision,
+    ).distinct().order_by(models.SpaceChunkSnapshot.last_event_id.asc()).limit(16).all()
+    event_ids = [int(row[0]) for row in event_rows]
+    if event_ids:
         chunk_rows = db.query(models.SpaceChunkSnapshot).filter(
             models.SpaceChunkSnapshot.world_id == world.id,
-            models.SpaceChunkSnapshot.revision > heartbeat_req.since_terrain_revision,
-        ).order_by(models.SpaceChunkSnapshot.revision.asc()).limit(128).all()
-
+            models.SpaceChunkSnapshot.last_event_id.in_(event_ids),
+        ).order_by(
+            models.SpaceChunkSnapshot.last_event_id.asc(),
+            models.SpaceChunkSnapshot.chunk_x.asc(),
+            models.SpaceChunkSnapshot.chunk_z.asc(),
+        ).all()
+        max_revision = event_ids[-1]
         for row in chunk_rows:
-            if int(row.revision or 0) > max_revision:
-                max_revision = int(row.revision or 0)
             overlay = _decode_chunk_overlay(row)
             modified_chunks.append({
                 "chunk_x": row.chunk_x,
                 "chunk_z": row.chunk_z,
                 "revision": row.revision,
+                "terrain_revision": row.last_event_id,
                 "standard": overlay["standard"],
                 "micro": overlay["micro"],
             })
@@ -733,6 +753,16 @@ def apply_terrain_mutation_batch(
     if receipt is not None:
         return receipt.result
 
+    stream = db.query(models.SpaceWorldEventStream).filter(
+        models.SpaceWorldEventStream.world_id == world.id,
+    ).with_for_update().first()
+    if stream is None:
+        stream = models.SpaceWorldEventStream(world_id=world.id, last_event_id=0)
+        db.add(stream)
+        db.flush()
+    stream.last_event_id = int(stream.last_event_id or 0) + 1
+    terrain_revision = stream.last_event_id
+
     normalized: list[tuple] = []
     touched_chunks: set[tuple[int, int]] = set()
     for mutation in batch_request.mutations:
@@ -830,6 +860,7 @@ def apply_terrain_mutation_batch(
         }
         encoded, content_hash = _encode_chunk_overlay(overlay)
         row.revision = int(row.revision or 0) + 1
+        row.last_event_id = terrain_revision
         row.codec = 0
         row.codec_version = 1
         row.uncompressed_size = len(encoded)
@@ -841,6 +872,7 @@ def apply_terrain_mutation_batch(
         "world_id": str(world.id),
         "batch_id": batch_id,
         "applied": len(batch_request.mutations),
+        "terrain_revision": terrain_revision,
         "chunks": revisions,
     }
     db.add(models.SpaceTerrainMutationBatch(

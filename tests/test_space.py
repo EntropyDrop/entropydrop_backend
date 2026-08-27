@@ -145,6 +145,69 @@ def test_space_position_rejects_out_of_bounds_checkpoint(client, db):
     assert db.query(SpacePlayerSnapshot).count() == 0
 
 
+def test_space_heartbeat_exchanges_two_active_players(client, db):
+    alice = _user(db, "live-alice-001", "https://cdn.entropydrop.com/skins/alice.png")
+    app.dependency_overrides[get_current_user] = lambda: alice
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    alice_heartbeat = client.post(
+        f"/space/api/v2/worlds/{world_id}/heartbeat",
+        json={"x_cm": 10000, "y_cm": 1800, "z_cm": 10000, "yaw_q15": 100, "since_terrain_revision": 0},
+    )
+    assert alice_heartbeat.status_code == 200
+
+    bob = _user(db, "live-bob-0001", "https://cdn.entropydrop.com/skins/bob.png")
+    app.dependency_overrides[get_current_user] = lambda: bob
+    assert client.post("/space/api/v2/bootstrap").status_code == 200
+    bob_heartbeat = client.post(
+        f"/space/api/v2/worlds/{world_id}/heartbeat",
+        json={"x_cm": 10100, "y_cm": 1800, "z_cm": 10000, "yaw_q15": -100, "since_terrain_revision": 0},
+    )
+
+    assert bob_heartbeat.status_code == 200
+    players = {player["user_id"]: player for player in bob_heartbeat.json()["players"]}
+    assert set(players) == {alice.id, bob.id}
+    assert players[alice.id]["is_self"] is False
+    assert players[bob.id]["is_self"] is True
+    assert players[alice.id]["x"] == 100.0
+
+
+def test_space_heartbeat_cursor_does_not_miss_first_edit_in_another_chunk(client, db):
+    user = _user(db, "live-block-001", "https://cdn.entropydrop.com/skins/live-block.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+
+    first_apply = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [{"kind": "set_standard", "x": 1, "y": 20, "z": 1, "block": 1, "color": 1}],
+        },
+    )
+    assert first_apply.status_code == 200
+    first_poll = client.post(
+        f"/space/api/v2/worlds/{world_id}/heartbeat",
+        json={"since_terrain_revision": 0},
+    )
+    cursor = first_poll.json()["max_terrain_revision"]
+    assert [(chunk["chunk_x"], chunk["chunk_z"]) for chunk in first_poll.json()["terrain_chunks"]] == [(0, 0)]
+
+    second_apply = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [{"kind": "set_standard", "x": 33, "y": 20, "z": 1, "block": 1, "color": 2}],
+        },
+    )
+    assert second_apply.status_code == 200
+    second_poll = client.post(
+        f"/space/api/v2/worlds/{world_id}/heartbeat",
+        json={"since_terrain_revision": cursor},
+    )
+
+    assert [(chunk["chunk_x"], chunk["chunk_z"]) for chunk in second_poll.json()["terrain_chunks"]] == [(2, 0)]
+    assert second_poll.json()["max_terrain_revision"] > cursor
+
+
 def test_space_terrain_edits_are_durable_and_visible_to_another_browser_user(client, db):
     first_user = _user(db, "space-editor-001", "https://cdn.entropydrop.com/skins/editor.png")
     app.dependency_overrides[get_current_user] = lambda: first_user
