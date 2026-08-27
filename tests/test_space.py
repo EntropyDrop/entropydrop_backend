@@ -45,7 +45,7 @@ def test_space_bootstrap_blocks_user_without_skin(client, db):
     assert db.query(SpaceWorldPlayerProfile).count() == 0
 
 
-def test_space_bootstrap_reuses_user_skin_and_stable_random_spawn(client, db):
+def test_space_bootstrap_reuses_identity_without_persisting_random_start(client, db):
     skin_url = "https://cdn.entropydrop.com/skins/immutable-player.png"
     user = _user(db, "space-user-001", skin_url)
     app.dependency_overrides[get_current_user] = lambda: user
@@ -64,17 +64,16 @@ def test_space_bootstrap_reuses_user_skin_and_stable_random_spawn(client, db):
     assert first_data["player"]["minecraft_skin_url"] == skin_url
     assert first_data["player"]["minecraft_skin_model"] == "slim"
     assert first_data["player"]["player_entity_id"] == second_data["player"]["player_entity_id"]
-    assert {
-        key: first_data["player"][key]
-        for key in ("spawn_x_cm", "spawn_y_cm", "spawn_z_cm", "spawn_yaw_q15")
-    } == {
-        key: second_data["player"][key]
-        for key in ("spawn_x_cm", "spawn_y_cm", "spawn_z_cm", "spawn_yaw_q15")
-    }
+    assert first_data["player"]["resumed"] is False
+    assert second_data["player"]["resumed"] is False
+    assert first_data["player"]["start_y_cm"] == 3200
+    assert 0 <= first_data["player"]["start_x_cm"] < 1024 * 16 * 100
+    assert 0 <= first_data["player"]["start_z_cm"] < 128 * 16 * 100
     assert db.query(SpaceWorldPlayerProfile).count() == 1
+    assert not any(column.name.startswith("spawn_") for column in SpaceWorldPlayerProfile.__table__.columns)
 
 
-def test_space_bootstrap_restores_latest_position_without_changing_birth_point(client, db):
+def test_space_bootstrap_restores_latest_position_as_start_state(client, db):
     user = _user(db, "pos-user-001", "https://cdn.entropydrop.com/skins/position.png")
     app.dependency_overrides[get_current_user] = lambda: user
     first = client.post("/space/api/v2/bootstrap")
@@ -82,15 +81,7 @@ def test_space_bootstrap_restores_latest_position_without_changing_birth_point(c
     world_id = first.json()["world"]["id"]
 
     assert first.status_code == 200
-    assert {
-        key: first_player[key]
-        for key in ("resume_x_cm", "resume_y_cm", "resume_z_cm", "resume_yaw_q15")
-    } == {
-        "resume_x_cm": None,
-        "resume_y_cm": None,
-        "resume_z_cm": None,
-        "resume_yaw_q15": None,
-    }
+    assert first_player["resumed"] is False
 
     position = {"x_cm": 123456, "y_cm": 4587, "z_cm": 65432, "yaw_q15": -12345}
     saved = client.put(
@@ -111,27 +102,19 @@ def test_space_bootstrap_restores_latest_position_without_changing_birth_point(c
     assert resumed.status_code == 200
     resumed_player = resumed.json()["player"]
     assert {
-        "x_cm": resumed_player["resume_x_cm"],
-        "y_cm": resumed_player["resume_y_cm"],
-        "z_cm": resumed_player["resume_z_cm"],
-        "yaw_q15": resumed_player["resume_yaw_q15"],
+        "x_cm": resumed_player["start_x_cm"],
+        "y_cm": resumed_player["start_y_cm"],
+        "z_cm": resumed_player["start_z_cm"],
+        "yaw_q15": resumed_player["start_yaw_q15"],
     } == latest_position
-    assert {
-        key: resumed_player[key]
-        for key in ("spawn_x_cm", "spawn_y_cm", "spawn_z_cm", "spawn_yaw_q15")
-    } == {
-        key: first_player[key]
-        for key in ("spawn_x_cm", "spawn_y_cm", "spawn_z_cm", "spawn_yaw_q15")
-    }
+    assert resumed_player["resumed"] is True
     assert db.query(SpacePlayerSnapshot).count() == 1
 
     second_user = _user(db, "pos-user-002", "https://cdn.entropydrop.com/skins/position-2.png")
     app.dependency_overrides[get_current_user] = lambda: second_user
     second_player = client.post("/space/api/v2/bootstrap").json()["player"]
-    assert second_player["resume_x_cm"] is None
-    assert second_player["resume_y_cm"] is None
-    assert second_player["resume_z_cm"] is None
-    assert second_player["resume_yaw_q15"] is None
+    assert second_player["resumed"] is False
+    assert second_player["start_y_cm"] == 3200
 
 
 def test_space_position_rejects_out_of_bounds_checkpoint(client, db):

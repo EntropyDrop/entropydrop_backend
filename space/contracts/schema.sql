@@ -476,19 +476,14 @@ CREATE TABLE player_snapshots (
     PRIMARY KEY (world_id, user_id)
 );
 
--- Stable identity/spawn data is separated from volatile reconnect position.
--- The first successful join atomically inserts one server-validated random safe
--- spawn. Ordinary logins read it; reconnect may instead restore player_snapshots.
--- Skin is never duplicated here: every entry reads the immutable URL/model from
--- the existing users row before admission.
+-- Stable identity is separated from runtime state. No birth point is stored:
+-- when player_snapshots has no row, bootstrap chooses an ephemeral random safe
+-- start and the client immediately checkpoints it. Skin is never duplicated
+-- here: every entry reads the URL/model from the existing users row.
 CREATE TABLE world_player_profiles (
     world_id         UUID        NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
     user_id          VARCHAR(16) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     player_entity_id UUID        NOT NULL DEFAULT gen_random_uuid(),
-    spawn_x_cm       INTEGER     NOT NULL,
-    spawn_y_cm       INTEGER     NOT NULL,
-    spawn_z_cm       INTEGER     NOT NULL,
-    spawn_yaw_q15    SMALLINT    NOT NULL DEFAULT 0,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (world_id, user_id),
@@ -498,12 +493,8 @@ CREATE TABLE world_player_profiles (
 CREATE OR REPLACE FUNCTION validate_world_player_profile_update()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  IF NEW.player_entity_id IS DISTINCT FROM OLD.player_entity_id
-     OR NEW.spawn_x_cm IS DISTINCT FROM OLD.spawn_x_cm
-     OR NEW.spawn_y_cm IS DISTINCT FROM OLD.spawn_y_cm
-     OR NEW.spawn_z_cm IS DISTINCT FROM OLD.spawn_z_cm
-     OR NEW.spawn_yaw_q15 IS DISTINCT FROM OLD.spawn_yaw_q15 THEN
-    RAISE EXCEPTION 'stable player identity/spawn cannot be changed by an ordinary profile update'
+  IF NEW.player_entity_id IS DISTINCT FROM OLD.player_entity_id THEN
+    RAISE EXCEPTION 'stable player identity cannot be changed by an ordinary profile update'
       USING ERRCODE = '23514';
   END IF;
 

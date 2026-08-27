@@ -1,6 +1,6 @@
 # Space Multiplayer V2: Real-Time Backend and Persistence Design
 
-> Status: shared-user bootstrap, durable birth points, paginated authored chunk
+> Status: shared-user bootstrap, durable latest-player snapshots, paginated authored chunk
 > overlays, and idempotent terrain mutation batches are implemented. The current
 > client uses authenticated REST as a transitional persistence transport. The
 > authoritative gateway/worker, event stream, and queue below remain the target
@@ -250,15 +250,14 @@ Transactions and the unique user index prevent both capacity overflow and two
 connections controlling one player. A queued connection is rate-limited and capped in
 memory just like a login connection, so the queue cannot become a denial-of-service path.
 
-After reservation, every join reads `world_player_profiles`. On the first join the server
-samples bounded random X/Z candidates, derives terrain height, rejects water/solid/entity
-overlap and unsafe headroom, then atomically `INSERT ... ON CONFLICT DO NOTHING`; the
-winning row fixes `player_entity_id` and spawn coordinates. Initial spawn and respawn use
-that stable point. Browser clients checkpoint their wrapped position and yaw to
-`player_snapshots` every two seconds and with a small keepalive request before page
-suspension. A later bootstrap restores that newer per-user snapshot, while a missing or
-invalid snapshot falls back to the stable birth point; checkpoint writes can never modify
-the birth point itself.
+After reservation, every join reads `world_player_profiles` for the stable
+`player_entity_id`, but that table deliberately contains no birth coordinates. Bootstrap
+first validates `player_snapshots`; when no valid snapshot exists, the server samples a
+bounded random X/Z candidate and returns it only as this entry's ephemeral start. The
+browser immediately checkpoints that start, then saves wrapped position and yaw every two
+seconds and with a small keepalive request before page suspension. Later bootstraps use the
+latest per-user snapshot directly. A missing or invalid snapshot simply produces another
+safe random start; no permanent birth point exists in PostgreSQL.
 
 ### 6.3 Input Prediction and Reconciliation
 
@@ -465,8 +464,8 @@ newer client wall-clock time never wins automatically.
 | `build_assets` | Entity placement/checkpoint | Deduplicated immutable definitions for entities already in the world |
 | `entity_snapshots` | Sleep/checkpoint/unload | Definition, spatial manifest, run intent, health, and necessary recovery state |
 | `entity_chunk_coverage` | Entity checkpoint | AOI lookup for sleeping entities, including multi-chunk bounds |
-| `world_player_profiles` | First/ordinary join | Stable player id and server-selected random safe spawn |
-| `player_snapshots` | Periodic/offline | Last runtime position and driving state; no backpack data |
+| `world_player_profiles` | First/ordinary join | Stable player id only; no position or birth point |
+| `player_snapshots` | Immediate/periodic/offline | Latest runtime position and yaw; no backpack data |
 | `world_checkpoints` | Background | Safe event-pruning watermark |
 
 There are deliberately no `player_inventories` or `player_inventory_slots` tables.
@@ -740,7 +739,7 @@ The bootstrap and terrain-overlay endpoints are implemented in the current FastA
 service. The remaining endpoints belong to the gateway/worker delivery phases.
 
 ```text
-POST   /space/api/v2/bootstrap                  Existing Bearer user + skin gate + durable spawn
+POST   /space/api/v2/bootstrap                  Bearer/skin gate + latest state or ephemeral random start
 PUT    /space/api/v2/worlds/{id}/players/me/position  Save latest per-user reconnect position
 GET    /space/api/v2/worlds/{id}/terrain-edits  Paginated durable authored chunk overlays
 POST   /space/api/v2/worlds/{id}/terrain-edits/batches  Idempotent batch of 1-256 mutations
@@ -979,12 +978,12 @@ implemented.
 
 | Requirement | Durable/source-of-truth coverage | Runtime/network coverage | Release proof |
 |---|---|---|---|
-| Random spawn per new player | `world_player_profiles`; safe server candidate inserted once | Read on every join; reconnect may use newer snapshot, respawn uses stable point | Concurrent first joins choose one row; invalid terrain/entity overlap rejected |
+| Random start without a saved state | No birth coordinates are stored; absence of `player_snapshots` triggers a safe random candidate | First client immediately checkpoints the ephemeral start; later joins use latest state | Empty/corrupt snapshot falls back safely; profile schema contains no spawn columns |
 | All standard and microblocks | Seed/generator plus packed chunk overlays/events reconstruct every cell | AOI snapshot then ordered deltas; standard/micro exclusion validated atomically | Conflicting same-tick edits converge; codec golden fixtures round-trip |
 | Distant torus for new entrants | Versioned immutable base artifact plus revisioned authored LOD tiles; no per-join PostgreSQL scan | HTTPS manifest/snapshot followed by reliable newer WebSocket tile deltas; deterministic base is the cache-miss fallback | Cold/warm join budgets pass; stale snapshot cannot replace newer edits; one dirty zone rebuilds only its tiles |
 | All world entity information | Immutable `build_assets` + `entity_snapshots` + indexed events + coverage manifest | Reliable entity presence; immutable HTTPS definition; 20 Hz runtime deltas | Checkpoint/replay and 1,000 shared definitions recover identically |
 | Enabled entity auto-run in loaded chunks | Durable desired run state, health, lifecycle/ownership epochs | AOI wake references and exhaustive wake/sleep state machine | Concurrent observers wake once; durable sleep, retry, quarantine and handoff tested |
-| Visible player state/orientation/skin/pose | Stable player profile plus existing `users.minecraft_skin_url`/model | Reliable presence carries URL/model; epoch-gated 20 Hz motion deltas never carry PNG bytes | Missing skin blocks entry; AOI enter/leave, dropped state, URL change and reconnect full reset converge |
+| Visible player state/orientation/skin/pose | Latest `player_snapshots`, stable player id, and existing `users.minecraft_skin_url`/model | Reliable presence carries URL/model; epoch-gated 20 Hz motion deltas never carry PNG bytes | Missing skin blocks entry; latest checkpoint restores, AOI enter/leave and reconnect reset converge |
 | Browser-only backpack | No inventory tables; existing `space.backpack.v2` plus JSON import/export | Untrusted local placement is revalidated; only accepted world result persists | Reload stays local, clearing storage loses it, server has no backpack endpoint/message |
 | Maximum 32 online with queue | Fixed session slots, FIFO queue leases and user advisory lock | Queue status/heartbeat, reservation, active and reconnect-grace states | 32 simultaneous admits, 33rd queues, promotion/reconnect never oversubscribes |
 | Real-time WebSocket behavior | No frame history in PostgreSQL | WSS binary protobuf, reliable presence/events, coalesced state, bounded fragmentation/backpressure | Slow client and stale-interest tests cannot delay tick or install obsolete data |

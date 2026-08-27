@@ -41,14 +41,11 @@ class SpacePlayerResponse(BaseModel):
     player_entity_id: str
     minecraft_skin_url: str
     minecraft_skin_model: str
-    spawn_x_cm: int
-    spawn_y_cm: int
-    spawn_z_cm: int
-    spawn_yaw_q15: int
-    resume_x_cm: int | None = None
-    resume_y_cm: int | None = None
-    resume_z_cm: int | None = None
-    resume_yaw_q15: int | None = None
+    start_x_cm: int
+    start_y_cm: int
+    start_z_cm: int
+    start_yaw_q15: int
+    resumed: bool
 
 
 class SpaceBootstrapResponse(BaseModel):
@@ -299,8 +296,8 @@ def _get_or_create_default_world(db: Session) -> models.SpaceWorld:
         return existing
 
 
-def _random_birth_point(world: models.SpaceWorld) -> tuple[int, int, int, int]:
-    # Keep the birth point one zone away from the coordinate boundary. The
+def _random_initial_position(world: models.SpaceWorld) -> dict[str, int]:
+    # Keep the initial position one zone away from the coordinate boundary. The
     # authoritative world generator validates/refines safe ground when the
     # multiplayer worker is introduced; 32 m starts above current terrain.
     margin_cm = min(32 * 16 * 100, (world.width_chunks * 16 * 100) // 4)
@@ -310,7 +307,7 @@ def _random_birth_point(world: models.SpaceWorld) -> tuple[int, int, int, int]:
     z_margin = min(margin_cm, length_cm // 4)
     z = z_margin + secrets.randbelow(max(1, length_cm - z_margin * 2))
     yaw = secrets.randbelow(65535) - 32767
-    return x, 3200, z, yaw
+    return {"x_cm": x, "y_cm": 3200, "z_cm": z, "yaw_q15": yaw}
 
 
 def _get_or_create_player_profile(
@@ -325,15 +322,10 @@ def _get_or_create_player_profile(
     if profile:
         return profile
 
-    x, y, z, yaw = _random_birth_point(world)
     profile = models.SpaceWorldPlayerProfile(
         world_id=world.id,
         user_id=user.id,
         player_entity_id=str(uuid.uuid4()),
-        spawn_x_cm=x,
-        spawn_y_cm=y,
-        spawn_z_cm=z,
-        spawn_yaw_q15=yaw,
     )
     db.add(profile)
     try:
@@ -357,7 +349,7 @@ def bootstrap_space(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    """Gate Space entry and return stable birth plus the latest reconnect position."""
+    """Gate Space entry and return the latest state or a one-time random start."""
     skin_url = (current_user.minecraft_skin_url or "").strip()
     if not skin_url:
         raise HTTPException(
@@ -375,7 +367,8 @@ def bootstrap_space(
         models.SpacePlayerSnapshot.world_id == world.id,
         models.SpacePlayerSnapshot.user_id == current_user.id,
     ).first()
-    resume_position = _decode_player_snapshot(snapshot, world)
+    saved_position = _decode_player_snapshot(snapshot, world)
+    start_position = saved_position or _random_initial_position(world)
     skin_model = "slim" if (current_user.minecraft_skin_model or "").lower() == "slim" else "strong"
 
     return {
@@ -395,14 +388,11 @@ def bootstrap_space(
             "player_entity_id": str(profile.player_entity_id),
             "minecraft_skin_url": skin_url,
             "minecraft_skin_model": skin_model,
-            "spawn_x_cm": profile.spawn_x_cm,
-            "spawn_y_cm": profile.spawn_y_cm,
-            "spawn_z_cm": profile.spawn_z_cm,
-            "spawn_yaw_q15": profile.spawn_yaw_q15,
-            "resume_x_cm": resume_position["x_cm"] if resume_position else None,
-            "resume_y_cm": resume_position["y_cm"] if resume_position else None,
-            "resume_z_cm": resume_position["z_cm"] if resume_position else None,
-            "resume_yaw_q15": resume_position["yaw_q15"] if resume_position else None,
+            "start_x_cm": start_position["x_cm"],
+            "start_y_cm": start_position["y_cm"],
+            "start_z_cm": start_position["z_cm"],
+            "start_yaw_q15": start_position["yaw_q15"],
+            "resumed": saved_position is not None,
         },
     }
 

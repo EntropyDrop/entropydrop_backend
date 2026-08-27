@@ -26,12 +26,14 @@ def test_space_contract_covers_persistence_queue_and_browser_only_backpack():
         "entity_snapshots",
         "entity_chunk_coverage",
         "world_player_profiles",
+        "player_snapshots",
         "world_session_slots",
         "world_join_queue",
     ):
         assert f"CREATE TABLE {table}" in SCHEMA
     assert "slot_number BETWEEN 0 AND 31" in SCHEMA
     assert "player_inventories" not in SCHEMA
+    assert "spawn_x_cm" not in SCHEMA
     assert "space.backpack.v2" in DESIGN
     assert "QueueStatus queue_status" in PROTOCOL
 

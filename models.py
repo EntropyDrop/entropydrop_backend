@@ -81,7 +81,7 @@ class SpaceWorld(Base):
 
 
 class SpaceWorldPlayerProfile(Base):
-    """Immutable Space identity and random birth point for an existing user."""
+    """Stable Space entity identity for an existing user; runtime state lives elsewhere."""
     __tablename__ = "world_player_profiles"
     __table_args__ = (
         UniqueConstraint("world_id", "player_entity_id", name="uq_world_player_entity"),
@@ -90,10 +90,6 @@ class SpaceWorldPlayerProfile(Base):
     world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
     user_id = Column(String(16), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
     player_entity_id = Column(Uuid(as_uuid=False), default=lambda: str(uuid.uuid4()), nullable=False)
-    spawn_x_cm = Column(Integer, nullable=False)
-    spawn_y_cm = Column(Integer, nullable=False)
-    spawn_z_cm = Column(Integer, nullable=False)
-    spawn_yaw_q15 = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc), nullable=False)
 
