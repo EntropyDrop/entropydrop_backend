@@ -78,9 +78,9 @@ def test_space_bootstrap_reuses_identity_without_persisting_random_start(client,
     assert first_data["player"]["player_entity_id"] == second_data["player"]["player_entity_id"]
     assert first_data["player"]["resumed"] is False
     assert second_data["player"]["resumed"] is False
-    assert first_data["player"]["start_y_cm"] == 3200
-    assert 0 <= first_data["player"]["start_x_cm"] < 1024 * 16 * 100
-    assert 0 <= first_data["player"]["start_z_cm"] < 128 * 16 * 100
+    assert first_data["player"]["start_y_cm"] is None
+    assert first_data["player"]["start_x_cm"] is None
+    assert first_data["player"]["start_z_cm"] is None
     assert db.query(SpaceWorldPlayerProfile).count() == 1
     assert not any(column.name.startswith("spawn_") for column in SpaceWorldPlayerProfile.__table__.columns)
 
@@ -94,6 +94,7 @@ def test_space_bootstrap_restores_latest_position_as_start_state(client, db):
 
     assert first.status_code == 200
     assert first_player["resumed"] is False
+    assert first_player["start_x_cm"] is None
 
     position = {"x_cm": 123456, "y_cm": 4587, "z_cm": 65432, "yaw_q15": -12345}
     saved = client.put(
@@ -126,7 +127,7 @@ def test_space_bootstrap_restores_latest_position_as_start_state(client, db):
     app.dependency_overrides[get_current_user] = lambda: second_user
     second_player = client.post("/space/api/v2/bootstrap").json()["player"]
     assert second_player["resumed"] is False
-    assert second_player["start_y_cm"] == 3200
+    assert second_player["start_y_cm"] is None
 
 
 def test_space_position_rejects_out_of_bounds_checkpoint(client, db):

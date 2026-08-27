@@ -45,10 +45,10 @@ class SpacePlayerResponse(BaseModel):
     player_entity_id: str
     minecraft_skin_url: str
     minecraft_skin_model: str
-    start_x_cm: int
-    start_y_cm: int
-    start_z_cm: int
-    start_yaw_q15: int
+    start_x_cm: int | None = None
+    start_y_cm: int | None = None
+    start_z_cm: int | None = None
+    start_yaw_q15: int | None = None
     resumed: bool
 
 
@@ -380,7 +380,6 @@ def bootstrap_space(
         models.SpacePlayerSnapshot.user_id == current_user.id,
     ).first()
     saved_position = _decode_player_snapshot(snapshot, world)
-    start_position = saved_position or _random_initial_position(world)
     skin_model = "slim" if (current_user.minecraft_skin_model or "").lower() == "slim" else "strong"
 
     return {
@@ -400,10 +399,10 @@ def bootstrap_space(
             "player_entity_id": str(profile.player_entity_id),
             "minecraft_skin_url": skin_url,
             "minecraft_skin_model": skin_model,
-            "start_x_cm": start_position["x_cm"],
-            "start_y_cm": start_position["y_cm"],
-            "start_z_cm": start_position["z_cm"],
-            "start_yaw_q15": start_position["yaw_q15"],
+            "start_x_cm": saved_position["x_cm"] if saved_position else None,
+            "start_y_cm": saved_position["y_cm"] if saved_position else None,
+            "start_z_cm": saved_position["z_cm"] if saved_position else None,
+            "start_yaw_q15": saved_position["yaw_q15"] if saved_position else None,
             "resumed": saved_position is not None,
         },
     }
