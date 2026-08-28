@@ -1,13 +1,20 @@
 import uuid
 
+import msgpack
+import pytest
+from sqlalchemy.orm import sessionmaker
+from starlette.websockets import WebSocketDisconnect
+
 from auth import get_current_user
 from main import app
 from rate_limit import limiter
 from routers import space as space_router
+from routers import space_realtime
 from models import (
     SpaceChunkSnapshot,
     SpacePlayerSnapshot,
     SpaceTerrainMutationBatch,
+    SpaceWorld,
     SpaceWorldPlayerProfile,
     User,
 )
@@ -98,6 +105,115 @@ def test_space_bootstrap_reuses_identity_without_persisting_random_start(client,
     assert not any(column.name.startswith("spawn_") for column in SpaceWorldPlayerProfile.__table__.columns)
 
 
+def test_space_realtime_ticket_and_binary_pose_stream(client, db, monkeypatch):
+    alice = _user(db, "space-ws-alice", "https://cdn.entropydrop.com/skins/alice.png")
+    bob = _user(db, "space-ws-bob", "https://cdn.entropydrop.com/skins/bob.png")
+
+    app.dependency_overrides[get_current_user] = lambda: alice
+    alice_bootstrap = client.post("/space/api/v2/bootstrap").json()
+    world_id = alice_bootstrap["world"]["id"]
+    alice_ticket = client.post(f"/space/api/v2/worlds/{world_id}/join-ticket")
+    app.dependency_overrides[get_current_user] = lambda: bob
+    client.post("/space/api/v2/bootstrap")
+    bob_ticket = client.post(f"/space/api/v2/worlds/{world_id}/join-ticket")
+
+    assert alice_ticket.status_code == 200
+    assert bob_ticket.status_code == 200
+    assert alice_ticket.json()["expires_in_seconds"] == 30
+    assert alice_ticket.json()["websocket_url"].endswith("/space/ws/v2")
+
+    realtime_session_factory = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=db.get_bind(),
+    )
+    monkeypatch.setattr(space_realtime, "SessionLocal", realtime_session_factory)
+    monkeypatch.setattr(space_realtime.settings, "SPACE_REALTIME_REDIS_FANOUT_ENABLED", False)
+
+    websocket_options = {
+        "headers": {"origin": "http://localhost:5173"},
+        "subprotocols": ["space-relay-v1"],
+    }
+    with client.websocket_connect("/space/ws/v2", **websocket_options) as alice_socket:
+        alice_socket.send_bytes(msgpack.packb({
+            "type": "hello",
+            "ticket": alice_ticket.json()["ticket"],
+        }, use_bin_type=True))
+        alice_hello = msgpack.unpackb(alice_socket.receive_bytes(), raw=False)
+        assert alice_hello["type"] == "hello"
+        assert alice_hello["input_hz"] == 20
+        assert alice_hello["snapshot_hz"] == 10
+
+        with client.websocket_connect("/space/ws/v2", **websocket_options) as bob_socket:
+            bob_socket.send_bytes(msgpack.packb({
+                "type": "hello",
+                "ticket": bob_ticket.json()["ticket"],
+            }, use_bin_type=True))
+            assert msgpack.unpackb(bob_socket.receive_bytes(), raw=False)["type"] == "hello"
+
+            alice_socket.send_bytes(msgpack.packb({
+                "type": "pose",
+                "sequence": 1,
+                "x_cm": 123456,
+                "y_cm": 4321,
+                "z_cm": 65432,
+                "yaw_q15": 1234,
+                "pitch_q15": -4321,
+            }, use_bin_type=True))
+            bob_socket.send_bytes(msgpack.packb({
+                "type": "pose",
+                "sequence": 1,
+                "x_cm": 123556,
+                "y_cm": 4321,
+                "z_cm": 65532,
+                "yaw_q15": -1234,
+                "pitch_q15": 4321,
+            }, use_bin_type=True))
+
+            alice_state = {"players": []}
+            while {player["user_id"] for player in alice_state["players"]} != {alice.id, bob.id}:
+                alice_state = msgpack.unpackb(alice_socket.receive_bytes(), raw=False)
+            bob_state = {"players": []}
+            while {player["user_id"] for player in bob_state["players"]} != {alice.id, bob.id}:
+                bob_state = msgpack.unpackb(bob_socket.receive_bytes(), raw=False)
+
+            assert alice_state["type"] == "state"
+            assert bob_state["type"] == "state"
+            alice_view = {player["user_id"]: player for player in alice_state["players"]}
+            bob_view = {player["user_id"]: player for player in bob_state["players"]}
+            assert alice_view[alice.id]["is_self"] is True
+            assert alice_view[bob.id]["is_self"] is False
+            assert bob_view[bob.id]["is_self"] is True
+            assert alice_view[alice.id]["x_cm"] == 123456
+
+            bob_socket.send_bytes(msgpack.packb({"type": "leave"}, use_bin_type=True))
+            with pytest.raises(WebSocketDisconnect):
+                bob_socket.receive_bytes()
+
+        alice_socket.send_bytes(msgpack.packb({"type": "leave"}, use_bin_type=True))
+        with pytest.raises(WebSocketDisconnect):
+            alice_socket.receive_bytes()
+
+    db.rollback()
+    db.expire_all()
+    snapshot = db.query(SpacePlayerSnapshot).filter(
+        SpacePlayerSnapshot.world_id == world_id,
+        SpacePlayerSnapshot.user_id == alice.id,
+    ).one()
+    world = db.query(SpaceWorld).filter(SpaceWorld.id == world_id).one()
+    saved_position = space_router._decode_player_snapshot(
+        snapshot,
+        world,
+    )
+    assert saved_position == {
+        "x_cm": 123456,
+        "y_cm": 4321,
+        "z_cm": 65432,
+        "yaw_q15": 1234,
+        "pitch_q15": -4321,
+    }
+
+
 def test_space_bootstrap_restores_latest_position_as_start_state(client, db):
     user = _user(db, "pos-user-001", "https://cdn.entropydrop.com/skins/position.png")
     app.dependency_overrides[get_current_user] = lambda: user
@@ -182,6 +298,13 @@ def test_space_heartbeat_exchanges_two_active_players(client, db):
     assert players[alice.id]["is_self"] is False
     assert players[bob.id]["is_self"] is True
     assert players[alice.id]["x"] == 100.0
+
+    terrain_only = client.post(
+        f"/space/api/v2/worlds/{world_id}/heartbeat",
+        json={"since_terrain_revision": 0, "include_players": False},
+    )
+    assert terrain_only.status_code == 200
+    assert terrain_only.json()["players"] == []
 
 
 def test_space_heartbeat_cursor_does_not_miss_first_edit_in_another_chunk(client, db):

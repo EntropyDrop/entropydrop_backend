@@ -1,10 +1,12 @@
 # Space Multiplayer V2: Real-Time Backend and Persistence Design
 
 > Status: shared-user bootstrap, durable latest-player snapshots, paginated authored chunk
-> overlays, and idempotent terrain mutation batches are implemented. The current
-> client uses authenticated REST as a transitional persistence transport. The
-> authoritative gateway/worker, event stream, and queue below remain the target
-> real-time architecture.
+> overlays, idempotent terrain mutation batches, and a transitional realtime player relay
+> are implemented. The relay uses one-use tickets, binary MessagePack, 20 Hz changed-pose
+> input, 10 Hz AOI snapshots, Redis cross-instance fanout, and five-second PostgreSQL
+> checkpoints. Terrain remains a durable REST cursor with realtime invalidation. The
+> authoritative simulation gateway/worker, protobuf input protocol, event stream, and queue
+> below remain the target real-time architecture.
 >
 > Contracts: see [`space/contracts/schema.sql`](../space/contracts/schema.sql) for the
 > database and [`space/contracts/protocol.proto`](../space/contracts/protocol.proto)
@@ -755,12 +757,27 @@ GET    /space/api/v2/jobs/{id}                  Read job status
 
 Authentication remains on the existing EntropyDrop `/skin/api/auth/*` routes;
 Space must not add a login/session API. Until the authoritative WebSocket worker ships,
-terrain snapshots and bounded mutation batches use the authenticated REST bridge above;
-movement, entities, AOI, and physics state do not. There is deliberately no
+`/space/ws/v2` uses the `space-relay-v1` MessagePack subprotocol to relay validated player
+poses from in-memory state; this is explicitly not the authoritative protobuf simulation
+protocol. Terrain snapshots and bounded mutation batches use the authenticated REST bridge.
+There is deliberately no
 inventory/backpack endpoint. Asset responses require current world access, use immutable
 cache headers plus ETag, and never expose raw object-storage keys.
 
 ### 11.2 Real-Time Channel
+
+The running transitional channel is:
+
+```text
+GET /space/ws/v2   Upgrade: websocket; subprotocol: space-relay-v1
+```
+
+It accepts changed poses at up to 20 Hz, emits nearby-player snapshots at 10 Hz, fans
+state between API replicas through Redis Pub/Sub, and checkpoints dirty reconnect state
+every five seconds plus disconnect. A lightweight terrain revision message wakes clients;
+chunk payloads still come from the durable REST cursor.
+
+The target authoritative channel remains:
 
 ```text
 GET /v2/realtime   Upgrade: websocket

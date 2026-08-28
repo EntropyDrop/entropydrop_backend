@@ -34,10 +34,16 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 0
 
     # Space uses the same JWT/users table. These settings identify the initial
-    # persistent world and the separately deployed authoritative WSS gateway.
+    # persistent world and tune the integrated realtime WebSocket gateway.
     SPACE_DEFAULT_WORLD_ID: str = "00000000-0000-4000-8000-000000000001"
     SPACE_WORLD_SEED: int = 20260827
-    SPACE_WS_URL: str = "wss://entropydrop.com/space/ws/v2"
+    SPACE_WS_URL: str = "/space/ws/v2"
+    SPACE_WS_ALLOWED_ORIGINS: str = ""
+    SPACE_REALTIME_INPUT_HZ: int = 20
+    SPACE_REALTIME_SNAPSHOT_HZ: int = 10
+    SPACE_REALTIME_PERSIST_SECONDS: int = 5
+    SPACE_REALTIME_AOI_RADIUS_CHUNKS: int = 16
+    SPACE_REALTIME_REDIS_FANOUT_ENABLED: bool = True
     
     # Google OAuth
     GOOGLE_CLIENT_ID: str = ""

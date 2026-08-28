@@ -103,6 +103,7 @@ class SpaceHeartbeatRequest(BaseModel):
     yaw_q15: int | None = Field(default=None, ge=-32767, le=32767)
     pitch_q15: int | None = Field(default=0, ge=-32767, le=32767)
     since_terrain_revision: int = Field(default=0, ge=0)
+    include_players: bool = True
 
 
 def _empty_chunk_overlay() -> dict:
@@ -561,48 +562,50 @@ def space_heartbeat(
                 snapshot.updated_at = datetime.datetime.now(datetime.timezone.utc)
                 db.commit()
 
-    # 2. Query active players in this world (active within last 30s)
-    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
-    active_snapshots = db.query(
-        models.SpacePlayerSnapshot,
-        models.User,
-        models.SpaceWorldPlayerProfile.player_entity_id,
-    ).join(
-        models.User, models.User.id == models.SpacePlayerSnapshot.user_id
-    ).outerjoin(
-        models.SpaceWorldPlayerProfile,
-        and_(
-            models.SpaceWorldPlayerProfile.world_id == models.SpacePlayerSnapshot.world_id,
-            models.SpaceWorldPlayerProfile.user_id == models.SpacePlayerSnapshot.user_id,
-        )
-    ).filter(
-        models.SpacePlayerSnapshot.world_id == world.id,
-        models.SpacePlayerSnapshot.updated_at >= cutoff,
-    ).all()
-
     players = []
-    for snap, user, entity_id in active_snapshots:
-        pos = _decode_player_snapshot(snap, world)
-        if not pos:
-            continue
-        skin_url = (user.minecraft_skin_url or "").strip() or "/skin/default.png"
-        yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
-        pitch_rad = (pos.get("pitch_q15", 0) / 32767.0) * math.pi
-        skin_model = "slim" if (user.minecraft_skin_model or "").lower() == "slim" else "strong"
-        players.append({
-            "user_id": user.id,
-            "username": user.username or f"Player-{user.id[:6]}",
-            "player_entity_id": str(entity_id or user.id),
-            "minecraft_skin_url": skin_url,
-            "minecraft_skin_model": skin_model,
-            "x": pos["x_cm"] / 100.0,
-            "y": pos["y_cm"] / 100.0,
-            "z": pos["z_cm"] / 100.0,
-            "yaw": yaw_rad,
-            "pitch": pitch_rad,
-            "is_self": user.id == current_user.id,
-            "updated_at": snap.updated_at.isoformat() if snap.updated_at else None,
-        })
+    if heartbeat_req.include_players:
+        # REST compatibility fallback only. The primary player-state path is the
+        # 10 Hz WebSocket snapshot stream and does not scan PostgreSQL per frame.
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
+        active_snapshots = db.query(
+            models.SpacePlayerSnapshot,
+            models.User,
+            models.SpaceWorldPlayerProfile.player_entity_id,
+        ).join(
+            models.User, models.User.id == models.SpacePlayerSnapshot.user_id
+        ).outerjoin(
+            models.SpaceWorldPlayerProfile,
+            and_(
+                models.SpaceWorldPlayerProfile.world_id == models.SpacePlayerSnapshot.world_id,
+                models.SpaceWorldPlayerProfile.user_id == models.SpacePlayerSnapshot.user_id,
+            )
+        ).filter(
+            models.SpacePlayerSnapshot.world_id == world.id,
+            models.SpacePlayerSnapshot.updated_at >= cutoff,
+        ).all()
+
+        for snap, user, entity_id in active_snapshots:
+            pos = _decode_player_snapshot(snap, world)
+            if not pos:
+                continue
+            skin_url = (user.minecraft_skin_url or "").strip() or "/skin/default.png"
+            yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
+            pitch_rad = (pos.get("pitch_q15", 0) / 32767.0) * math.pi
+            skin_model = "slim" if (user.minecraft_skin_model or "").lower() == "slim" else "strong"
+            players.append({
+                "user_id": user.id,
+                "username": user.username or f"Player-{user.id[:6]}",
+                "player_entity_id": str(entity_id or user.id),
+                "minecraft_skin_url": skin_url,
+                "minecraft_skin_model": skin_model,
+                "x": pos["x_cm"] / 100.0,
+                "y": pos["y_cm"] / 100.0,
+                "z": pos["z_cm"] / 100.0,
+                "yaw": yaw_rad,
+                "pitch": pitch_rad,
+                "is_self": user.id == current_user.id,
+                "updated_at": snap.updated_at.isoformat() if snap.updated_at else None,
+            })
 
     # 3. Query modified terrain chunks since requested revision
     modified_chunks = []
@@ -906,4 +909,8 @@ def apply_terrain_mutation_batch(
             status_code=409,
             detail={"code": "TERRAIN_BATCH_RETRY", "message": "世界正在更新，请重试同一批次。"},
         ) from exc
+    # Wake connected clients immediately; the durable REST cursor remains the
+    # source of truth and transports the potentially large chunk payload.
+    from routers.space_realtime import realtime_hub
+    realtime_hub.notify_terrain_from_thread(str(world.id), terrain_revision)
     return result

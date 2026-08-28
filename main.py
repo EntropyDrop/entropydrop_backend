@@ -10,7 +10,20 @@ from sqlalchemy import text
 
 from database import engine
 import models
-from routers import auth, generate, collections, address, order, webhooks, monitor, ledger, forum, credit, space
+from routers import (
+    address,
+    auth,
+    collections,
+    credit,
+    forum,
+    generate,
+    ledger,
+    monitor,
+    order,
+    space,
+    space_realtime,
+    webhooks,
+)
 from config import settings
 from instance_monitor import run_backend_instance_heartbeat
 
@@ -174,6 +187,8 @@ app.include_router(ledger.legacy_open_router, prefix="/skin")
 app.include_router(forum.router, prefix="/skin")
 app.include_router(credit.router, prefix="/skin")
 app.include_router(space.router)
+app.include_router(space_realtime.api_router)
+app.include_router(space_realtime.realtime_router)
 
 
 

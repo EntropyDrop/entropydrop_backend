@@ -2,6 +2,9 @@ syntax = "proto3";
 
 package space.multiplayer.v2;
 
+// Target authoritative worker protocol. The running FastAPI player relay uses
+// the separate `space-relay-v1` MessagePack subprotocol and must not be mistaken
+// for this input-authoritative simulation contract.
 // Browser transport: one length-prefixed ClientPacket/ServerPacket per binary
 // WebSocket message. World/session/entity UUID values are exactly 16 bytes.
 // EntropyDrop user ids are the existing Base58 VARCHAR(16) values and therefore
