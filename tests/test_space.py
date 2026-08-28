@@ -2,6 +2,8 @@ import uuid
 
 from auth import get_current_user
 from main import app
+from rate_limit import limiter
+from routers import space as space_router
 from models import (
     SpaceChunkSnapshot,
     SpacePlayerSnapshot,
@@ -35,6 +37,17 @@ def test_space_ping_is_exempt_from_rate_limit(client):
     for _ in range(70):
         response = client.get("/space/api/v2/ping")
         assert response.status_code == 200
+
+
+def test_space_realtime_rate_limit_policy_matches_long_lived_sessions():
+    heartbeat_endpoint = (
+        f"{space_router.space_heartbeat.__module__}."
+        f"{space_router.space_heartbeat.__name__}"
+    )
+    assert heartbeat_endpoint in limiter._exempt_routes
+    assert "day" not in space_router.SPACE_POSITION_RATE_LIMIT.lower()
+    assert "minute" in space_router.SPACE_POSITION_RATE_LIMIT.lower()
+    assert "hour" in space_router.SPACE_POSITION_RATE_LIMIT.lower()
 
 
 def test_space_bootstrap_requires_shared_login(client):

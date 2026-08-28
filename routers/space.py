@@ -23,6 +23,9 @@ router = APIRouter(prefix="/space/api/v2", tags=["space"])
 
 # 20x ordinary API rate limits (ordinary is 60/min, 1000/hr, 4000/day)
 SPACE_HIGH_FREQ_RATE_LIMIT = "1200/minute; 20000/hour; 80000/day"
+# Reconnect checkpoints may run for an entire long-lived play session. Keep
+# burst/hour protection, but do not turn normal continuous play into a daily 429.
+SPACE_POSITION_RATE_LIMIT = "1200/minute; 20000/hour"
 
 SPACE_CHUNK_SIZE = 16
 SPACE_WORLD_HEIGHT = 128
@@ -435,7 +438,7 @@ def bootstrap_space(
 
 @router.put("/worlds/{world_id}/players/me/position")
 @router.post("/worlds/{world_id}/players/me/position")
-@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
+@limiter.limit(SPACE_POSITION_RATE_LIMIT)
 def update_player_position(
     request: Request,
     world_id: uuid.UUID,
@@ -497,7 +500,7 @@ def update_player_position(
 
 
 @router.post("/worlds/{world_id}/heartbeat")
-@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
+@limiter.exempt
 def space_heartbeat(
     request: Request,
     world_id: uuid.UUID,
