@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     SPACE_REALTIME_PERSIST_SECONDS: int = 5
     SPACE_REALTIME_AOI_RADIUS_CHUNKS: int = 16
     SPACE_REALTIME_REDIS_FANOUT_ENABLED: bool = True
+    # Epoch-1 terrain batches carry a stable client timestamp. Their dedupe
+    # receipts can be removed after this window; older epoch-0 receipts remain
+    # indefinitely for compatibility with already-persisted browser outboxes.
+    SPACE_TERRAIN_BATCH_RECEIPT_RETENTION_DAYS: int = 30
     
     # Google OAuth
     GOOGLE_CLIENT_ID: str = ""

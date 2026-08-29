@@ -4,7 +4,7 @@ from datetime import timezone
 import uuid
 import random
 import secrets
-from sqlalchemy import Column, Integer, BigInteger, SmallInteger, String, DateTime, Text, JSON, Boolean, Float, Index, UniqueConstraint, Date, ForeignKey, Uuid, LargeBinary
+from sqlalchemy import Column, Integer, BigInteger, SmallInteger, String, DateTime, Text, JSON, Boolean, Float, Index, UniqueConstraint, CheckConstraint, Date, ForeignKey, Uuid, LargeBinary
 from database import Base
 
 def generate_base58_id(length=16):
@@ -155,10 +155,20 @@ class SpaceChunkSnapshot(Base):
 class SpaceTerrainMutationBatch(Base):
     """Idempotency receipt for one accepted client terrain mutation batch."""
     __tablename__ = "space_terrain_mutation_batches"
+    __table_args__ = (
+        Index("ix_space_terrain_batches_retention", "dedupe_epoch", "client_created_at"),
+        CheckConstraint("dedupe_epoch IN (0, 1)", name="ck_space_terrain_batches_epoch"),
+        CheckConstraint(
+            "dedupe_epoch = 0 OR client_created_at IS NOT NULL",
+            name="ck_space_terrain_batches_epoch_timestamp",
+        ),
+    )
 
     world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
     batch_id = Column(Uuid(as_uuid=False), primary_key=True)
     actor_user_id = Column(String(16), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    dedupe_epoch = Column(SmallInteger, nullable=False, default=0, server_default="0")
+    client_created_at = Column(DateTime(timezone=True), nullable=True)
     result = Column(JSON, nullable=False)
     created_at = Column(
         DateTime(timezone=True),

@@ -28,3 +28,4 @@ pyasn1>=0.6.4
 urllib3>=2.7.0
 click>=8.3.3
 msgpack>=1.2.1
+zstandard>=0.23.0

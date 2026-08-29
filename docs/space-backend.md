@@ -1,12 +1,20 @@
 # Space Multiplayer V2: Real-Time Backend and Persistence Design
 
 > Status: shared-user bootstrap, durable latest-player snapshots, paginated authored chunk
-> overlays, idempotent terrain mutation batches, and a transitional realtime player relay
+> AOI-paged Zstd chunk overlays, bounded epoch-1 idempotent terrain mutation batches,
+> and a transitional realtime player relay
 > are implemented. The relay uses one-use tickets, binary MessagePack, 20 Hz changed-pose
 > input, 10 Hz AOI snapshots, Redis cross-instance fanout, and five-second PostgreSQL
 > checkpoints. Terrain remains a durable REST cursor with realtime invalidation. The
 > authoritative simulation gateway/worker, protobuf input protocol, event stream, and queue
 > below remain the target real-time architecture.
+
+The browser persists only unacknowledged terrain batches while connected to the
+authoritative backend. Acknowledged chunk snapshots are fetched in overlapping AOI
+windows and are not copied into every player's IndexedDB. New epoch-1 batches carry a
+stable creation timestamp; after the configured retry window they are rejected rather
+than reapplied, allowing their receipts to be removed safely. Legacy epoch-0 receipts
+remain indefinitely for already-persisted clients.
 >
 > Contracts: see [`space/contracts/schema.sql`](../space/contracts/schema.sql) for the
 > database and [`space/contracts/protocol.proto`](../space/contracts/protocol.proto)

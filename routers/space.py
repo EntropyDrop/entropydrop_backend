@@ -3,9 +3,12 @@ import hashlib
 import json
 import math
 import secrets
+import threading
+import time
 import uuid
 from typing import Literal
 
+import zstandard as zstd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_
@@ -33,8 +36,16 @@ SPACE_MICRO_DIVISIONS = 5
 MAX_TERRAIN_MUTATIONS_PER_BATCH = 256
 MAX_CHUNK_SNAPSHOT_BYTES = 4 * 1024 * 1024
 MAX_SNAPSHOT_PAGE_SIZE = 256
+MAX_TERRAIN_AOI_RADIUS_CHUNKS = 64
 MIN_PLAYER_Y_CM = -100_000
 MAX_PLAYER_Y_CM = 1_000_000
+SPACE_CHUNK_CODEC_RAW = 0
+SPACE_CHUNK_CODEC_ZSTD = 1
+TERRAIN_RECEIPT_CLEANUP_INTERVAL_SECONDS = 3600
+TERRAIN_RECEIPT_CLEANUP_BATCH_SIZE = 400
+TERRAIN_BATCH_MAX_FUTURE_SKEW_SECONDS = 300
+_receipt_cleanup_lock = threading.Lock()
+_last_receipt_cleanup_at = 0.0
 
 
 class SpaceWorldResponse(BaseModel):
@@ -82,6 +93,8 @@ class TerrainMutation(BaseModel):
 
 class TerrainMutationBatchRequest(BaseModel):
     batch_id: uuid.UUID
+    dedupe_epoch: Literal[0, 1] = 0
+    created_at_ms: int | None = Field(default=None, ge=0)
     mutations: list[TerrainMutation] = Field(
         min_length=1,
         max_length=MAX_TERRAIN_MUTATIONS_PER_BATCH,
@@ -104,6 +117,13 @@ class SpaceHeartbeatRequest(BaseModel):
     pitch_q15: int | None = Field(default=0, ge=-32767, le=32767)
     since_terrain_revision: int = Field(default=0, ge=0)
     include_players: bool = True
+    center_chunk_x: int | None = None
+    center_chunk_z: int | None = None
+    terrain_radius_chunks: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_TERRAIN_AOI_RADIUS_CHUNKS,
+    )
 
 
 def _empty_chunk_overlay() -> dict:
@@ -113,17 +133,35 @@ def _empty_chunk_overlay() -> dict:
 def _decode_chunk_overlay(snapshot: models.SpaceChunkSnapshot | None) -> dict:
     if snapshot is None or not snapshot.payload:
         return _empty_chunk_overlay()
+    try:
+        if snapshot.codec == SPACE_CHUNK_CODEC_RAW:
+            encoded = bytes(snapshot.payload)
+        elif snapshot.codec == SPACE_CHUNK_CODEC_ZSTD:
+            if not (0 <= snapshot.uncompressed_size <= MAX_CHUNK_SNAPSHOT_BYTES):
+                raise ValueError("invalid expanded size")
+            # Compression contexts are intentionally request-local: synchronous
+            # FastAPI handlers may execute concurrently on worker threads.
+            encoded = zstd.ZstdDecompressor().decompress(
+                bytes(snapshot.payload),
+                max_output_size=snapshot.uncompressed_size,
+            )
+        else:
+            raise ValueError("unsupported chunk codec")
+    except (ValueError, zstd.ZstdError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "世界区块快照校验失败。"},
+        ) from exc
     if (
-        snapshot.codec != 0
-        or snapshot.uncompressed_size != len(snapshot.payload)
-        or snapshot.content_hash != hashlib.sha256(snapshot.payload).digest()
+        snapshot.uncompressed_size != len(encoded)
+        or snapshot.content_hash != hashlib.sha256(encoded).digest()
     ):
         raise HTTPException(
             status_code=500,
             detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "世界区块快照校验失败。"},
         )
     try:
-        payload = json.loads(snapshot.payload.decode("utf-8"))
+        payload = json.loads(encoded.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=500,
@@ -135,7 +173,7 @@ def _decode_chunk_overlay(snapshot: models.SpaceChunkSnapshot | None) -> dict:
     }
 
 
-def _encode_chunk_overlay(payload: dict) -> tuple[bytes, bytes]:
+def _encode_chunk_overlay(payload: dict) -> tuple[bytes, bytes, int, int]:
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
@@ -147,7 +185,14 @@ def _encode_chunk_overlay(payload: dict) -> tuple[bytes, bytes]:
             status_code=413,
             detail={"code": "CHUNK_OVERLAY_TOO_LARGE", "message": "单个区块的方块修改数据过大。"},
         )
-    return encoded, hashlib.sha256(encoded).digest()
+    compressed = zstd.ZstdCompressor(level=6).compress(encoded)
+    if len(compressed) < len(encoded):
+        stored = compressed
+        codec = SPACE_CHUNK_CODEC_ZSTD
+    else:
+        stored = encoded
+        codec = SPACE_CHUNK_CODEC_RAW
+    return stored, hashlib.sha256(encoded).digest(), codec, len(encoded)
 
 
 def _require_world_membership(
@@ -235,6 +280,115 @@ def _parse_snapshot_cursor(cursor: str | None) -> tuple[int, int] | None:
     if cx < 0 or cz < 0:
         raise HTTPException(status_code=422, detail={"code": "INVALID_CURSOR"})
     return cx, cz
+
+
+def _wrapped_chunk_axis_filter(column, center: int, radius: int, size: int):
+    center %= size
+    if radius * 2 + 1 >= size:
+        return None
+    lower = center - radius
+    upper = center + radius
+    if lower < 0:
+        return or_(column >= lower + size, column <= upper)
+    if upper >= size:
+        return or_(column >= lower, column <= upper - size)
+    return and_(column >= lower, column <= upper)
+
+
+def _chunk_aoi_filters(
+    world: models.SpaceWorld,
+    center_chunk_x: int | None,
+    center_chunk_z: int | None,
+    radius_chunks: int | None,
+) -> list:
+    values = (center_chunk_x, center_chunk_z, radius_chunks)
+    if all(value is None for value in values):
+        return []
+    if any(value is None for value in values):
+        raise HTTPException(status_code=422, detail={"code": "INCOMPLETE_TERRAIN_AOI"})
+    assert center_chunk_x is not None and center_chunk_z is not None and radius_chunks is not None
+    if not (1 <= radius_chunks <= MAX_TERRAIN_AOI_RADIUS_CHUNKS):
+        raise HTTPException(status_code=422, detail={"code": "INVALID_TERRAIN_AOI_RADIUS"})
+    filters = [
+        _wrapped_chunk_axis_filter(
+            models.SpaceChunkSnapshot.chunk_x,
+            center_chunk_x,
+            radius_chunks,
+            world.width_chunks,
+        ),
+        _wrapped_chunk_axis_filter(
+            models.SpaceChunkSnapshot.chunk_z,
+            center_chunk_z,
+            radius_chunks,
+            world.length_chunks,
+        ),
+    ]
+    return [condition for condition in filters if condition is not None]
+
+
+def _terrain_batch_client_created_at(
+    batch_request: TerrainMutationBatchRequest,
+    now: datetime.datetime,
+) -> datetime.datetime | None:
+    if batch_request.dedupe_epoch == 0:
+        return None
+    if batch_request.created_at_ms is None:
+        raise HTTPException(status_code=422, detail={"code": "TERRAIN_BATCH_TIMESTAMP_REQUIRED"})
+    try:
+        created_at = datetime.datetime.fromtimestamp(
+            batch_request.created_at_ms / 1000,
+            tz=datetime.timezone.utc,
+        )
+    except (OverflowError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail={"code": "INVALID_TERRAIN_BATCH_TIMESTAMP"}) from exc
+    retention_days = max(1, int(settings.SPACE_TERRAIN_BATCH_RECEIPT_RETENTION_DAYS))
+    if created_at < now - datetime.timedelta(days=retention_days):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TERRAIN_BATCH_EXPIRED", "message": "地形编辑批次已超过安全重试期限。"},
+        )
+    if created_at > now + datetime.timedelta(seconds=TERRAIN_BATCH_MAX_FUTURE_SKEW_SECONDS):
+        raise HTTPException(status_code=422, detail={"code": "INVALID_TERRAIN_BATCH_TIMESTAMP"})
+    return created_at
+
+
+def _maybe_cleanup_terrain_receipts(db: Session, now: datetime.datetime) -> None:
+    global _last_receipt_cleanup_at
+    monotonic_now = time.monotonic()
+    if monotonic_now - _last_receipt_cleanup_at < TERRAIN_RECEIPT_CLEANUP_INTERVAL_SECONDS:
+        return
+    with _receipt_cleanup_lock:
+        if monotonic_now - _last_receipt_cleanup_at < TERRAIN_RECEIPT_CLEANUP_INTERVAL_SECONDS:
+            return
+        retention_days = max(1, int(settings.SPACE_TERRAIN_BATCH_RECEIPT_RETENTION_DAYS))
+        cutoff = now - datetime.timedelta(days=retention_days)
+        expired_keys = db.query(
+            models.SpaceTerrainMutationBatch.world_id,
+            models.SpaceTerrainMutationBatch.batch_id,
+        ).filter(
+            models.SpaceTerrainMutationBatch.dedupe_epoch == 1,
+            models.SpaceTerrainMutationBatch.client_created_at < cutoff,
+        ).order_by(
+            models.SpaceTerrainMutationBatch.client_created_at.asc(),
+        ).limit(TERRAIN_RECEIPT_CLEANUP_BATCH_SIZE).all()
+        if expired_keys:
+            db.query(models.SpaceTerrainMutationBatch).filter(or_(*[
+                and_(
+                    models.SpaceTerrainMutationBatch.world_id == row.world_id,
+                    models.SpaceTerrainMutationBatch.batch_id == row.batch_id,
+                )
+                for row in expired_keys
+            ])).delete(synchronize_session=False)
+        _last_receipt_cleanup_at = monotonic_now
+
+
+def _terrain_receipt_response(world_id: str, batch_id: str, stored_result: dict) -> dict:
+    # New receipts omit identifiers already present in indexed columns. Rebuild
+    # the stable public response while remaining compatible with legacy rows.
+    result = dict(stored_result or {})
+    result["world_id"] = str(world_id)
+    result["batch_id"] = str(batch_id)
+    return result
 
 
 def _standard_cell(mutation: TerrainMutation, world: models.SpaceWorld) -> tuple[int, int, int]:
@@ -610,18 +764,26 @@ def space_heartbeat(
     # 3. Query modified terrain chunks since requested revision
     modified_chunks = []
     max_revision = int(heartbeat_req.since_terrain_revision or 0)
+    terrain_aoi_filters = _chunk_aoi_filters(
+        world,
+        heartbeat_req.center_chunk_x,
+        heartbeat_req.center_chunk_z,
+        heartbeat_req.terrain_radius_chunks,
+    )
     # Chunk revision is local to one chunk and therefore cannot be a world
     # cursor. Page complete event ids instead, so a first edit in a different
     # chunk is never hidden just because both chunks happen to be revision 1.
     event_rows = db.query(models.SpaceChunkSnapshot.last_event_id).filter(
         models.SpaceChunkSnapshot.world_id == world.id,
         models.SpaceChunkSnapshot.last_event_id > heartbeat_req.since_terrain_revision,
+        *terrain_aoi_filters,
     ).distinct().order_by(models.SpaceChunkSnapshot.last_event_id.asc()).limit(16).all()
     event_ids = [int(row[0]) for row in event_rows]
     if event_ids:
         chunk_rows = db.query(models.SpaceChunkSnapshot).filter(
             models.SpaceChunkSnapshot.world_id == world.id,
             models.SpaceChunkSnapshot.last_event_id.in_(event_ids),
+            *terrain_aoi_filters,
         ).order_by(
             models.SpaceChunkSnapshot.last_event_id.asc(),
             models.SpaceChunkSnapshot.chunk_x.asc(),
@@ -638,7 +800,6 @@ def space_heartbeat(
                 "standard": overlay["standard"],
                 "micro": overlay["micro"],
             })
-
     return {
         "world_id": str(world.id),
         "players": players,
@@ -708,14 +869,24 @@ def list_terrain_edits(
     world_id: uuid.UUID,
     cursor: str | None = Query(default=None, max_length=32),
     limit: int = Query(default=MAX_SNAPSHOT_PAGE_SIZE, ge=1, le=MAX_SNAPSHOT_PAGE_SIZE),
+    center_chunk_x: int | None = Query(default=None),
+    center_chunk_z: int | None = Query(default=None),
+    radius_chunks: int | None = Query(default=None, ge=1, le=MAX_TERRAIN_AOI_RADIUS_CHUNKS),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
     """Return durable authored chunk overlays in stable, paginated chunk order."""
     world = _require_world_membership(db, str(world_id), current_user)
     parsed_cursor = _parse_snapshot_cursor(cursor)
+    aoi_filters = _chunk_aoi_filters(
+        world,
+        center_chunk_x,
+        center_chunk_z,
+        radius_chunks,
+    )
     query = db.query(models.SpaceChunkSnapshot).filter(
-        models.SpaceChunkSnapshot.world_id == world.id
+        models.SpaceChunkSnapshot.world_id == world.id,
+        *aoi_filters,
     )
     if parsed_cursor is not None:
         cursor_x, cursor_z = parsed_cursor
@@ -760,12 +931,16 @@ def apply_terrain_mutation_batch(
     """Atomically apply at most 256 idempotent terrain mutations."""
     world = _require_world_membership(db, str(world_id), current_user)
     batch_id = str(batch_request.batch_id)
+    now = datetime.datetime.now(datetime.timezone.utc)
     receipt = db.query(models.SpaceTerrainMutationBatch).filter(
         models.SpaceTerrainMutationBatch.world_id == world.id,
         models.SpaceTerrainMutationBatch.batch_id == batch_id,
     ).first()
     if receipt is not None:
-        return receipt.result
+        return _terrain_receipt_response(world.id, batch_id, receipt.result)
+
+    client_created_at = _terrain_batch_client_created_at(batch_request, now)
+    _maybe_cleanup_terrain_receipts(db, now)
 
     stream = db.query(models.SpaceWorldEventStream).filter(
         models.SpaceWorldEventStream.world_id == world.id,
@@ -817,7 +992,7 @@ def apply_terrain_mutation_batch(
     ).with_for_update().all()
     row_by_chunk = {(row.chunk_x, row.chunk_z): row for row in rows}
     state_by_chunk: dict[tuple[int, int], tuple[models.SpaceChunkSnapshot, dict, dict]] = {}
-    empty_encoded, empty_hash = _encode_chunk_overlay(_empty_chunk_overlay())
+    empty_encoded, empty_hash, empty_codec, empty_size = _encode_chunk_overlay(_empty_chunk_overlay())
     for chunk in touched_chunks:
         row = row_by_chunk.get(chunk)
         if row is None:
@@ -827,9 +1002,9 @@ def apply_terrain_mutation_batch(
                 chunk_z=chunk[1],
                 revision=0,
                 last_event_id=0,
-                codec=0,
+                codec=empty_codec,
                 codec_version=1,
-                uncompressed_size=len(empty_encoded),
+                uncompressed_size=empty_size,
                 content_hash=empty_hash,
                 payload=empty_encoded,
             )
@@ -872,19 +1047,17 @@ def apply_terrain_mutation_batch(
             "standard": sorted(standard.values(), key=lambda edit: (edit[0], edit[1], edit[2])),
             "micro": sorted(micro.values(), key=lambda edit: (edit[0], edit[1], edit[2])),
         }
-        encoded, content_hash = _encode_chunk_overlay(overlay)
+        encoded, content_hash, codec, uncompressed_size = _encode_chunk_overlay(overlay)
         row.revision = int(row.revision or 0) + 1
         row.last_event_id = terrain_revision
-        row.codec = 0
+        row.codec = codec
         row.codec_version = 1
-        row.uncompressed_size = len(encoded)
+        row.uncompressed_size = uncompressed_size
         row.content_hash = content_hash
         row.payload = encoded
         revisions.append({"chunk_x": chunk[0], "chunk_z": chunk[1], "revision": row.revision})
 
-    result = {
-        "world_id": str(world.id),
-        "batch_id": batch_id,
+    stored_result = {
         "applied": len(batch_request.mutations),
         "terrain_revision": terrain_revision,
         "chunks": revisions,
@@ -893,7 +1066,9 @@ def apply_terrain_mutation_batch(
         world_id=world.id,
         batch_id=batch_id,
         actor_user_id=current_user.id,
-        result=result,
+        dedupe_epoch=batch_request.dedupe_epoch,
+        client_created_at=client_created_at,
+        result=stored_result,
     ))
     try:
         db.commit()
@@ -904,7 +1079,7 @@ def apply_terrain_mutation_batch(
             models.SpaceTerrainMutationBatch.batch_id == batch_id,
         ).first()
         if duplicate is not None:
-            return duplicate.result
+            return _terrain_receipt_response(world.id, batch_id, duplicate.result)
         raise HTTPException(
             status_code=409,
             detail={"code": "TERRAIN_BATCH_RETRY", "message": "世界正在更新，请重试同一批次。"},
@@ -913,4 +1088,4 @@ def apply_terrain_mutation_batch(
     # source of truth and transports the potentially large chunk payload.
     from routers.space_realtime import realtime_hub
     realtime_hub.notify_terrain_from_thread(str(world.id), terrain_revision)
-    return result
+    return _terrain_receipt_response(world.id, batch_id, stored_result)

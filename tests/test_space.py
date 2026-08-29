@@ -1,3 +1,4 @@
+import datetime
 import uuid
 
 import msgpack
@@ -344,6 +345,50 @@ def test_space_heartbeat_cursor_does_not_miss_first_edit_in_another_chunk(client
     assert second_poll.json()["max_terrain_revision"] > cursor
 
 
+def test_space_heartbeat_filters_incremental_chunks_to_player_aoi(client, db):
+    user = _user(db, "live-aoi-0001", "https://cdn.entropydrop.com/skins/live-aoi.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+
+    near_apply = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [
+                {"kind": "set_standard", "x": 1, "y": 20, "z": 1, "block": 1, "color": 1}
+            ],
+        },
+    )
+    far_apply = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [
+                {"kind": "set_standard", "x": 10 * 16, "y": 20, "z": 1, "block": 1, "color": 2}
+            ],
+        },
+    )
+    assert near_apply.status_code == 200
+    assert far_apply.status_code == 200
+
+    poll = client.post(
+        f"/space/api/v2/worlds/{world_id}/heartbeat",
+        json={
+            "since_terrain_revision": 0,
+            "include_players": False,
+            "center_chunk_x": 0,
+            "center_chunk_z": 0,
+            "terrain_radius_chunks": 1,
+        },
+    )
+
+    assert poll.status_code == 200
+    assert [(chunk["chunk_x"], chunk["chunk_z"]) for chunk in poll.json()["terrain_chunks"]] == [
+        (0, 0)
+    ]
+    assert poll.json()["max_terrain_revision"] == near_apply.json()["terrain_revision"]
+
+
 def test_space_terrain_edits_are_durable_and_visible_to_another_browser_user(client, db):
     first_user = _user(db, "space-editor-001", "https://cdn.entropydrop.com/skins/editor.png")
     app.dependency_overrides[get_current_user] = lambda: first_user
@@ -428,3 +473,136 @@ def test_space_terrain_snapshot_pages_use_a_stable_chunk_cursor(client, db):
     assert first["next_cursor"] == "0,0"
     assert [(chunk["chunk_x"], chunk["chunk_z"]) for chunk in second["chunks"]] == [(2, 0)]
     assert second["next_cursor"] is None
+
+
+def test_space_terrain_snapshot_aoi_wraps_at_world_edges(client, db):
+    user = _user(db, "space-aoi-0001", "https://cdn.entropydrop.com/skins/aoi.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    response = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [
+                {"kind": "set_standard", "x": 1, "y": 80, "z": 1, "block": 1, "color": 1},
+                {"kind": "set_standard", "x": 1023 * 16, "y": 80, "z": 1, "block": 1, "color": 2},
+                {"kind": "set_standard", "x": 10 * 16, "y": 80, "z": 1, "block": 1, "color": 3},
+            ],
+        },
+    )
+    assert response.status_code == 200
+
+    loaded = client.get(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits",
+        params={"center_chunk_x": 0, "center_chunk_z": 0, "radius_chunks": 1},
+    )
+
+    assert loaded.status_code == 200
+    assert [(chunk["chunk_x"], chunk["chunk_z"]) for chunk in loaded.json()["chunks"]] == [
+        (0, 0),
+        (1023, 0),
+    ]
+
+
+def test_space_chunk_snapshots_use_zstd_when_it_reduces_payload(client, db):
+    user = _user(db, "space-zstd-001", "https://cdn.entropydrop.com/skins/zstd.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    mutations = [
+        {
+            "kind": "set_standard",
+            "x": index % 16,
+            "y": 40 + index // 16,
+            "z": 1,
+            "block": 1,
+            "color": 0x123456,
+        }
+        for index in range(192)
+    ]
+
+    applied = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={"batch_id": str(uuid.uuid4()), "mutations": mutations},
+    )
+    assert applied.status_code == 200
+    snapshot = db.query(SpaceChunkSnapshot).one()
+    assert snapshot.codec == space_router.SPACE_CHUNK_CODEC_ZSTD
+    assert len(snapshot.payload) < snapshot.uncompressed_size
+
+    loaded = client.get(f"/space/api/v2/worlds/{world_id}/terrain-edits").json()
+    assert len(loaded["chunks"][0]["standard"]) == len(mutations)
+
+
+def test_space_epoch_one_batch_receipts_are_compact_and_reject_expired_replays(client, db):
+    user = _user(db, "space-dedupe-01", "https://cdn.entropydrop.com/skins/dedupe.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    batch_id = str(uuid.uuid4())
+    now_ms = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
+    payload = {
+        "batch_id": batch_id,
+        "dedupe_epoch": 1,
+        "created_at_ms": now_ms,
+        "mutations": [
+            {"kind": "set_standard", "x": 1, "y": 80, "z": 1, "block": 1, "color": 1},
+        ],
+    }
+
+    first = client.post(f"/space/api/v2/worlds/{world_id}/terrain-edits/batches", json=payload)
+    duplicate = client.post(f"/space/api/v2/worlds/{world_id}/terrain-edits/batches", json=payload)
+    assert first.status_code == 200
+    assert duplicate.json() == first.json()
+    receipt = db.query(SpaceTerrainMutationBatch).filter_by(batch_id=batch_id).one()
+    assert receipt.dedupe_epoch == 1
+    assert receipt.client_created_at is not None
+    assert "world_id" not in receipt.result
+    assert "batch_id" not in receipt.result
+
+    expired_ms = int((
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=31)
+    ).timestamp() * 1000)
+    expired = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={**payload, "batch_id": str(uuid.uuid4()), "created_at_ms": expired_ms},
+    )
+    assert expired.status_code == 409
+    assert expired.json()["detail"]["code"] == "TERRAIN_BATCH_EXPIRED"
+
+
+def test_space_expired_receipt_cleanup_is_bounded(client, db, monkeypatch):
+    user = _user(db, "space-cleanup01", "https://cdn.entropydrop.com/skins/cleanup.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    expired_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=31)
+    db.add_all([
+        SpaceTerrainMutationBatch(
+            world_id=world_id,
+            batch_id=str(uuid.uuid4()),
+            actor_user_id=user.id,
+            dedupe_epoch=1,
+            client_created_at=expired_at,
+            result={"applied": 1},
+        )
+        for _ in range(space_router.TERRAIN_RECEIPT_CLEANUP_BATCH_SIZE + 1)
+    ])
+    db.commit()
+    monkeypatch.setattr(space_router, "_last_receipt_cleanup_at", 0.0)
+
+    now_ms = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
+    fresh = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "dedupe_epoch": 1,
+            "created_at_ms": now_ms,
+            "mutations": [
+                {"kind": "set_standard", "x": 1, "y": 80, "z": 1, "block": 1, "color": 1},
+            ],
+        },
+    )
+
+    assert fresh.status_code == 200
+    assert db.query(SpaceTerrainMutationBatch).filter(
+        SpaceTerrainMutationBatch.client_created_at < datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(days=30)
+    ).count() == 1

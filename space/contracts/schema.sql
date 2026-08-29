@@ -232,10 +232,16 @@ CREATE TABLE space_terrain_mutation_batches (
     world_id     UUID        NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
     batch_id     UUID        NOT NULL,
     actor_user_id VARCHAR(16) REFERENCES users(id) ON DELETE SET NULL,
+    dedupe_epoch SMALLINT     NOT NULL DEFAULT 0 CHECK (dedupe_epoch IN (0, 1)),
+    client_created_at TIMESTAMPTZ,
     result       JSONB       NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (world_id, batch_id)
+    PRIMARY KEY (world_id, batch_id),
+    CHECK ((dedupe_epoch = 0) OR (client_created_at IS NOT NULL))
 );
+
+CREATE INDEX ix_space_terrain_batches_retention
+    ON space_terrain_mutation_batches (dedupe_epoch, client_created_at);
 
 -- -----------------------------------------------------------------------------
 -- 4. Ordered durable mutation log
