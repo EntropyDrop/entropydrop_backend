@@ -21,6 +21,7 @@ from routers import (
     monitor,
     order,
     space,
+    space_market,
     space_realtime,
     webhooks,
 )
@@ -187,6 +188,7 @@ app.include_router(ledger.legacy_open_router, prefix="/skin")
 app.include_router(forum.router, prefix="/skin")
 app.include_router(credit.router, prefix="/skin")
 app.include_router(space.router)
+app.include_router(space_market.router)
 app.include_router(space_realtime.api_router)
 app.include_router(space_realtime.realtime_router)
 

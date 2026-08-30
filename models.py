@@ -176,6 +176,92 @@ class SpaceTerrainMutationBatch(Base):
         nullable=False,
     )
 
+
+class SpaceMarketResource(Base):
+    """Canonical, immutable Space backpack resource published to the market."""
+    __tablename__ = "space_market_resources"
+    __table_args__ = (
+        UniqueConstraint("content_digest", name="uq_space_market_resource_digest"),
+        CheckConstraint(
+            "kind IN ('blockset', 'entity', 'colorset')",
+            name="ck_space_market_resource_kind",
+        ),
+        CheckConstraint("schema_version = 2", name="ck_space_market_resource_schema_version"),
+        CheckConstraint("license = 'AGPL-3.0-only'", name="ck_space_market_resource_license"),
+        CheckConstraint(
+            "downloads_count >= 0 AND likes_count >= 0",
+            name="ck_space_market_resource_counts",
+        ),
+        Index(
+            "ix_space_market_resources_downloads",
+            "deleted_at", "kind", "downloads_count", "created_at",
+        ),
+        Index(
+            "ix_space_market_resources_likes",
+            "deleted_at", "kind", "likes_count", "created_at",
+        ),
+        Index(
+            "ix_space_market_resources_latest",
+            "deleted_at", "kind", "created_at",
+        ),
+        Index(
+            "ix_space_market_resources_publisher_day",
+            "publisher_user_id", "created_at",
+        ),
+    )
+
+    id = Column(String(16), primary_key=True, default=generate_base58_id)
+    publisher_user_id = Column(
+        String(16),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    kind = Column(String(16), nullable=False)
+    schema_version = Column(SmallInteger, nullable=False, default=2, server_default="2")
+    name = Column(String(80), nullable=False)
+    license = Column(String(32), nullable=False, default="AGPL-3.0-only", server_default="AGPL-3.0-only")
+    content_digest = Column(LargeBinary(32), nullable=False)
+    content = Column(JSON, nullable=False)
+    preview = Column(JSON, nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    block_count = Column(Integer, nullable=False, default=0, server_default="0")
+    node_count = Column(Integer, nullable=False, default=0, server_default="0")
+    script_count = Column(Integer, nullable=False, default=0, server_default="0")
+    downloads_count = Column(Integer, nullable=False, default=0, server_default="0")
+    likes_count = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_by_user_id = Column(
+        String(16),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+
+class SpaceMarketResourceLike(Base):
+    """One authenticated player's like on one active Space market resource."""
+    __tablename__ = "space_market_resource_likes"
+
+    resource_id = Column(
+        String(16),
+        ForeignKey("space_market_resources.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id = Column(
+        String(16),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+
 class GenerationLog(Base):
     """Generation log model"""
     __tablename__ = "generation_logs"

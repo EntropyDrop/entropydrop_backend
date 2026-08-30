@@ -94,6 +94,7 @@ def test_space_bootstrap_reuses_identity_without_persisting_random_start(client,
     assert first_data["queue_enabled"] is True
     assert first_data["world"]["terrain_generator_version"] == 1
     assert first_data["player"]["user_id"] == user.id
+    assert first_data["player"]["is_admin"] is False
     assert first_data["player"]["minecraft_skin_url"] == skin_url
     assert first_data["player"]["minecraft_skin_model"] == "slim"
     assert first_data["player"]["player_entity_id"] == second_data["player"]["player_entity_id"]

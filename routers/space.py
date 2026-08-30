@@ -59,6 +59,7 @@ class SpaceWorldResponse(BaseModel):
 class SpacePlayerResponse(BaseModel):
     user_id: str
     username: str | None
+    is_admin: bool
     player_entity_id: str
     minecraft_skin_url: str
     minecraft_skin_model: str
@@ -579,6 +580,7 @@ def bootstrap_space(
         "player": {
             "user_id": current_user.id,
             "username": current_user.username,
+            "is_admin": current_user.is_admin,
             "player_entity_id": str(profile.player_entity_id),
             "minecraft_skin_url": skin_url,
             "minecraft_skin_model": skin_model,

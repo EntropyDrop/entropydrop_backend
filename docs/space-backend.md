@@ -521,27 +521,54 @@ not remove a hot world's stream-row contention.
 - Hash-partition `world_events` into 32 partitions by `world_id` from the first release.
   Add time subpartitions only after a partition reaches measured capacity.
 
-### 9.4 Server World Data versus the Local Backpack
+### 9.4 Server World Data, the Local Backpack, and the Resource Market
 
 The browser owns the backpack. The current client already persists its three groups of
 nine entries under `localStorage['space.backpack.v2']`; JSON export/import is the manual
 backup and transfer mechanism. The server does not know which slot is selected, which
-name a player gave an item, or whether two local entries are identical.
+name a player gave an unpublished item, or whether two unpublished local entries are
+identical. Publishing is an explicit copy operation; it never synchronizes or mutates a
+player's local slots.
 
 This does not make placement client-authoritative. There are two different lifetimes:
 
 ```text
 browser backpack entry --untrusted placement command--> authoritative world mutation
+                       `--explicit publish-----------> immutable market resource
                                                     `--> durable world entity definition
 ```
 
-- `ENTITY` and `BLOCK_SET` content stays local until the player places it.
-- A `COLOR_SET` never needs upload: it only chooses explicit colors in terrain commands.
+- `ENTITY`, `BLOCK_SET`, and `COLOR_SET` content stays local until the player explicitly
+  publishes it. Entity/block-set placement remains independent from publication.
 - Copying a world selection to the backpack downloads a validated structural snapshot;
   it does not create a server inventory record.
-- Clearing browser site data loses the backpack. Cross-device sync, recovery, sharing,
-  quotas, ownership of unplaced items, and inventory conflict resolution are explicitly
-  out of scope for this phase.
+- Clearing browser site data loses local slots. A player can download a published resource
+  again, but the market is not cross-device synchronization, backup, or slot recovery.
+- Market rows retain publisher attribution, aggregate download/like counts, and one like
+  per authenticated user. Administrators soft-delete resources from public results.
+
+#### 9.4.1 Canonical publish contract
+
+All published resources use schema version 2 and a closed field set (`extra=forbid`):
+
+- `space-blockset`: a non-empty name and bounded voxel array;
+- `space-entity`: the same voxel representation plus component hierarchy, scripts,
+  enabled flags, constraints, physics mode/material, bearing/piston parameters, cockpit,
+  gravity and vehicle state;
+- `space-colorset`: exactly nine normalized six-digit `#rrggbb` values.
+
+Voxel base coordinates (`dx/dy/dz`) are safe integers. A micro voxel provides all three
+integer offsets (`mx/my/mz`) in `0..4`; omission of all three means a standard voxel. The
+API rejects duplicate occupancy, bounds above 64 cells on an axis, unknown component
+references, hierarchy cycles, duplicate ids, non-finite physics values, oversized scripts,
+and resources above the block/component/constraint/byte budgets.
+
+Before storage, the API recomputes derived counts, normalizes colors and numbers, and sorts
+order-insensitive arrays. SHA-256 is computed over this canonical content without the
+display name or derived counts, so renaming or reordering cannot evade the global duplicate
+constraint. Deleted rows continue to reserve their digest. Every publication has the fixed
+SPDX license `AGPL-3.0-only`; each user may make at most ten successful publications per
+UTC day, including resources later deleted by an administrator.
 
 ### 9.5 `build_assets`: Durable World Entity Definitions
 
@@ -753,6 +780,11 @@ POST   /space/api/v2/bootstrap                  Bearer/skin gate + latest state 
 PUT    /space/api/v2/worlds/{id}/players/me/position  Save latest per-user reconnect position
 GET    /space/api/v2/worlds/{id}/terrain-edits  Paginated durable authored chunk overlays
 POST   /space/api/v2/worlds/{id}/terrain-edits/batches  Idempotent batch of 1-256 mutations
+GET    /space/api/v2/market/resources           List by kind; rank by downloads, likes, or latest
+POST   /space/api/v2/market/resources           Validate and publish a canonical AGPL-3.0-only resource
+GET    /space/api/v2/market/resources/{id}/download  Download canonical content and increment count
+POST   /space/api/v2/market/resources/{id}/like Toggle the authenticated user's like
+DELETE /space/api/v2/market/resources/{id}      Administrator-only soft delete
 POST   /space/api/v2/worlds/{id}/join-ticket    Issue a short-lived real-time ticket
 GET    /space/api/v2/worlds/{id}                Read metadata and membership permissions
 GET    /space/api/v2/worlds/{id}/members        List members with permission
@@ -767,10 +799,10 @@ Authentication remains on the existing EntropyDrop `/skin/api/auth/*` routes;
 Space must not add a login/session API. Until the authoritative WebSocket worker ships,
 `/space/ws/v2` uses the `space-relay-v1` MessagePack subprotocol to relay validated player
 poses from in-memory state; this is explicitly not the authoritative protobuf simulation
-protocol. Terrain snapshots and bounded mutation batches use the authenticated REST bridge.
-There is deliberately no
-inventory/backpack endpoint. Asset responses require current world access, use immutable
-cache headers plus ETag, and never expose raw object-storage keys.
+protocol. Terrain snapshots, bounded mutation batches, and the explicit resource market use
+the authenticated REST bridge. There is deliberately no inventory-slot/backpack-sync
+endpoint. Asset responses require current world access, use immutable cache headers plus
+ETag, and never expose raw object-storage keys.
 
 ### 11.2 Real-Time Channel
 
@@ -964,6 +996,9 @@ The system is not real-time multiplayer until it passes at least these scenarios
   instance does not alter the others.
 - Backpack edits survive a same-browser reload through `space.backpack.v2`, create no
   server inventory rows/messages, and are lost when that browser storage is cleared.
+- Market publication accepts only canonical v2 resources, rejects renamed/reordered
+  duplicates, enforces ten successful publications per UTC day, and fixes the license to
+  `AGPL-3.0-only`; download/like rankings and administrator soft-delete converge.
 - Entity placement creates a new `entity_id` without copying velocity or `self.state`;
   block-set placement edits terrain only.
 - An enabled sleeping entity wakes exactly once when overlapping AOIs arrive concurrently,
@@ -1010,6 +1045,7 @@ implemented.
 | Enabled entity auto-run in loaded chunks | Durable desired run state, health, lifecycle/ownership epochs | AOI wake references and exhaustive wake/sleep state machine | Concurrent observers wake once; durable sleep, retry, quarantine and handoff tested |
 | Visible player state/orientation/skin/pose | Latest `player_snapshots`, stable player id, and existing `users.minecraft_skin_url`/model | Reliable presence carries URL/model; epoch-gated 20 Hz motion deltas never carry PNG bytes | Missing skin blocks entry; latest checkpoint restores, AOI enter/leave and reconnect reset converge |
 | Browser-only backpack | No inventory tables; existing `space.backpack.v2` plus JSON import/export | Untrusted local placement is revalidated; only accepted world result persists | Reload stays local, clearing storage loses it, server has no backpack endpoint/message |
+| Explicit resource market | Immutable canonical v2 content, global SHA-256 uniqueness, publisher/quota metadata, likes and soft deletion | Authenticated REST publish/list/download/like/admin-delete; no slot synchronization | Strict-schema fixtures, duplicate/order/name equivalence, 10/day, counters/rankings and authorization tests |
 | Maximum 32 online with queue | Fixed session slots, FIFO queue leases and user advisory lock | Queue status/heartbeat, reservation, active and reconnect-grace states | 32 simultaneous admits, 33rd queues, promotion/reconnect never oversubscribes |
 | Real-time WebSocket behavior | No frame history in PostgreSQL | WSS binary protobuf, reliable presence/events, coalesced state, bounded fragmentation/backpressure | Slow client and stale-interest tests cannot delay tick or install obsolete data |
 | Reconnect/idempotency/conflicts | Resume hash, operation id unique index, revisions, event/checkpoint watermarks | Input replay, presence reset, `InterestReset`, compare-and-swap commands | Crash points and 10,000 retries produce one durable result |
