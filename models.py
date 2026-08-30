@@ -301,6 +301,16 @@ class GenerationLog(Base):
     error_msg = Column(Text, nullable=True)
     is_deleted = Column(Boolean, default=False, index=True)
     is_pro = Column(Boolean, default=False, index=True)
+    # Immutable license snapshot assigned when the log is created. Visibility
+    # and the public reuse license are intentionally stored separately.
+    license = Column(String(64), nullable=False, default="unknown", server_default="unknown", index=True)
+    public_license = Column(String(64), nullable=True)
+    license_version = Column(Integer, nullable=False, default=1, server_default="1")
+    license_granted_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
 
     @property

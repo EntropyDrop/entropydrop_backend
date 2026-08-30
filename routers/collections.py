@@ -8,6 +8,7 @@ import schemas
 import auth
 from s3_utils import get_cdn_url, generate_presigned_url_get, get_s3_url
 import backend_utils
+import licenses
 from config import settings
 
 router = APIRouter(prefix="/api", tags=["collections"])
@@ -460,15 +461,21 @@ async def upload_item_to_collection(
     name: Optional[str] = Form(None),
     mode: str = Form("human_upload"), # 'human_edit', 'human_upload'.
     parent: Optional[str] = Form(None), # parent log_id
+    license_consent: bool = Form(False),
+    requested_license: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
     if mode != "human_upload" and mode != "human_edit":
         raise HTTPException(status_code=400, detail="Invalid mode")
-
     """Upload image to collection and create generation log"""
     if not id in ["creations_public", "creations_private"]:
         raise HTTPException(status_code=400, detail="Custom collections do not support manual uploads")
+    if (mode == "human_upload" or parent is None) and not license_consent:
+        raise HTTPException(
+            status_code=400,
+            detail="You must confirm that you have the necessary rights for CC BY-NC 4.0 or the selected commercial license",
+        )
 
     is_public = (id == "creations_public")
     
@@ -485,9 +492,18 @@ async def upload_item_to_collection(
         if total_private_files >= 2000:
              raise HTTPException(status_code=400, detail="Total private assets limit reached (2000 items)")
         
+    parent_log = None
+    if parent:
+        parent_log = db.query(models.GenerationLog).filter(
+            models.GenerationLog.id == parent,
+            models.GenerationLog.is_deleted == False,
+        ).first()
+        if not parent_log:
+            raise HTTPException(status_code=404, detail="Parent skin not found")
+        if not parent_log.is_public and parent_log.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Permission denied")
     if parent and id == "creations_public":
-        parent_log = db.query(models.GenerationLog).filter(models.GenerationLog.id == parent).first()
-        if parent_log and not parent_log.is_public:
+        if not parent_log.is_public:
             raise HTTPException(status_code=400, detail="Private models cannot be saved as public")
             
     file_content = await file.read()
@@ -504,6 +520,19 @@ async def upload_item_to_collection(
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=400, detail="Invalid image file")
+
+    # The requested choice is advisory until validated against the source
+    # lineage and the account's entitlement. It can never broaden CC/unknown
+    # source rights. Validate before uploading to avoid orphaned objects.
+    try:
+        license_code = licenses.saved_license(
+            current_user,
+            parent_log=parent_log,
+            requested_license=requested_license,
+            is_upload=(mode == "human_upload"),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
     s3id = uuid.uuid4().hex
     filename = f"collections/{s3id}.png"
@@ -533,7 +562,10 @@ async def upload_item_to_collection(
         user_id=current_user.id,
         is_public=is_public,
         parent=parent,
-        status="success"
+        status="success",
+        license=license_code,
+        public_license=licenses.public_license_for(license_code, is_public),
+        license_version=licenses.LICENSE_VERSION,
     )
     db.add(log)
     db.commit()
@@ -746,4 +778,3 @@ async def get_user_public_collections(
         })
         
     return backend_utils.paginate_response(results, total_custom, page, page_size, original_items=virtual_collections if page == 1 else [])
-

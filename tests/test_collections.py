@@ -276,12 +276,148 @@ def test_upload_item_virtual(client, db):
         img_bytes = img_io.getvalue()
 
         files = {"file": ("test.png", img_bytes, "image/png")}
-        response = client.post("/skin/api/collections/creations_public/upload", files=files, data={"name": "Upload Test"})
+        response = client.post("/skin/api/collections/creations_public/upload", files=files, data={"name": "Upload Test", "license_consent": "true"})
         
         assert response.status_code == 200
         data = response.json()
         assert data["collection_id"] == "creations_public"
         assert data["name"] == "Upload Test"
+        log = db.query(GenerationLog).filter(GenerationLog.id == data["log_id"]).one()
+        assert log.license == "cc-by-nc-4.0"
+        assert log.public_license == "cc-by-nc-4.0"
+
+
+def test_pro_upload_can_select_creator_commercial_license(client, db):
+    from datetime import datetime, timedelta, timezone
+    from io import BytesIO
+    from unittest.mock import patch
+    from PIL import Image
+
+    current_user = db.query(User).filter(User.id == "1").one()
+    current_user.pro_level = "pro-plus"
+    current_user.pro_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+    db.commit()
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (64, 64)).save(image_buffer, format="PNG")
+    files = {"file": ("pro-upload.png", image_buffer.getvalue(), "image/png")}
+    data = {
+        "license_consent": "true",
+        "requested_license": "entropydrop-commercial-1.0",
+    }
+
+    with patch("s3_utils.s3_client"):
+        response = client.post(
+            "/skin/api/collections/creations_public/upload",
+            files=files,
+            data=data,
+        )
+
+    assert response.status_code == 200
+    log = db.query(GenerationLog).filter(
+        GenerationLog.id == response.json()["log_id"]
+    ).one()
+    assert log.license == "entropydrop-commercial-1.0"
+    assert log.public_license == "cc-by-nc-4.0"
+
+
+def test_free_upload_cannot_select_creator_commercial_license(client, db):
+    from io import BytesIO
+    from unittest.mock import patch
+    from PIL import Image
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (64, 64)).save(image_buffer, format="PNG")
+    files = {"file": ("free-upload.png", image_buffer.getvalue(), "image/png")}
+
+    with patch("s3_utils.s3_client") as mock_s3:
+        response = client.post(
+            "/skin/api/collections/creations_public/upload",
+            files=files,
+            data={
+                "license_consent": "true",
+                "requested_license": "entropydrop-commercial-1.0",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "does not permit commercial use" in response.json()["detail"]
+    mock_s3.put_object.assert_not_called()
+
+
+def test_free_user_cannot_save_private_skin(client):
+    from unittest.mock import patch
+
+    files = {"file": ("private.png", b"not-read-for-free-user", "image/png")}
+    with patch("s3_utils.s3_client") as mock_s3:
+        response = client.post(
+            "/skin/api/collections/creations_private/upload",
+            files=files,
+            data={
+                "license_consent": "true",
+                "requested_license": "cc-by-nc-4.0",
+            },
+        )
+
+    assert response.status_code == 403
+    assert "Free users have no private quota" in response.json()["detail"]
+    mock_s3.put_object.assert_not_called()
+
+
+def test_pro_edit_cannot_upgrade_cc_parent_to_commercial(client, db):
+    from datetime import datetime, timedelta, timezone
+    from io import BytesIO
+    from unittest.mock import patch
+    from PIL import Image
+
+    current_user = db.query(User).filter(User.id == "1").one()
+    current_user.pro_level = "pro-plus"
+    current_user.pro_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+    parent_log = GenerationLog(
+        id="ccparentlog1234",
+        user_id=current_user.id,
+        mode="human_upload",
+        is_public=True,
+        status="success",
+        license="cc-by-nc-4.0",
+        public_license="cc-by-nc-4.0",
+    )
+    db.add(parent_log)
+    db.commit()
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (64, 64)).save(image_buffer, format="PNG")
+    files = {"file": ("edit.png", image_buffer.getvalue(), "image/png")}
+
+    with patch("s3_utils.s3_client") as mock_s3:
+        response = client.post(
+            "/skin/api/collections/creations_public/upload",
+            files=files,
+            data={
+                "mode": "human_edit",
+                "parent": parent_log.id,
+                "requested_license": "entropydrop-commercial-1.0",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "does not permit commercial use" in response.json()["detail"]
+    mock_s3.put_object.assert_not_called()
+
+def test_upload_item_requires_cc_license_consent(client, db):
+    from unittest.mock import patch
+    with patch("s3_utils.s3_client"):
+        from PIL import Image
+        import io
+        img = Image.new('RGB', (64, 64))
+        img_io = io.BytesIO()
+        img.save(img_io, format='PNG')
+
+        files = {"file": ("test.png", img_io.getvalue(), "image/png")}
+        response = client.post("/skin/api/collections/creations_public/upload", files=files)
+
+        assert response.status_code == 400
+        assert "CC BY-NC 4.0" in response.json()["detail"]
 
 def test_upload_item_custom_fail(client, db):
     col = Collection(user_id="1", name="Custom Collection", is_public=True)
@@ -355,7 +491,7 @@ def test_upload_private_model_as_public_fail(client, db):
         mock_s3.put_object.return_value = {}
         
         files = {"file": ("test.png", b"fake_data", "image/png")}
-        response = client.post("/skin/api/collections/creations_public/upload", files=files, data={"parent": parent_log.id, "mode": "human_upload"})
+        response = client.post("/skin/api/collections/creations_public/upload", files=files, data={"parent": parent_log.id, "mode": "human_upload", "license_consent": "true"})
         
         assert response.status_code == 400
         assert "Private models cannot be saved as public" in response.json()["detail"]
@@ -404,7 +540,7 @@ def test_add_other_user_private_item_fail(client, db):
 
 def test_upload_item_too_large(client, db):
     files = {"file": ("test.png", b"A" * (513 * 1024), "image/png")}
-    response = client.post("/skin/api/collections/creations_public/upload", files=files)
+    response = client.post("/skin/api/collections/creations_public/upload", files=files, data={"license_consent": "true"})
     assert response.status_code == 413
     assert "Request entity too large" in response.json()["detail"]
 
@@ -417,6 +553,6 @@ def test_upload_item_invalid_dimensions(client, db):
     img_bytes = img_io.getvalue()
 
     files = {"file": ("test.png", img_bytes, "image/png")}
-    response = client.post("/skin/api/collections/creations_public/upload", files=files)
+    response = client.post("/skin/api/collections/creations_public/upload", files=files, data={"license_consent": "true"})
     assert response.status_code == 400
     assert "Invalid dimensions" in response.json()["detail"]

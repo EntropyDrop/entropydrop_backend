@@ -1,5 +1,5 @@
 import pytest
-from models import User
+from models import GenerationLog, User
 from auth import get_current_user, get_current_user_optional
 
 def test_get_users_me_unauthorized(client):
@@ -111,6 +111,17 @@ def test_update_minecraft_skin(client, db):
 
     # Valid payload should succeed with slim model
     new_skin_url = "https://s3.amazonaws.com/mybucket/skins/123.png"
+    skin_log = GenerationLog(
+        id="authskinlog123",
+        prompt="owned skin",
+        mode="text",
+        result=new_skin_url,
+        is_public=True,
+        user_id=user.id,
+        status="success",
+    )
+    db.add(skin_log)
+    db.commit()
     response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": new_skin_url, "minecraft_skin_model": "slim"})
     assert response.status_code == 200
     data = response.json()
@@ -120,6 +131,13 @@ def test_update_minecraft_skin(client, db):
     db.refresh(user)
     assert user.minecraft_skin_url == new_skin_url
     assert user.minecraft_skin_model == "slim"
+
+    response = client.post(
+        "/skin/api/users/me/minecraft_skin",
+        json={"minecraft_skin_url": "https://example.com/missing-skin.png"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Skin not found"
 
     # Valid payload should succeed with strong model
     response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": new_skin_url, "minecraft_skin_model": "strong"})
@@ -259,6 +277,47 @@ def test_get_my_credit_history(client, db):
     app.dependency_overrides.clear()
 
 
+def test_update_minecraft_skin_rejects_another_creators_skin(client, db):
+    from models import GenerationLog, User
+    from main import app
+
+    current_user = User(
+        id="skin_current_user",
+        email="skin_current@example.com",
+        username="Current User",
+    )
+    other_user = User(
+        id="skin_other_user",
+        email="skin_other@example.com",
+        username="Other Skin Creator",
+    )
+    other_pub_log = GenerationLog(
+        id="otherpublog123",
+        prompt="another user's public skin",
+        mode="text",
+        result="generations/other_public_skin.png",
+        is_public=True,
+        user_id=other_user.id,
+        status="success"
+    )
+    db.add_all([current_user, other_user, other_pub_log])
+    db.commit()
+
+    def mock_get_current_user():
+        return current_user
+
+    app.dependency_overrides[get_current_user] = mock_get_current_user
+    try:
+        response = client.post(
+            "/skin/api/users/me/minecraft_skin",
+            json={"minecraft_skin_url": "generations/other_public_skin.png"},
+        )
+        assert response.status_code == 403
+        assert "Only the skin creator" in response.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_update_minecraft_skin_restrictions(client, db):
     from datetime import datetime, timezone, timedelta
     from models import GenerationLog, User
@@ -340,7 +399,9 @@ def test_update_minecraft_skin_restrictions(client, db):
     assert response.json()["minecraft_skin_url"] == "generations/public_skin.png"
 
     # Soft-delete the log -> should clear the character
-    response = client.delete("/skin/api/logs/publog123")
+    from unittest.mock import patch
+    with patch("routers.generate.delete_from_s3"):
+        response = client.delete("/skin/api/logs/publog123")
     assert response.status_code == 200
     db.refresh(user)
     assert user.minecraft_skin_url is None

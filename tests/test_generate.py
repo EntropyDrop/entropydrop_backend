@@ -692,7 +692,14 @@ def test_get_history(mock_presigned, mock_cdn, client, db):
 @patch("routers.generate.get_cdn_url")
 @patch("routers.generate.generate_presigned_url_get")
 def test_get_log_public(mock_presigned, mock_cdn, client, db):
-    log = GenerationLog(prompt="public_log", is_public=True, user_id="test_user_generate", mode="edit")
+    log = GenerationLog(
+        prompt="public_log",
+        is_public=True,
+        user_id="test_user_generate",
+        mode="edit",
+        license="entropydrop-commercial-1.0",
+        public_license="cc-by-nc-4.0",
+    )
     db.add(log)
     db.commit()
     db.refresh(log)
@@ -703,6 +710,9 @@ def test_get_log_public(mock_presigned, mock_cdn, client, db):
     assert response.status_code == 200
     assert response.json()["prompt"] == "public_log"
     assert response.json()["has_feedback"] is False
+    assert response.json()["license"]["code"] == "entropydrop-commercial-1.0"
+    assert response.json()["license"]["public_license"] == "cc-by-nc-4.0"
+    assert response.json()["license"]["commercial_licensee_user_id"] == "test_user_generate"
 
 
 @patch("routers.generate.get_cdn_url")

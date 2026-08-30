@@ -12,6 +12,7 @@ import auth
 from database import get_db
 from s3_utils import get_cdn_url, get_s3_url, delete_from_s3, upload_to_s3, generate_presigned_url_get
 import backend_utils
+import licenses
 from config import settings
 from pipeline_registry import (
     MODEL_PIPELINES,
@@ -694,6 +695,7 @@ async def generate_image(
             print(f"S3 upload error for {log_id}: {err_detail}")
             raise HTTPException(status_code=500, detail="Image upload failed, please try again later")
 
+    license_code = licenses.generated_license(current_user, parent_log)
     log = models.GenerationLog(
         id=log_id,
         prompt=prompt,
@@ -716,6 +718,9 @@ async def generate_image(
         guidance=guidance,
         status="pending",
         is_pro=current_user.is_pro_active,
+        license=license_code,
+        public_license=licenses.public_license_for(license_code, is_public),
+        license_version=licenses.LICENSE_VERSION,
         source=source_filename
     )
     db.add(log)
@@ -1065,7 +1070,8 @@ async def get_history(
             "seed": log.seed,
             "n_step": log.n_step,
             "guidance": log.guidance,
-            "is_pro": log.is_pro
+            "is_pro": log.is_pro,
+            "license": licenses.license_payload(log)
         })
 
         
@@ -1168,7 +1174,8 @@ def update_discovery_cache():
                     "username": username or "Unknown",
                     "avatar_url": picture,
                     "minecraft_skin_url": minecraft_skin_url
-                }
+                },
+                "license": licenses.license_payload(log)
             })
             
         if results and len(results) < 180:
@@ -1283,7 +1290,8 @@ async def search_discovery_logs(
                 "avatar_url": avatar_url,
                 "minecraft_skin_url": minecraft_skin_url
             },
-            "timestamp": log.created_at.replace(tzinfo=None).isoformat() + "Z"
+            "timestamp": log.created_at.replace(tzinfo=None).isoformat() + "Z",
+            "license": licenses.license_payload(log)
         })
         
     return backend_utils.paginate_response(results, total, page, page_size)
@@ -1353,6 +1361,7 @@ async def get_log(
         "guidance": log.guidance,
         "queue_position": queue_pos,
         "is_pro": log.is_pro,
+        "license": licenses.license_payload(log),
         "has_feedback": has_feedback
     }
 

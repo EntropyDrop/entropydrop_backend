@@ -185,17 +185,33 @@ async def update_minecraft_skin(
             if 'generations/' in path:
                 path = 'generations/' + path.split('generations/', 1)[1]
         
-        # Check if the skin is private
+        # Resolve EntropyDrop skins so ownership and visibility are enforced
+        # server-side even if a client bypasses the MCModal UI.
         log = db.query(models.GenerationLog).filter(
-            (models.GenerationLog.result == req.minecraft_skin_url) |
-            (models.GenerationLog.edited_result == req.minecraft_skin_url) |
-            (models.GenerationLog.image_to_skin_edited_result == req.minecraft_skin_url) |
-            (models.GenerationLog.result == path) |
-            (models.GenerationLog.edited_result == path) |
-            (models.GenerationLog.image_to_skin_edited_result == path)
+            (
+                (models.GenerationLog.result == req.minecraft_skin_url) |
+                (models.GenerationLog.edited_result == req.minecraft_skin_url) |
+                (models.GenerationLog.image_to_skin_edited_result == req.minecraft_skin_url) |
+                (models.GenerationLog.result == path) |
+                (models.GenerationLog.edited_result == path) |
+                (models.GenerationLog.image_to_skin_edited_result == path)
+            ),
+            models.GenerationLog.is_deleted == False,
         ).first()
-        
-        if log and not log.is_public:
+
+        if not log:
+            raise HTTPException(
+                status_code=404,
+                detail="Skin not found"
+            )
+
+        if log.user_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the skin creator can set this skin as their character"
+            )
+
+        if not log.is_public:
             raise HTTPException(
                 status_code=400,
                 detail="Cannot set a private skin as character"
