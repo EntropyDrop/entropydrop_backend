@@ -9,7 +9,7 @@ def _user(db, user_id: str = "market-user", email: str | None = None):
         id=user_id,
         email=email or f"{user_id}@example.com",
         username=f"Player {user_id}",
-        minecraft_skin_url="https://cdn.entropydrop.com/skin.png",
+        skin_url="https://cdn.entropydrop.com/skin.png",
     )
     db.add(user)
     db.commit()
@@ -144,6 +144,113 @@ def test_market_validates_hierarchy_and_rejects_unknown_fields(client, db):
     response = _publish(client, "blockset", extra)
     assert response.status_code == 422
     assert db.query(SpaceMarketResource).count() == 0
+
+
+def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(client, db):
+    user = _user(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+    entity = _entity()
+    entity["childEntities"][0]["collisionEnabled"] = False
+
+    response = _publish(client, "entity", entity)
+
+    assert response.status_code == 201, response.text
+    stored = db.query(SpaceMarketResource).one()
+    assert stored.content["rootId"] == "root"
+    assert stored.content["nodeCount"] == 2
+    assert stored.content["childEntities"][0]["collisionEnabled"] is False
+
+    non_root = _entity("Non-root")
+    non_root["rootId"] = "arm"
+    assert _publish(client, "entity", non_root).status_code == 422
+
+    multiple_roots = _entity("Multiple roots")
+    multiple_roots["rootIds"] = ["root", "arm"]
+    assert _publish(client, "entity", multiple_roots).status_code == 422
+
+    too_many_children = _entity("Too many children")
+    too_many_children["blocks"] = [too_many_children["blocks"][0]]
+    too_many_children["childEntities"] = [
+        {"id": f"node_{index}", "parentId": "root"}
+        for index in range(64)
+    ]
+    too_many_children["scripts"] = []
+    too_many_children["enabled"] = []
+    assert _publish(client, "entity", too_many_children).status_code == 422
+
+
+def test_market_canonicalizes_the_only_block_id_and_rejects_standard_micro_overlap(client, db):
+    user = _user(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+    omitted = _blockset("Implicit block id")
+    for block in omitted["blocks"]:
+        block.pop("block")
+    assert _publish(client, "blockset", omitted).status_code == 201
+    stored = db.query(SpaceMarketResource).one()
+    assert all(block["block"] == 1 for block in stored.content["blocks"])
+
+    explicit = _blockset("Explicit block id")
+    duplicate = _publish(client, "blockset", explicit)
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"]["code"] == "RESOURCE_ALREADY_PUBLISHED"
+
+    invalid_block = _blockset("Invalid block")
+    invalid_block["blocks"][0]["block"] = 2
+    assert _publish(client, "blockset", invalid_block).status_code == 422
+
+    boolean_block = _blockset("Boolean block")
+    boolean_block["blocks"][0]["block"] = True
+    assert _publish(client, "blockset", boolean_block).status_code == 422
+
+    overlap = _blockset("Overlap")
+    overlap["blocks"] = [
+        {"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 0x111111},
+        {"dx": 0, "dy": 0, "dz": 0, "mx": 0, "my": 0, "mz": 0, "block": 1, "color": 0x222222},
+    ]
+    assert _publish(client, "blockset", overlap).status_code == 422
+
+
+def test_market_publish_body_limit_allows_valid_resources_above_512_kib(client, db):
+    user = _user(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+    blocks = []
+    for index in range(12_000):
+        blocks.append({
+            "dx": index % 64,
+            "dy": (index // 64) % 64,
+            "dz": index // (64 * 64),
+            "block": 1,
+            "color": 0x123456,
+        })
+    payload = {
+        "type": "space-blockset",
+        "version": 2,
+        "name": "Large valid shape",
+        "blocks": blocks,
+    }
+
+    response = _publish(client, "blockset", payload)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["resource"]["size_bytes"] > 512 * 1024
+    assert response.json()["resource"]["block_count"] == 12_000
+
+
+def test_market_publish_body_limit_counts_bytes_when_content_length_lies(client):
+    body = (
+        b'{"kind":"blockset","payload":{"padding":"'
+        + b"x" * (9 * 1024 * 1024)
+        + b'"}}'
+    )
+
+    response = client.post(
+        "/space/api/v2/market/resources",
+        content=body,
+        headers={"content-type": "application/json", "content-length": "1"},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "MARKET_RESOURCE_TOO_LARGE"
 
 
 def test_market_download_like_and_rankings(client, db):

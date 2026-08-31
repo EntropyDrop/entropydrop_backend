@@ -83,7 +83,7 @@ class MarketVoxel(StrictResourceModel):
     mx: StrictInt | None = None
     my: StrictInt | None = None
     mz: StrictInt | None = None
-    block: StrictInt | None = None
+    block: StrictInt = Field(default=1, ge=1, le=1)
     color: StrictInt = Field(ge=0, le=0xFFFFFF)
     part: StrictStr | None = Field(default=None, min_length=1, max_length=64)
 
@@ -97,13 +97,7 @@ class MarketVoxel(StrictResourceModel):
                 raise ValueError("micro coordinates mx/my/mz must be provided together")
             if any(not 0 <= int(value) < 5 for value in micro):
                 raise ValueError("micro coordinates must be between 0 and 4")
-        if self.block is not None and not 0 <= self.block <= 65_535:
-            raise ValueError("block id is outside the portable range")
         return self
-
-    def occupancy_key(self) -> tuple[int, int, int, int | None, int | None, int | None]:
-        return self.dx, self.dy, self.dz, self.mx, self.my, self.mz
-
 
 class BlockSetPayload(StrictResourceModel):
     type: Literal["space-blockset"]
@@ -131,6 +125,7 @@ class EntityChild(StrictResourceModel):
     id: StrictStr = Field(min_length=1, max_length=64)
     parentId: StrictStr = Field(min_length=1, max_length=64)
     kind: Literal["child"] | None = None
+    collisionEnabled: StrictBool | None = None
     pivot: Vector3 | None = None
     bodyType: Literal["dynamic", "kinematic"] | None = None
     mass: Number | None = None
@@ -207,12 +202,11 @@ class EntityPayload(StrictResourceModel):
     type: Literal["space-entity"]
     version: Literal[2]
     name: StrictStr = Field(min_length=1, max_length=80)
-    rootId: StrictStr | None = Field(default=None, max_length=64)
-    rootIds: list[StrictStr] | None = Field(default=None, min_length=1, max_length=SPACE_MARKET_MAX_COMPONENTS)
+    rootId: Literal["root"] = "root"
     nodeCount: StrictInt | None = Field(default=None, ge=1, le=SPACE_MARKET_MAX_COMPONENTS)
     blockCount: StrictInt | None = Field(default=None, ge=1, le=SPACE_MARKET_MAX_BLOCKS)
     blocks: list[EntityVoxel] = Field(min_length=1, max_length=SPACE_MARKET_MAX_BLOCKS)
-    childEntities: list[EntityChild] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_COMPONENTS)
+    childEntities: list[EntityChild] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_COMPONENTS - 1)
     scripts: list[EntityScript] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_COMPONENTS)
     enabled: list[EntityEnabled] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_COMPONENTS)
     constraints: list[EntityConstraint] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_CONSTRAINTS)
@@ -235,27 +229,18 @@ class EntityPayload(StrictResourceModel):
         self.name = self.name.strip()
         if not self.name:
             raise ValueError("resource name may not be blank")
-        if self.rootIds and self.rootId is not None:
-            raise ValueError("entity must use rootId or rootIds, not both")
-        roots = list(self.rootIds or [self.rootId or "root"])
-        if len(set(roots)) != len(roots) or any(not _valid_component_id(root) for root in roots):
-            raise ValueError("entity roots must be unique portable identifiers")
 
         child_ids = [child.id for child in self.childEntities]
         if len(set(child_ids)) != len(child_ids):
             raise ValueError("child component ids must be unique")
-        known_ids = {"root", *roots, *child_ids}
-        component_count = len(self.childEntities) + sum(root not in child_ids for root in roots)
-        if component_count > SPACE_MARKET_MAX_COMPONENTS:
-            raise ValueError("entity contains too many components")
-        root_set = set(roots)
+        known_ids = {"root", *child_ids}
         child_by_id = {child.id: child for child in self.childEntities}
         for child in self.childEntities:
-            if child.id not in root_set and child.parentId not in known_ids:
+            if child.parentId not in known_ids:
                 raise ValueError(f"unknown parent {child.parentId} for component {child.id}")
             visited = {child.id}
             parent_id = child.parentId
-            while parent_id in child_by_id and parent_id not in root_set:
+            while parent_id in child_by_id:
                 if parent_id in visited:
                     raise ValueError("component hierarchy contains a cycle")
                 visited.add(parent_id)
@@ -308,7 +293,6 @@ class EntityPayload(StrictResourceModel):
         if self.pistonSpeed is not None:
             self.pistonSpeed = _finite_number(self.pistonSpeed, "piston speed", 0, 10_000)
 
-        self.rootIds = sorted(roots) if self.rootIds else None
         self.blockCount = len(self.blocks)
         self.nodeCount = len(known_ids)
         self.blocks.sort(key=lambda block: (block.entityId, *_voxel_sort_key(block)))
@@ -361,13 +345,26 @@ def _validate_voxel_collection(blocks: list[MarketVoxel], owner) -> None:
     if any(maximum - minimum + 1 > SPACE_MARKET_MAX_BOUNDS for minimum, maximum in zip(mins, maxs)):
         raise ValueError("resource bounds exceed 64 standard cells on one axis")
 
-    occupied: set[tuple[Any, ...]] = set()
+    standard_cells: set[tuple[Any, ...]] = set()
+    micro_cells: set[tuple[Any, ...]] = set()
+    micro_parents: set[tuple[Any, ...]] = set()
     for block in blocks:
         prefix = owner(block)
-        key = (prefix, *block.occupancy_key())
-        if key in occupied:
+        parent_key = (prefix, block.dx, block.dy, block.dz)
+        if block.mx is None:
+            if parent_key in standard_cells:
+                raise ValueError("resource contains duplicate voxels")
+            if parent_key in micro_parents:
+                raise ValueError("standard and micro voxels may not share one cell")
+            standard_cells.add(parent_key)
+            continue
+        key = (parent_key, block.mx, block.my, block.mz)
+        if parent_key in standard_cells:
+            raise ValueError("standard and micro voxels may not share one cell")
+        if key in micro_cells:
             raise ValueError("resource contains duplicate voxels")
-        occupied.add(key)
+        micro_cells.add(key)
+        micro_parents.add(parent_key)
 
 
 def validate_market_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:

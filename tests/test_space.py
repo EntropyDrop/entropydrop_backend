@@ -26,8 +26,8 @@ def _user(db, user_id: str, skin_url: str | None):
         id=user_id,
         email=f"{user_id}@example.com",
         username="Space Tester",
-        minecraft_skin_url=skin_url,
-        minecraft_skin_model="slim",
+        skin_url=skin_url,
+        skin_type="slim",
     )
     db.add(user)
     db.commit()
@@ -59,8 +59,12 @@ def test_space_realtime_rate_limit_policy_matches_long_lived_sessions():
 
 
 def test_space_bootstrap_requires_shared_login(client):
-    response = client.post("/space/api/v2/bootstrap")
+    response = client.post(
+        "/space/api/v2/bootstrap",
+        headers={"Origin": "http://localhost:5173"},
+    )
     assert response.status_code in (401, 403)
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
 def test_space_bootstrap_blocks_user_without_skin(client, db):
@@ -95,8 +99,8 @@ def test_space_bootstrap_reuses_identity_without_persisting_random_start(client,
     assert first_data["world"]["terrain_generator_version"] == 1
     assert first_data["player"]["user_id"] == user.id
     assert first_data["player"]["is_admin"] is False
-    assert first_data["player"]["minecraft_skin_url"] == skin_url
-    assert first_data["player"]["minecraft_skin_model"] == "slim"
+    assert first_data["player"]["skin_url"] == skin_url
+    assert first_data["player"]["skin_type"] == "slim"
     assert first_data["player"]["player_entity_id"] == second_data["player"]["player_entity_id"]
     assert first_data["player"]["resumed"] is False
     assert second_data["player"]["resumed"] is False

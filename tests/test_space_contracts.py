@@ -15,8 +15,10 @@ def test_space_contract_extends_existing_users_without_second_identity_or_skin_s
     assert "player_appearance_assets" not in SCHEMA
     assert "AppearanceCommand" not in PROTOCOL
     assert "string user_id = 2;" in PROTOCOL
-    assert "string minecraft_skin_url" in PROTOCOL
-    assert "string minecraft_skin_model" in PROTOCOL
+    assert "string skin_url" in PROTOCOL
+    assert "string skin_type" in PROTOCOL
+    assert "minecraft_skin_url" not in PROTOCOL
+    assert "minecraft_skin_model" not in PROTOCOL
 
 
 def test_space_contract_covers_persistence_queue_and_browser_only_backpack():

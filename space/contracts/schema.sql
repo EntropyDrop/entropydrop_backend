@@ -18,8 +18,8 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- 1. Existing EntropyDrop users, worlds and access control
 -- -----------------------------------------------------------------------------
 
--- `users(id VARCHAR(16))`, `users.minecraft_skin_url` and
--- `users.minecraft_skin_model` are owned by the main EntropyDrop application.
+-- `users(id VARCHAR(16))`, `users.skin_url` and `users.skin_type` are owned by
+-- the main EntropyDrop application.
 -- They MUST exist before this schema is applied.
 
 CREATE TABLE worlds (

@@ -174,8 +174,8 @@ message ServerHello {
   uint32 admission_slot = 18;
   uint32 max_interest_radius_chunks = 19;
   uint32 default_interest_radius_chunks = 20;
-  string minecraft_skin_url = 21;
-  string minecraft_skin_model = 22;
+  string skin_url = 21;
+  string skin_type = 22;
 }
 
 // Queue packets are valid before ServerHello, when server_tick is zero. A
@@ -352,7 +352,7 @@ message EntityDelta {
 
 // The first AOI frame sets every changed bit. Later frames send only changed
 // fields. Skin bytes never travel on the real-time channel. The immutable
-// minecraft_skin_url is sent only on AOI entry/identity change and is then
+// skin_url is sent only on AOI entry/identity change and is then
 // browser-cached; ordinary 20 Hz frames do not resend the PNG.
 message RemotePlayerDelta {
   bytes player_entity_id = 1;
@@ -368,8 +368,8 @@ message RemotePlayerDelta {
   sint32 look_pitch_q15 = 11;
   PlayerPose pose = 12;
   uint32 animation_state = 13;
-  string minecraft_skin_url = 14;
-  string minecraft_skin_model = 15;
+  string skin_url = 14;
+  string skin_type = 15;
 }
 
 // Presence is reliable application data and is never superseded like StateFrame.
@@ -385,8 +385,8 @@ message PlayerPresenceEvent {
   PlayerPresenceKind kind = 1;
   bytes player_entity_id = 2;
   string display_name = 3;
-  string minecraft_skin_url = 4;
-  string minecraft_skin_model = 5;
+  string skin_url = 4;
+  string skin_type = 5;
   RemotePlayerDelta initial_state = 6;
 }
 

@@ -1060,7 +1060,7 @@ async def get_history(
                 "id": log.user_id,
                 "username": current_user.username,
                 "avatar_url": current_user.picture,
-                "minecraft_skin_url": current_user.minecraft_skin_url
+                "skin_url": current_user.skin_url
             },
             "timestamp": log.created_at.replace(tzinfo=None).isoformat() + "Z",
             "likes_count": log.likes_count or 0,
@@ -1079,7 +1079,7 @@ async def get_history(
 
 # Discovery page cache is written to Redis by the singleton background service
 # and mirrored locally in each API process for cheap reads.
-DISCOVERY_CACHE_KEY = os.getenv("DISCOVERY_CACHE_KEY", "ed:discovery:cache:v1")
+DISCOVERY_CACHE_KEY = os.getenv("DISCOVERY_CACHE_KEY", "ed:discovery:cache:v2")
 DISCOVERY_CACHE_TTL_SECONDS = int(os.getenv("DISCOVERY_CACHE_TTL_SECONDS", "900"))
 DISCOVERY_LOCAL_CACHE_MAX_AGE_SECONDS = int(os.getenv("DISCOVERY_LOCAL_CACHE_MAX_AGE_SECONDS", "60"))
 discovery_cache_items = []
@@ -1151,7 +1151,7 @@ def update_discovery_cache():
             sampled_ids = random.sample(all_ids, sample_size)
 
             # 3. Batch query details based on selected IDs
-            query = db.query(models.GenerationLog, models.User.username, models.User.id, models.User.picture, models.User.minecraft_skin_url).join(
+            query = db.query(models.GenerationLog, models.User.username, models.User.id, models.User.picture, models.User.skin_url).join(
                 models.User, models.GenerationLog.user_id == models.User.id, isouter=True
             ).filter(
                 models.GenerationLog.id.in_(sampled_ids)
@@ -1159,7 +1159,7 @@ def update_discovery_cache():
             logs_with_users = query.all()
         
         results = []
-        for log, username, user_id, picture, minecraft_skin_url in logs_with_users:
+        for log, username, user_id, picture, skin_url in logs_with_users:
             result_url = get_cdn_url(log.result, bucket=settings.AWS_BUCKET_NAME)
                 
             results.append({
@@ -1173,7 +1173,7 @@ def update_discovery_cache():
                     "id": user_id,
                     "username": username or "Unknown",
                     "avatar_url": picture,
-                    "minecraft_skin_url": minecraft_skin_url
+                    "skin_url": skin_url
                 },
                 "license": licenses.license_payload(log)
             })
@@ -1267,7 +1267,7 @@ async def search_discovery_logs(
         user = db.query(models.User).filter(models.User.id == log.user_id).first()
         username = user.username if user else "Unknown"
         avatar_url = user.picture if user else None
-        minecraft_skin_url = user.minecraft_skin_url if user else None
+        skin_url = user.skin_url if user else None
         
         is_liked = False
         if current_user:
@@ -1288,7 +1288,7 @@ async def search_discovery_logs(
                 "id": log.user_id,
                 "username": username,
                 "avatar_url": avatar_url,
-                "minecraft_skin_url": minecraft_skin_url
+                "skin_url": skin_url
             },
             "timestamp": log.created_at.replace(tzinfo=None).isoformat() + "Z",
             "license": licenses.license_payload(log)
@@ -1349,7 +1349,7 @@ async def get_log(
             "id": log.user_id,
             "username": username,
             "avatar_url": user.picture if user else None,
-            "minecraft_skin_url": user.minecraft_skin_url if user else None
+            "skin_url": user.skin_url if user else None
         },
         "timestamp": log.created_at.replace(tzinfo=None).isoformat() + "Z",
         "likes_count": log.likes_count or 0,
@@ -1451,18 +1451,18 @@ async def delete_log(
         from sqlalchemy import or_
         filters = []
         if log.result:
-            filters.append(models.User.minecraft_skin_url.like(f"%{log.result}%"))
+            filters.append(models.User.skin_url.like(f"%{log.result}%"))
         if log.edited_result:
-            filters.append(models.User.minecraft_skin_url.like(f"%{log.edited_result}%"))
+            filters.append(models.User.skin_url.like(f"%{log.edited_result}%"))
         if log.image_to_skin_edited_result:
             filters.append(
-                models.User.minecraft_skin_url.like(
+                models.User.skin_url.like(
                     f"%{log.image_to_skin_edited_result}%"
                 )
             )
         if filters:
             db.query(models.User).filter(or_(*filters)).update(
-                {"minecraft_skin_url": None},
+                {"skin_url": None},
                 synchronize_session=False
             )
 
@@ -1573,18 +1573,18 @@ async def make_log_private(
         from sqlalchemy import or_
         filters = []
         if log.result:
-            filters.append(models.User.minecraft_skin_url.like(f"%{log.result}%"))
+            filters.append(models.User.skin_url.like(f"%{log.result}%"))
         if log.edited_result:
-            filters.append(models.User.minecraft_skin_url.like(f"%{log.edited_result}%"))
+            filters.append(models.User.skin_url.like(f"%{log.edited_result}%"))
         if log.image_to_skin_edited_result:
             filters.append(
-                models.User.minecraft_skin_url.like(
+                models.User.skin_url.like(
                     f"%{log.image_to_skin_edited_result}%"
                 )
             )
         if filters:
             db.query(models.User).filter(or_(*filters)).update(
-                {"minecraft_skin_url": None},
+                {"skin_url": None},
                 synchronize_session=False
             )
 

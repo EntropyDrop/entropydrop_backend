@@ -34,8 +34,8 @@ state, and snapshot-plus-event persistence**.
 - Real-time traffic uses binary WebSocket. REST is limited to authentication,
   world administration, and large offline jobs.
 - Identity is exclusively the existing EntropyDrop `users` row and Bearer token.
-  Space creates no user/auth mapping table. `users.minecraft_skin_url` and
-  `users.minecraft_skin_model` are the only player-skin source of truth.
+  Space creates no user/auth mapping table. `users.skin_url` and
+  `users.skin_type` are the only player-skin source of truth.
 - Each world admits at most **32 occupied session slots**. Reserved handshakes,
   active players, and reconnect-grace sessions consume a slot; excess players
   wait in a FIFO admission queue without creating hot world state.
@@ -279,7 +279,7 @@ safe random start; no permanent birth point exists in PostgreSQL.
 - Remote players and entities use roughly 100 ms of interpolation and do not run full
   client-side physics. `RemotePlayerDelta` carries position, velocity, body/look
   orientation, and pose/animation. Skin bytes use the immutable HTTPS URL from
-  `users.minecraft_skin_url`; they are sent neither per frame nor through WebSocket.
+  `users.skin_url`; they are sent neither per frame nor through WebSocket.
 - Client position, velocity, and collision results are never authoritative input.
 
 ### 6.4 Reliable Player and Entity Presence
@@ -294,7 +294,7 @@ therefore owns independent player/entity presence epochs:
   run-state change are reliable class-1 presence events. `removed_*_ids` in a state frame
   are only latency hints; reliable presence is authoritative.
 - Player `ENTER_AOI` carries stable player id, display name, immutable
-  `minecraft_skin_url`/model, and
+  `skin_url`/`skin_type`, and
   one full initial `RemotePlayerDelta`. Subsequent changed-mask deltas synchronize position,
   velocity, body rotation, look yaw/pitch, pose and animation at 20 Hz. The skin
   fields are included only on entry/identity change, not in ordinary deltas.
@@ -306,7 +306,7 @@ therefore owns independent player/entity presence epochs:
   authorized and stored by the main site. Neither competes with 20 Hz state frames.
 
 The REST bootstrap refuses entry with `SKIN_REQUIRED` when
-`users.minecraft_skin_url` is null or empty. The browser downloads and decodes that
+`users.skin_url` is null or empty. The browser downloads and decodes that
 64x64 PNG before constructing the game scene or opening WSS. There is no bundled
 default, Space skin upload, appearance table, appearance command, or client-supplied
 skin URL. Changing character skin happens only through the existing `/skin/edit`
@@ -552,14 +552,14 @@ browser backpack entry --untrusted placement command--> authoritative world muta
 All published resources use schema version 2 and a closed field set (`extra=forbid`):
 
 - `space-blockset`: a non-empty name and bounded voxel array;
-- `space-entity`: the same voxel representation plus component hierarchy, scripts,
-  enabled flags, constraints, physics mode/material, bearing/piston parameters, cockpit,
-  gravity and vehicle state;
+- `space-entity`: the same voxel representation plus one explicit `root`, a tree of at
+  most 63 child components, scripts, enabled flags, constraints, collision flags,
+  physics mode/material, bearing/piston parameters, cockpit, gravity and vehicle state;
 - `space-colorset`: exactly nine normalized six-digit `#rrggbb` values.
 
-Voxel base coordinates (`dx/dy/dz`) are safe integers. A micro voxel provides all three
+Every voxel has the sole portable block id `1`. Voxel base coordinates (`dx/dy/dz`) are safe integers. A micro voxel provides all three
 integer offsets (`mx/my/mz`) in `0..4`; omission of all three means a standard voxel. The
-API rejects duplicate occupancy, bounds above 64 cells on an axis, unknown component
+API rejects duplicate occupancy, standard/micro overlap in one cell, bounds above 64 cells on an axis, unknown component
 references, hierarchy cycles, duplicate ids, non-finite physics values, oversized scripts,
 and resources above the block/component/constraint/byte budgets.
 
@@ -1043,7 +1043,7 @@ implemented.
 | Distant torus for new entrants | Versioned immutable base artifact plus revisioned authored LOD tiles; no per-join PostgreSQL scan | HTTPS manifest/snapshot followed by reliable newer WebSocket tile deltas; deterministic base is the cache-miss fallback | Cold/warm join budgets pass; stale snapshot cannot replace newer edits; one dirty zone rebuilds only its tiles |
 | All world entity information | Immutable `build_assets` + `entity_snapshots` + indexed events + coverage manifest | Reliable entity presence; immutable HTTPS definition; 20 Hz runtime deltas | Checkpoint/replay and 1,000 shared definitions recover identically |
 | Enabled entity auto-run in loaded chunks | Durable desired run state, health, lifecycle/ownership epochs | AOI wake references and exhaustive wake/sleep state machine | Concurrent observers wake once; durable sleep, retry, quarantine and handoff tested |
-| Visible player state/orientation/skin/pose | Latest `player_snapshots`, stable player id, and existing `users.minecraft_skin_url`/model | Reliable presence carries URL/model; epoch-gated 20 Hz motion deltas never carry PNG bytes | Missing skin blocks entry; latest checkpoint restores, AOI enter/leave and reconnect reset converge |
+| Visible player state/orientation/skin/pose | Latest `player_snapshots`, stable player id, and existing `users.skin_url`/`skin_type` | Reliable presence carries URL/model; epoch-gated 20 Hz motion deltas never carry PNG bytes | Missing skin blocks entry; latest checkpoint restores, AOI enter/leave and reconnect reset converge |
 | Browser-only backpack | No inventory tables; existing `space.backpack.v2` plus JSON import/export | Untrusted local placement is revalidated; only accepted world result persists | Reload stays local, clearing storage loses it, server has no backpack endpoint/message |
 | Explicit resource market | Immutable canonical v2 content, global SHA-256 uniqueness, publisher/quota metadata, likes and soft deletion | Authenticated REST publish/list/download/like/admin-delete; no slot synchronization | Strict-schema fixtures, duplicate/order/name equivalence, 10/day, counters/rankings and authorization tests |
 | Maximum 32 online with queue | Fixed session slots, FIFO queue leases and user advisory lock | Queue status/heartbeat, reservation, active and reconnect-grace states | 32 simultaneous admits, 33rd queues, promotion/reconnect never oversubscribes |

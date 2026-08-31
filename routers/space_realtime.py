@@ -58,8 +58,8 @@ class RealtimeIdentity:
     user_id: str
     username: str
     player_entity_id: str
-    minecraft_skin_url: str
-    minecraft_skin_model: str
+    skin_url: str
+    skin_type: str
     world_width_cm: int
     world_length_cm: int
 
@@ -169,7 +169,7 @@ def _authenticate_realtime_ticket(ticket: str) -> RealtimeIdentity:
         ).first()
         if user is None or world is None or profile is None:
             raise HTTPException(status_code=403, detail={"code": "WORLD_MEMBERSHIP_REQUIRED"})
-        skin_url = (user.minecraft_skin_url or "").strip()
+        skin_url = (user.skin_url or "").strip()
         if not skin_url:
             raise HTTPException(status_code=403, detail={"code": "SKIN_REQUIRED"})
         return RealtimeIdentity(
@@ -177,8 +177,8 @@ def _authenticate_realtime_ticket(ticket: str) -> RealtimeIdentity:
             user_id=user.id,
             username=user.username or f"Player-{user.id[:6]}",
             player_entity_id=str(profile.player_entity_id),
-            minecraft_skin_url=skin_url,
-            minecraft_skin_model="slim" if (user.minecraft_skin_model or "").lower() == "slim" else "strong",
+            skin_url=skin_url,
+            skin_type="slim" if (user.skin_type or "").lower() == "slim" else "strong",
             world_width_cm=world.width_chunks * space_api.SPACE_CHUNK_SIZE * 100,
             world_length_cm=world.length_chunks * space_api.SPACE_CHUNK_SIZE * 100,
         )
@@ -364,8 +364,8 @@ class SpaceRealtimeHub:
             "user_id": session.identity.user_id,
             "username": session.identity.username,
             "player_entity_id": session.identity.player_entity_id,
-            "minecraft_skin_url": session.identity.minecraft_skin_url,
-            "minecraft_skin_model": session.identity.minecraft_skin_model,
+            "skin_url": session.identity.skin_url,
+            "skin_type": session.identity.skin_type,
             "world_width_cm": session.identity.world_width_cm,
             "world_length_cm": session.identity.world_length_cm,
             "x_cm": pose["x_cm"],
@@ -481,8 +481,8 @@ class SpaceRealtimeHub:
                 "user_id": session.identity.user_id,
                 "username": session.identity.username,
                 "player_entity_id": session.identity.player_entity_id,
-                "minecraft_skin_url": session.identity.minecraft_skin_url,
-                "minecraft_skin_model": session.identity.minecraft_skin_model,
+                "skin_url": session.identity.skin_url,
+                "skin_type": session.identity.skin_type,
                 "x_cm": pose["x_cm"],
                 "y_cm": pose["y_cm"],
                 "z_cm": pose["z_cm"],
@@ -518,8 +518,8 @@ class SpaceRealtimeHub:
                     "user_id": user_id,
                     "username": state["username"],
                     "player_entity_id": state["player_entity_id"],
-                    "minecraft_skin_url": state["minecraft_skin_url"],
-                    "minecraft_skin_model": state["minecraft_skin_model"],
+                    "skin_url": state["skin_url"],
+                    "skin_type": state["skin_type"],
                     "x_cm": int(state["x_cm"]),
                     "y_cm": int(state["y_cm"]),
                     "z_cm": int(state["z_cm"]),

@@ -2,6 +2,14 @@ import pytest
 from models import GenerationLog, User
 from auth import get_current_user, get_current_user_optional
 
+
+def test_user_skin_columns_use_domain_names():
+    columns = set(User.__table__.columns.keys())
+    assert {"skin_url", "skin_type"} <= columns
+    assert "minecraft_skin_url" not in columns
+    assert "minecraft_skin_model" not in columns
+
+
 def test_get_users_me_unauthorized(client):
     response = client.get("/skin/api/users/me")
     assert response.status_code in [401, 403]
@@ -94,7 +102,7 @@ def test_update_minecraft_skin(client, db):
         id="4",
         email="test4@example.com",
         username="Test User 4",
-        minecraft_skin_url=None
+        skin_url=None
     )
     db.add(user)
     db.commit()
@@ -106,7 +114,7 @@ def test_update_minecraft_skin(client, db):
     app.dependency_overrides[get_current_user] = mock_get_current_user
 
     # Invalid payload should fail
-    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": ""})
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"skin_url": ""})
     assert response.status_code == 422
 
     # Valid payload should succeed with slim model
@@ -122,40 +130,48 @@ def test_update_minecraft_skin(client, db):
     )
     db.add(skin_log)
     db.commit()
-    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": new_skin_url, "minecraft_skin_model": "slim"})
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"skin_url": new_skin_url, "skin_type": "slim"})
     assert response.status_code == 200
     data = response.json()
-    assert data["minecraft_skin_url"] == new_skin_url
-    assert data["minecraft_skin_model"] == "slim"
+    assert data["skin_url"] == new_skin_url
+    assert data["skin_type"] == "slim"
+    assert "minecraft_skin_url" not in data
+    assert "minecraft_skin_model" not in data
 
     db.refresh(user)
-    assert user.minecraft_skin_url == new_skin_url
-    assert user.minecraft_skin_model == "slim"
+    assert user.skin_url == new_skin_url
+    assert user.skin_type == "slim"
+
+    legacy = client.post(
+        "/skin/api/users/me/minecraft_skin",
+        json={"minecraft_skin_url": new_skin_url, "minecraft_skin_model": "slim"},
+    )
+    assert legacy.status_code == 422
 
     response = client.post(
         "/skin/api/users/me/minecraft_skin",
-        json={"minecraft_skin_url": "https://example.com/missing-skin.png"},
+        json={"skin_url": "https://example.com/missing-skin.png"},
     )
     assert response.status_code == 404
     assert response.json()["detail"] == "Skin not found"
 
     # Valid payload should succeed with strong model
-    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": new_skin_url, "minecraft_skin_model": "strong"})
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"skin_url": new_skin_url, "skin_type": "strong"})
     assert response.status_code == 200
     data = response.json()
-    assert data["minecraft_skin_model"] == "strong"
+    assert data["skin_type"] == "strong"
 
     db.refresh(user)
-    assert user.minecraft_skin_model == "strong"
+    assert user.skin_type == "strong"
 
     # Null payload should reset the character
-    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": None})
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"skin_url": None})
     assert response.status_code == 200
     data = response.json()
-    assert data["minecraft_skin_url"] is None
+    assert data["skin_url"] is None
 
     db.refresh(user)
-    assert user.minecraft_skin_url is None
+    assert user.skin_url is None
 
     app.dependency_overrides.clear()
 
@@ -310,7 +326,7 @@ def test_update_minecraft_skin_rejects_another_creators_skin(client, db):
     try:
         response = client.post(
             "/skin/api/users/me/minecraft_skin",
-            json={"minecraft_skin_url": "generations/other_public_skin.png"},
+            json={"skin_url": "generations/other_public_skin.png"},
         )
         assert response.status_code == 403
         assert "Only the skin creator" in response.json()["detail"]
@@ -328,7 +344,7 @@ def test_update_minecraft_skin_restrictions(client, db):
         id="test_restrict_user",
         email="test_restrict@example.com",
         username="Test Restrict User",
-        minecraft_skin_url=None,
+        skin_url=None,
         pro_expires_at=datetime.now(timezone.utc) + timedelta(days=10),
         pro_level="pro-plus"
     )
@@ -364,14 +380,14 @@ def test_update_minecraft_skin_restrictions(client, db):
     db.commit()
 
     # Try setting private skin -> should fail (400)
-    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": "generations/private_skin.png"})
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"skin_url": "generations/private_skin.png"})
     assert response.status_code == 400
     assert "Cannot set a private skin" in response.json()["detail"]
 
     # Try setting public skin -> should succeed
-    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": "generations/public_skin.png"})
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"skin_url": "generations/public_skin.png"})
     assert response.status_code == 200
-    assert response.json()["minecraft_skin_url"] == "generations/public_skin.png"
+    assert response.json()["skin_url"] == "generations/public_skin.png"
 
     # Make the public skin private -> should clear the character
     import s3_utils
@@ -386,7 +402,7 @@ def test_update_minecraft_skin_restrictions(client, db):
         
         # Verify user character is cleared in DB
         db.refresh(user)
-        assert user.minecraft_skin_url is None
+        assert user.skin_url is None
     finally:
         s3_utils.s3_client.copy_object = original_copy_object
         s3_utils.s3_client.delete_object = original_delete_object
@@ -394,9 +410,9 @@ def test_update_minecraft_skin_restrictions(client, db):
     # Set user character back to public skin (we temporarily make pub_log public again)
     pub_log.is_public = True
     db.commit()
-    response = client.post("/skin/api/users/me/minecraft_skin", json={"minecraft_skin_url": "generations/public_skin.png"})
+    response = client.post("/skin/api/users/me/minecraft_skin", json={"skin_url": "generations/public_skin.png"})
     assert response.status_code == 200
-    assert response.json()["minecraft_skin_url"] == "generations/public_skin.png"
+    assert response.json()["skin_url"] == "generations/public_skin.png"
 
     # Soft-delete the log -> should clear the character
     from unittest.mock import patch
@@ -404,6 +420,6 @@ def test_update_minecraft_skin_restrictions(client, db):
         response = client.delete("/skin/api/logs/publog123")
     assert response.status_code == 200
     db.refresh(user)
-    assert user.minecraft_skin_url is None
+    assert user.skin_url is None
 
     app.dependency_overrides.clear()

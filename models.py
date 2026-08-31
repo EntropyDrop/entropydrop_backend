@@ -21,8 +21,8 @@ class User(Base):
     username = Column(String(100), nullable=True) # User's name from Google
     picture = Column(String(500), nullable=True)  # User's profile picture
     google_id = Column(String(100), unique=True, index=True, nullable=True) # Unique Google ID
-    minecraft_skin_url = Column(String(500), nullable=True) # User's current Minecraft skin image URL
-    minecraft_skin_model = Column(String(20), default="strong", nullable=False, server_default="strong") # User's Minecraft skin model type: 'strong' (Steve) or 'slim' (Alex)
+    skin_url = Column(String(500), nullable=True) # User's current Minecraft skin image URL
+    skin_type = Column(String(20), default="strong", nullable=False, server_default="strong") # User's Minecraft skin type: 'strong' (Steve) or 'slim' (Alex)
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))

@@ -68,8 +68,8 @@ async def google_login(req: schemas.GoogleAuthRequest, db: Session = Depends(get
         "credits": user.credits,
         "paypal_subscription_id": user.paypal_subscription_id,
         "paypal_subscription_status": user.paypal_subscription_status,
-        "minecraft_skin_url": user.minecraft_skin_url,
-        "minecraft_skin_model": user.minecraft_skin_model or "strong"
+        "skin_url": user.skin_url,
+        "skin_type": user.skin_type or "strong"
     }
     return {"access_token": access_token, "token_type": "bearer", "user": user_res}
 
@@ -92,8 +92,8 @@ async def get_my_profile(db: Session = Depends(get_db), current_user: models.Use
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
         "paypal_subscription_status": current_user.paypal_subscription_status,
-        "minecraft_skin_url": current_user.minecraft_skin_url,
-        "minecraft_skin_model": current_user.minecraft_skin_model or "strong"
+        "skin_url": current_user.skin_url,
+        "skin_type": current_user.skin_type or "strong"
     }
     return user_res
 
@@ -119,8 +119,8 @@ async def agree_terms(db: Session = Depends(get_db), current_user: models.User =
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
         "paypal_subscription_status": current_user.paypal_subscription_status,
-        "minecraft_skin_url": current_user.minecraft_skin_url,
-        "minecraft_skin_model": current_user.minecraft_skin_model or "strong"
+        "skin_url": current_user.skin_url,
+        "skin_type": current_user.skin_type or "strong"
     }
 
 @router.post("/api/users/me/cancel_subscription")
@@ -167,8 +167,8 @@ async def update_username(
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
         "paypal_subscription_status": current_user.paypal_subscription_status,
-        "minecraft_skin_url": current_user.minecraft_skin_url,
-        "minecraft_skin_model": current_user.minecraft_skin_model or "strong"
+        "skin_url": current_user.skin_url,
+        "skin_type": current_user.skin_type or "strong"
     }
 
 @router.post("/api/users/me/minecraft_skin", response_model=schemas.UserResponse)
@@ -177,9 +177,9 @@ async def update_minecraft_skin(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    if req.minecraft_skin_url:
+    if req.skin_url:
         from urllib.parse import urlparse
-        path = req.minecraft_skin_url
+        path = req.skin_url
         if path.startswith("http"):
             path = urlparse(path).path.lstrip('/')
             if 'generations/' in path:
@@ -189,9 +189,9 @@ async def update_minecraft_skin(
         # server-side even if a client bypasses the MCModal UI.
         log = db.query(models.GenerationLog).filter(
             (
-                (models.GenerationLog.result == req.minecraft_skin_url) |
-                (models.GenerationLog.edited_result == req.minecraft_skin_url) |
-                (models.GenerationLog.image_to_skin_edited_result == req.minecraft_skin_url) |
+                (models.GenerationLog.result == req.skin_url) |
+                (models.GenerationLog.edited_result == req.skin_url) |
+                (models.GenerationLog.image_to_skin_edited_result == req.skin_url) |
                 (models.GenerationLog.result == path) |
                 (models.GenerationLog.edited_result == path) |
                 (models.GenerationLog.image_to_skin_edited_result == path)
@@ -217,9 +217,9 @@ async def update_minecraft_skin(
                 detail="Cannot set a private skin as character"
             )
 
-    current_user.minecraft_skin_url = req.minecraft_skin_url
-    if req.minecraft_skin_model is not None:
-        current_user.minecraft_skin_model = "slim" if req.minecraft_skin_model.lower() in ["slim", "alex"] else "strong"
+    current_user.skin_url = req.skin_url
+    if req.skin_type is not None:
+        current_user.skin_type = "slim" if req.skin_type.lower() in ["slim", "alex"] else "strong"
     db.commit()
     db.refresh(current_user)
     return {
@@ -239,8 +239,8 @@ async def update_minecraft_skin(
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
         "paypal_subscription_status": current_user.paypal_subscription_status,
-        "minecraft_skin_url": current_user.minecraft_skin_url,
-        "minecraft_skin_model": current_user.minecraft_skin_model or "strong"
+        "skin_url": current_user.skin_url,
+        "skin_type": current_user.skin_type or "strong"
     }
 
 @router.get("/api/users/me/credits/history")

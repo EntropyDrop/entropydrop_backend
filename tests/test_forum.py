@@ -9,6 +9,7 @@ def mock_auth(db):
         email="test_forum@example.com",
         username="ForumTester",
         picture="http://example.com/avatar.png",
+        skin_url="https://cdn.entropydrop.com/skins/forum-tester.png",
         terms_agreed=True
     )
     db.add(user)
@@ -42,6 +43,8 @@ def test_create_post(client, db):
     assert data["category"] == "discussions"
     assert "FDM" in data["tags"]
     assert data["author"] == "ForumTester"
+    assert data["authorSkinUrl"] == "https://cdn.entropydrop.com/skins/forum-tester.png"
+    assert "authorMinecraftSkinUrl" not in data
     assert data["image"] == "http://example.com/image.png"
 
     # Verify in DB
@@ -860,7 +863,6 @@ def test_update_post_category_forbidden(client, db):
     response = client.patch(f"/skin/api/forum/posts/{post.id}", json={"category": "showcase"})
     assert response.status_code == 403
     assert "You do not have permission to update this post" in response.json()["detail"]
-
 
 
 

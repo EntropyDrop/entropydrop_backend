@@ -109,6 +109,31 @@ app = FastAPI(
 
 app.state.limiter = limiter
 
+DEFAULT_REQUEST_BODY_LIMIT_BYTES = 512 * 1024
+SPACE_MARKET_REQUEST_BODY_LIMIT_BYTES = 9 * 1024 * 1024
+
+
+def _is_space_market_publish(request: Request) -> bool:
+    return (
+        request.method == "POST"
+        and request.url.path.rstrip("/") == "/space/api/v2/market/resources"
+    )
+
+
+def _request_too_large_response(is_market_publish: bool) -> JSONResponse:
+    if is_market_publish:
+        return JSONResponse(
+            status_code=413,
+            content={"detail": {
+                "code": "MARKET_RESOURCE_TOO_LARGE",
+                "message": "Market resources may not exceed 8 MiB after canonicalization.",
+            }},
+        )
+    return JSONResponse(
+        status_code=413,
+        content={"detail": "Request entity too large (Max 512KB)"},
+    )
+
 def log_unhandled_exception(exc):
     logger.error(
         "Unhandled request error",
@@ -117,13 +142,50 @@ def log_unhandled_exception(exc):
 
 @app.middleware("http")
 async def limit_upload_size(request: Request, call_next):
+    is_market_publish = _is_space_market_publish(request)
     if request.method in ["POST", "PUT", "PATCH"]:
+        limit = (
+            SPACE_MARKET_REQUEST_BODY_LIMIT_BYTES
+            if is_market_publish
+            else DEFAULT_REQUEST_BODY_LIMIT_BYTES
+        )
         content_length = request.headers.get("content-length")
-        if content_length and int(content_length) > 512 * 1024:
-            return JSONResponse(
-                status_code=413, 
-                content={"detail": "Request entity too large (Max 512KB)"}
-            )
+        if content_length:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header"})
+            if declared_length < 0:
+                return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header"})
+            if declared_length > limit:
+                return _request_too_large_response(is_market_publish)
+
+        received = 0
+        buffered_messages = []
+        original_receive = request._receive
+        while True:
+            message = await original_receive()
+            if message.get("type") != "http.request":
+                buffered_messages.append(message)
+                break
+            received += len(message.get("body", b""))
+            if received > limit:
+                return _request_too_large_response(is_market_publish)
+            buffered_messages.append(message)
+            if not message.get("more_body", False):
+                break
+
+        message_index = 0
+
+        async def replay_receive():
+            nonlocal message_index
+            if message_index < len(buffered_messages):
+                message = buffered_messages[message_index]
+                message_index += 1
+                return message
+            return await original_receive()
+
+        request._receive = replay_receive
     try:
         return await call_next(request)
     except Exception as exc:

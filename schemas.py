@@ -9,8 +9,9 @@ class UpdateUsernameRequest(BaseModel):
     username: str = Field(..., min_length=1, max_length=100)
 
 class UpdateMinecraftSkinRequest(BaseModel):
-    minecraft_skin_url: Optional[str] = Field(None, min_length=1, max_length=500)
-    minecraft_skin_model: Optional[str] = Field("strong", max_length=20)
+    skin_url: Optional[str] = Field(None, min_length=1, max_length=500)
+    skin_type: Optional[str] = Field("strong", max_length=20)
+    model_config = ConfigDict(extra="forbid")
 
 class UserResponse(BaseModel):
     id: str
@@ -18,8 +19,8 @@ class UserResponse(BaseModel):
     username: Optional[str] = None
     picture: Optional[str] = None
     google_id: Optional[str] = None
-    minecraft_skin_url: Optional[str] = None
-    minecraft_skin_model: Optional[str] = "strong"
+    skin_url: Optional[str] = None
+    skin_type: Optional[str] = "strong"
     
     # Priority fields
     terms_agreed: Optional[bool] = False
@@ -237,7 +238,7 @@ class ForumCommentResponse(BaseModel):
     id: str
     author: str
     avatarUrl: Optional[str] = None
-    minecraftSkinUrl: Optional[str] = None
+    skinUrl: Optional[str] = None
     isPro: bool = False
     content: str
     createdAt: str
@@ -254,7 +255,7 @@ class ForumPostResponse(BaseModel):
     tags: List[str] = []
     author: str
     authorAvatar: Optional[str] = None
-    authorMinecraftSkinUrl: Optional[str] = None
+    authorSkinUrl: Optional[str] = None
     isPro: bool = False
     role: Optional[str] = None
     likes: int = 0
@@ -274,7 +275,7 @@ class ForumNotificationResponse(BaseModel):
     type: str # 'like', 'comment', 'reply'
     senderName: str
     senderAvatar: Optional[str] = None
-    senderMinecraftSkinUrl: Optional[str] = None
+    senderSkinUrl: Optional[str] = None
     postId: Optional[str] = None
     postTitle: Optional[str] = None
     isRead: bool = False

@@ -61,8 +61,8 @@ class SpacePlayerResponse(BaseModel):
     username: str | None
     is_admin: bool
     player_entity_id: str
-    minecraft_skin_url: str
-    minecraft_skin_model: str
+    skin_url: str
+    skin_type: str
     start_x_cm: int | None = None
     start_y_cm: int | None = None
     start_z_cm: int | None = None
@@ -545,7 +545,7 @@ def bootstrap_space(
     current_user: models.User = Depends(auth.get_current_user),
 ):
     """Gate Space entry and return the latest state or a one-time random start."""
-    skin_url = (current_user.minecraft_skin_url or "").strip()
+    skin_url = (current_user.skin_url or "").strip()
     if not skin_url:
         raise HTTPException(
             status_code=409,
@@ -563,7 +563,7 @@ def bootstrap_space(
         models.SpacePlayerSnapshot.user_id == current_user.id,
     ).first()
     saved_position = _decode_player_snapshot(snapshot, world)
-    skin_model = "slim" if (current_user.minecraft_skin_model or "").lower() == "slim" else "strong"
+    skin_type = "slim" if (current_user.skin_type or "").lower() == "slim" else "strong"
 
     return {
         "protocol_version": 2,
@@ -582,8 +582,8 @@ def bootstrap_space(
             "username": current_user.username,
             "is_admin": current_user.is_admin,
             "player_entity_id": str(profile.player_entity_id),
-            "minecraft_skin_url": skin_url,
-            "minecraft_skin_model": skin_model,
+            "skin_url": skin_url,
+            "skin_type": skin_type,
             "start_x_cm": saved_position["x_cm"] if saved_position else None,
             "start_y_cm": saved_position["y_cm"] if saved_position else None,
             "start_z_cm": saved_position["z_cm"] if saved_position else None,
@@ -744,16 +744,16 @@ def space_heartbeat(
             pos = _decode_player_snapshot(snap, world)
             if not pos:
                 continue
-            skin_url = (user.minecraft_skin_url or "").strip() or "/skin/default.png"
+            skin_url = (user.skin_url or "").strip() or "/skin/default.png"
             yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
             pitch_rad = (pos.get("pitch_q15", 0) / 32767.0) * math.pi
-            skin_model = "slim" if (user.minecraft_skin_model or "").lower() == "slim" else "strong"
+            skin_type = "slim" if (user.skin_type or "").lower() == "slim" else "strong"
             players.append({
                 "user_id": user.id,
                 "username": user.username or f"Player-{user.id[:6]}",
                 "player_entity_id": str(entity_id or user.id),
-                "minecraft_skin_url": skin_url,
-                "minecraft_skin_model": skin_model,
+                "skin_url": skin_url,
+                "skin_type": skin_type,
                 "x": pos["x_cm"] / 100.0,
                 "y": pos["y_cm"] / 100.0,
                 "z": pos["z_cm"] / 100.0,
@@ -843,16 +843,16 @@ def list_world_players(
         pos = _decode_player_snapshot(snap, world)
         if not pos:
             continue
-        skin_url = (user.minecraft_skin_url or "").strip() or "/skin/default.png"
+        skin_url = (user.skin_url or "").strip() or "/skin/default.png"
         yaw_rad = (pos["yaw_q15"] / 32767.0) * math.pi
         pitch_rad = (pos.get("pitch_q15", 0) / 32767.0) * math.pi
-        skin_model = "slim" if (user.minecraft_skin_model or "").lower() == "slim" else "strong"
+        skin_type = "slim" if (user.skin_type or "").lower() == "slim" else "strong"
         players.append({
             "user_id": user.id,
             "username": user.username or f"Player-{user.id[:6]}",
             "player_entity_id": str(entity_id or user.id),
-            "minecraft_skin_url": skin_url,
-            "minecraft_skin_model": skin_model,
+            "skin_url": skin_url,
+            "skin_type": skin_type,
             "x": pos["x_cm"] / 100.0,
             "y": pos["y_cm"] / 100.0,
             "z": pos["z_cm"] / 100.0,
