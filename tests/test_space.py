@@ -1,4 +1,5 @@
 import datetime
+import time
 import uuid
 
 import msgpack
@@ -109,6 +110,56 @@ def test_space_bootstrap_reuses_identity_without_persisting_random_start(client,
     assert first_data["player"]["start_z_cm"] is None
     assert db.query(SpaceWorldPlayerProfile).count() == 1
     assert not any(column.name.startswith("spawn_") for column in SpaceWorldPlayerProfile.__table__.columns)
+
+
+def test_space_admission_queues_fifo_supports_cancel_and_promotes(client, db, monkeypatch):
+    def redis_unavailable(*_args, **_kwargs):
+        raise RuntimeError("redis unavailable in admission test")
+
+    monkeypatch.setattr(space_realtime._ticket_redis, "eval", redis_unavailable)
+    space_realtime._fallback_admission.reset()
+
+    first_user = _user(db, "space-queue-01", "https://cdn.entropydrop.com/skins/queue-1.png")
+    second_user = _user(db, "space-queue-02", "https://cdn.entropydrop.com/skins/queue-2.png")
+    third_user = _user(db, "space-queue-03", "https://cdn.entropydrop.com/skins/queue-3.png")
+
+    app.dependency_overrides[get_current_user] = lambda: first_user
+    bootstrap = client.post("/space/api/v2/bootstrap").json()
+    world_id = bootstrap["world"]["id"]
+    world = db.query(SpaceWorld).filter(SpaceWorld.id == world_id).one()
+    world.max_online_players = 1
+    db.commit()
+
+    first = client.post(f"/space/api/v2/worlds/{world_id}/admission")
+    assert first.json() == {"state": "admitted", "position": None, "poll_after_ms": 2000}
+    previous_expiry = time.time() + 1
+    space_realtime._fallback_admission.worlds[world_id]["active"][first_user.id] = previous_expiry
+    renewed = client.post(f"/space/api/v2/worlds/{world_id}/admission")
+    assert renewed.json()["state"] == "admitted"
+    assert (
+        space_realtime._fallback_admission.worlds[world_id]["active"][first_user.id]
+        > previous_expiry + 30
+    )
+
+    app.dependency_overrides[get_current_user] = lambda: second_user
+    assert client.post("/space/api/v2/bootstrap").status_code == 200
+    second = client.post(f"/space/api/v2/worlds/{world_id}/admission")
+    assert second.json() == {"state": "queued", "position": 1, "poll_after_ms": 2000}
+    blocked_ticket = client.post(f"/space/api/v2/worlds/{world_id}/join-ticket")
+    assert blocked_ticket.status_code == 409
+    assert blocked_ticket.json()["detail"] == {"code": "SPACE_QUEUE_WAIT", "position": 1}
+
+    app.dependency_overrides[get_current_user] = lambda: third_user
+    assert client.post("/space/api/v2/bootstrap").status_code == 200
+    third = client.post(f"/space/api/v2/worlds/{world_id}/admission")
+    assert third.json()["position"] == 2
+    cancelled = client.delete(f"/space/api/v2/worlds/{world_id}/admission")
+    assert cancelled.json()["state"] == "cancelled"
+
+    space_realtime._release_admission(world_id, first_user.id)
+    app.dependency_overrides[get_current_user] = lambda: second_user
+    promoted = client.post(f"/space/api/v2/worlds/{world_id}/admission")
+    assert promoted.json() == {"state": "admitted", "position": None, "poll_after_ms": 2000}
 
 
 def test_space_realtime_ticket_and_binary_pose_stream(client, db, monkeypatch):

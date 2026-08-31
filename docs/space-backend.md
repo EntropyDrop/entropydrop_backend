@@ -5,9 +5,11 @@
 > and a transitional realtime player relay
 > are implemented. The relay uses one-use tickets, binary MessagePack, 20 Hz changed-pose
 > input, 10 Hz AOI snapshots, Redis cross-instance fanout, and five-second PostgreSQL
-> checkpoints. Terrain remains a durable REST cursor with realtime invalidation. The
-> authoritative simulation gateway/worker, protobuf input protocol, event stream, and queue
-> below remain the target real-time architecture.
+> checkpoints. A Redis-backed 32-slot FIFO admission lease now gates join tickets; queued
+> browsers play in an isolated offline world while polling only their one-based position.
+> Terrain remains a durable REST cursor with realtime invalidation. The authoritative
+> simulation gateway/worker, protobuf input protocol, event stream, and PostgreSQL-backed
+> admission design below remain the target real-time architecture.
 
 The browser persists only unacknowledged terrain batches while connected to the
 authoritative backend. Acknowledged chunk snapshots are fetched in overlapping AOI
@@ -817,6 +819,15 @@ protocol. Terrain snapshots, bounded mutation batches, and the explicit resource
 the authenticated REST bridge. There is deliberately no inventory-slot/backpack-sync
 endpoint. Asset responses require current world access, use immutable cache headers plus
 ETag, and never expose raw object-storage keys.
+
+The transitional relay exposes `POST` and `DELETE`
+`/space/api/v2/worlds/{world_id}/admission`. Redis sorted sets atomically expire leases,
+reserve up to the world's configured capacity, and promote FIFO waiters. Queue polling renews
+the 30-second waiting lease. Once promoted, the offline choice prompt renews its reservation
+until the player enters online Space or explicitly stays offline; closing the page releases it.
+Live relay connections renew their own reservations and release them on disconnect. Development
+may use the process-local fallback when Redis is absent, while production fails closed instead
+of oversubscribing a world.
 
 ### 11.2 Real-Time Channel
 

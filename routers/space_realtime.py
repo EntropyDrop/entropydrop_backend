@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Literal
 
 import jwt
 import msgpack
@@ -34,6 +35,9 @@ SPACE_JOIN_TICKET_TTL_SECONDS = 30
 SPACE_REALTIME_MAX_MESSAGE_BYTES = 4096
 SPACE_REALTIME_IDLE_TIMEOUT_SECONDS = 30
 SPACE_REALTIME_MAX_BUFFERED_SEND_SECONDS = 0.05
+SPACE_ADMISSION_RESERVATION_SECONDS = 60
+SPACE_ADMISSION_QUEUE_LEASE_SECONDS = 30
+SPACE_ADMISSION_POLL_AFTER_MS = 2_000
 
 _ticket_redis = Redis.from_url(
     settings.REDIS_URL,
@@ -50,6 +54,232 @@ class SpaceJoinTicketResponse(BaseModel):
     ticket: str
     websocket_url: str
     expires_in_seconds: int
+
+
+class SpaceAdmissionResponse(BaseModel):
+    state: Literal["admitted", "queued", "cancelled"]
+    position: int | None = None
+    poll_after_ms: int = SPACE_ADMISSION_POLL_AFTER_MS
+
+
+_ADMISSION_LUA = """
+local active = KEYS[1]
+local queue = KEYS[2]
+local queue_expiry = KEYS[3]
+local sequence = KEYS[4]
+local user_id = ARGV[1]
+local now = tonumber(ARGV[2])
+local active_until = tonumber(ARGV[3])
+local queue_until = tonumber(ARGV[4])
+local capacity = tonumber(ARGV[5])
+
+redis.call('ZREMRANGEBYSCORE', active, '-inf', now)
+local expired = redis.call('ZRANGEBYSCORE', queue_expiry, '-inf', now)
+for _, member in ipairs(expired) do
+  redis.call('ZREM', queue, member)
+end
+redis.call('ZREMRANGEBYSCORE', queue_expiry, '-inf', now)
+
+if redis.call('ZSCORE', active, user_id) then
+  redis.call('ZADD', active, active_until, user_id)
+  return {1, 0}
+end
+
+while redis.call('ZCARD', active) < capacity do
+  local oldest = redis.call('ZRANGE', queue, 0, 0)
+  if #oldest == 0 then break end
+  local promoted = oldest[1]
+  redis.call('ZREM', queue, promoted)
+  redis.call('ZREM', queue_expiry, promoted)
+  redis.call('ZADD', active, active_until, promoted)
+end
+
+if redis.call('ZSCORE', active, user_id) then
+  return {1, 0}
+end
+
+local rank = redis.call('ZRANK', queue, user_id)
+if rank then
+  redis.call('ZADD', queue_expiry, queue_until, user_id)
+  return {2, rank + 1}
+end
+
+if redis.call('ZCARD', active) < capacity then
+  redis.call('ZADD', active, active_until, user_id)
+  return {1, 0}
+end
+
+local next_sequence = redis.call('INCR', sequence)
+redis.call('ZADD', queue, next_sequence, user_id)
+redis.call('ZADD', queue_expiry, queue_until, user_id)
+redis.call('EXPIRE', active, 86400)
+redis.call('EXPIRE', queue, 86400)
+redis.call('EXPIRE', queue_expiry, 86400)
+redis.call('EXPIRE', sequence, 86400)
+return {2, redis.call('ZCARD', queue)}
+"""
+
+_CANCEL_ADMISSION_LUA = """
+redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('ZREM', KEYS[3], ARGV[1])
+return 1
+"""
+
+
+class _FallbackAdmissionQueue:
+    """Process-local development fallback used only when Redis is unavailable."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.worlds: dict[str, dict] = {}
+
+    def reset(self) -> None:
+        with self.lock:
+            self.worlds.clear()
+
+    def request(self, world_id: str, user_id: str, capacity: int) -> tuple[str, int | None]:
+        now = time.time()
+        with self.lock:
+            state = self.worlds.setdefault(world_id, {"active": {}, "queue": {}, "sequence": 0})
+            active: dict[str, float] = state["active"]
+            queue: dict[str, tuple[int, float]] = state["queue"]
+            for member, expires_at in list(active.items()):
+                if expires_at <= now:
+                    active.pop(member, None)
+            for member, (_sequence, expires_at) in list(queue.items()):
+                if expires_at <= now:
+                    queue.pop(member, None)
+
+            if user_id in active:
+                active[user_id] = now + SPACE_ADMISSION_RESERVATION_SECONDS
+                return "admitted", None
+
+            while len(active) < capacity and queue:
+                promoted = min(queue, key=lambda member: queue[member][0])
+                queue.pop(promoted, None)
+                active[promoted] = now + SPACE_ADMISSION_RESERVATION_SECONDS
+
+            if user_id in active:
+                return "admitted", None
+            if user_id in queue:
+                sequence, _expires_at = queue[user_id]
+                queue[user_id] = (sequence, now + SPACE_ADMISSION_QUEUE_LEASE_SECONDS)
+                ordered = sorted(queue, key=lambda member: queue[member][0])
+                return "queued", ordered.index(user_id) + 1
+            if len(active) < capacity:
+                active[user_id] = now + SPACE_ADMISSION_RESERVATION_SECONDS
+                return "admitted", None
+
+            state["sequence"] += 1
+            queue[user_id] = (
+                state["sequence"],
+                now + SPACE_ADMISSION_QUEUE_LEASE_SECONDS,
+            )
+            return "queued", len(queue)
+
+    def cancel(self, world_id: str, user_id: str) -> None:
+        with self.lock:
+            state = self.worlds.get(world_id, {})
+            state.get("queue", {}).pop(user_id, None)
+            state.get("active", {}).pop(user_id, None)
+
+    def renew(self, world_id: str, user_ids: list[str]) -> None:
+        now = time.time()
+        with self.lock:
+            active = self.worlds.get(world_id, {}).get("active", {})
+            for user_id in user_ids:
+                if user_id in active:
+                    active[user_id] = now + SPACE_ADMISSION_RESERVATION_SECONDS
+
+    def release(self, world_id: str, user_id: str) -> None:
+        with self.lock:
+            self.worlds.get(world_id, {}).get("active", {}).pop(user_id, None)
+
+
+_fallback_admission = _FallbackAdmissionQueue()
+
+
+def _admission_keys(world_id: str) -> tuple[str, str, str, str]:
+    prefix = f"space:admission:{world_id}"
+    return (
+        f"{prefix}:active",
+        f"{prefix}:queue",
+        f"{prefix}:queue-expiry",
+        f"{prefix}:sequence",
+    )
+
+
+def _request_admission(world_id: str, user_id: str, capacity: int) -> tuple[str, int | None]:
+    now = time.time()
+    keys = _admission_keys(world_id)
+    try:
+        result = _ticket_redis.eval(
+            _ADMISSION_LUA,
+            len(keys),
+            *keys,
+            user_id,
+            now,
+            now + SPACE_ADMISSION_RESERVATION_SECONDS,
+            now + SPACE_ADMISSION_QUEUE_LEASE_SECONDS,
+            max(1, min(32, int(capacity))),
+        )
+        if isinstance(result, (list, tuple)) and len(result) >= 2:
+            state = "admitted" if int(result[0]) == 1 else "queued"
+            return state, None if state == "admitted" else int(result[1])
+        raise RuntimeError("Redis returned an invalid Space admission result")
+    except Exception as error:
+        if _is_production():
+            logger.exception("Redis is required for Space admission in production")
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "SPACE_ADMISSION_UNAVAILABLE"},
+            ) from error
+        return _fallback_admission.request(world_id, user_id, capacity)
+
+
+def _cancel_admission_queue(world_id: str, user_id: str) -> None:
+    active, queue, queue_expiry, _sequence = _admission_keys(world_id)
+    try:
+        _ticket_redis.eval(
+            _CANCEL_ADMISSION_LUA,
+            3,
+            active,
+            queue,
+            queue_expiry,
+            user_id,
+        )
+    except Exception:
+        if _is_production():
+            raise HTTPException(status_code=503, detail={"code": "SPACE_ADMISSION_UNAVAILABLE"})
+    if not _is_production():
+        _fallback_admission.cancel(world_id, user_id)
+
+
+def _renew_admission_leases(world_id: str, user_ids: list[str]) -> None:
+    if not user_ids:
+        return
+    active = _admission_keys(world_id)[0]
+    expires_at = time.time() + SPACE_ADMISSION_RESERVATION_SECONDS
+    try:
+        _ticket_redis.zadd(active, {user_id: expires_at for user_id in user_ids})
+        _ticket_redis.expire(active, 86400)
+    except Exception:
+        if _is_production():
+            logger.exception("Could not renew Space admission leases")
+    if not _is_production():
+        _fallback_admission.renew(world_id, user_ids)
+
+
+def _release_admission(world_id: str, user_id: str) -> None:
+    active = _admission_keys(world_id)[0]
+    try:
+        _ticket_redis.zrem(active, user_id)
+    except Exception:
+        if _is_production():
+            logger.exception("Could not release Space admission lease")
+    if not _is_production():
+        _fallback_admission.release(world_id, user_id)
 
 
 @dataclass
@@ -257,6 +487,11 @@ class SpaceRealtimeHub:
         world_sessions = self.sessions.setdefault(session.identity.world_id, {})
         previous = world_sessions.get(session.identity.user_id)
         world_sessions[session.identity.user_id] = session
+        await asyncio.to_thread(
+            _renew_admission_leases,
+            session.identity.world_id,
+            [session.identity.user_id],
+        )
         if previous is not None and previous.websocket is not session.websocket:
             try:
                 await previous.websocket.close(code=4409, reason="A newer Space session replaced this connection")
@@ -278,10 +513,18 @@ class SpaceRealtimeHub:
 
     async def unregister(self, session: RealtimeSession) -> None:
         world_sessions = self.sessions.get(session.identity.world_id)
+        released_current = False
         if world_sessions and world_sessions.get(session.identity.user_id) is session:
             world_sessions.pop(session.identity.user_id, None)
+            released_current = True
             if not world_sessions:
                 self.sessions.pop(session.identity.world_id, None)
+        if released_current:
+            await asyncio.to_thread(
+                _release_admission,
+                session.identity.world_id,
+                session.identity.user_id,
+            )
         if session.pose is not None:
             await self._publish_event(session.identity.world_id, {
                 "type": "leave",
@@ -549,6 +792,7 @@ class SpaceRealtimeHub:
         interval = 1 / max(1, settings.SPACE_REALTIME_SNAPSHOT_HZ)
         persistence_interval = max(1, settings.SPACE_REALTIME_PERSIST_SECONDS)
         last_persisted_at = time.monotonic()
+        last_admission_renewed_at = 0.0
         next_fanout_restart_at = 0.0
         server_tick = 0
         try:
@@ -557,6 +801,13 @@ class SpaceRealtimeHub:
                 server_tick += 1
                 sessions = list(self.sessions.get(world_id, {}).values())
                 now = time.monotonic()
+                if now - last_admission_renewed_at >= 10:
+                    await asyncio.to_thread(
+                        _renew_admission_leases,
+                        world_id,
+                        [session.identity.user_id for session in sessions],
+                    )
+                    last_admission_renewed_at = now
                 fanout_task = self.fanout_tasks.get(world_id)
                 if (
                     settings.SPACE_REALTIME_REDIS_FANOUT_ENABLED
@@ -630,6 +881,50 @@ realtime_hub = SpaceRealtimeHub()
 
 
 @api_router.post(
+    "/worlds/{world_id}/admission",
+    response_model=SpaceAdmissionResponse,
+)
+@limiter.limit("60/minute")
+def request_space_admission(
+    request: Request,
+    world_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    world = space_api._require_world_membership(db, str(world_id), current_user)
+    state, position = _request_admission(
+        str(world.id),
+        current_user.id,
+        world.max_online_players,
+    )
+    return {
+        "state": state,
+        "position": position,
+        "poll_after_ms": SPACE_ADMISSION_POLL_AFTER_MS,
+    }
+
+
+@api_router.delete(
+    "/worlds/{world_id}/admission",
+    response_model=SpaceAdmissionResponse,
+)
+@limiter.limit("30/minute")
+def cancel_space_admission(
+    request: Request,
+    world_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    world = space_api._require_world_membership(db, str(world_id), current_user)
+    _cancel_admission_queue(str(world.id), current_user.id)
+    return {
+        "state": "cancelled",
+        "position": None,
+        "poll_after_ms": SPACE_ADMISSION_POLL_AFTER_MS,
+    }
+
+
+@api_router.post(
     "/worlds/{world_id}/join-ticket",
     response_model=SpaceJoinTicketResponse,
 )
@@ -641,6 +936,16 @@ def create_space_join_ticket(
     current_user: models.User = Depends(auth.get_current_user),
 ):
     world = space_api._require_world_membership(db, str(world_id), current_user)
+    state, position = _request_admission(
+        str(world.id),
+        current_user.id,
+        world.max_online_players,
+    )
+    if state != "admitted":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "SPACE_QUEUE_WAIT", "position": position},
+        )
     return {
         "ticket": _create_join_ticket(str(world.id), current_user.id),
         "websocket_url": settings.SPACE_WS_URL,
