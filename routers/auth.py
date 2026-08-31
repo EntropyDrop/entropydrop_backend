@@ -1,7 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import get_db
+from config import settings
 import models
 import schemas
 import auth
@@ -12,9 +16,33 @@ from backend_utils import is_text_to_skin_enabled, is_image_to_skin_enabled, is_
 router = APIRouter(tags=["auth"])
 
 
+def _validate_session_request_origin(request: Request) -> None:
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    allowed_origins = {
+        value.strip()
+        for value in os.getenv("CORS_ORIGINS", "").split(",")
+        if value.strip()
+    } or {
+        "https://entropydrop.com",
+        "https://www.entropydrop.com",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    }
+    if origin not in allowed_origins:
+        raise HTTPException(status_code=403, detail={"code": "SESSION_ORIGIN_REJECTED"})
+
+
 
 @router.post("/api/auth/google", response_model=schemas.TokenResponse)
-async def google_login(req: schemas.GoogleAuthRequest, db: Session = Depends(get_db)):
+async def google_login(
+    req: schemas.GoogleAuthRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    _validate_session_request_origin(request)
     # Verify Google token...
     id_info = auth.verify_google_token(req.token)
     email = id_info.get("email")
@@ -48,7 +76,9 @@ async def google_login(req: schemas.GoogleAuthRequest, db: Session = Depends(get
         db.commit()
         db.refresh(user)
         
-    access_token = auth.create_access_token(data={"sub": user.id})
+    session, raw_session_token = auth.create_auth_session(db, user.id)
+    auth.set_auth_session_cookie(response, raw_session_token, session.expires_at)
+    access_token = auth.create_access_token(data={"sub": user.id}, session_id=session.id)
     import backend_utils
     backend_utils.award_daily_login_credits(db, user)
     user_res = {
@@ -71,7 +101,53 @@ async def google_login(req: schemas.GoogleAuthRequest, db: Session = Depends(get
         "skin_url": user.skin_url,
         "skin_type": user.skin_type or "strong"
     }
-    return {"access_token": access_token, "token_type": "bearer", "user": user_res}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "expires_in_seconds": auth.ACCESS_TOKEN_EXPIRE_SECONDS,
+        "user": user_res,
+    }
+
+
+@router.post("/api/auth/refresh", response_model=schemas.AccessTokenResponse)
+async def refresh_login_session(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    _validate_session_request_origin(request)
+    raw_session_token = request.cookies.get(settings.AUTH_SESSION_COOKIE_NAME)
+    try:
+        session = auth.refresh_auth_session(db, raw_session_token)
+    except HTTPException as error:
+        failed = JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+        auth.clear_auth_session_cookie(failed)
+        return failed
+
+    auth.set_auth_session_cookie(response, raw_session_token or "", session.expires_at)
+    return {
+        "access_token": auth.create_access_token(
+            data={"sub": session.user_id},
+            session_id=session.id,
+        ),
+        "token_type": "bearer",
+        "expires_in_seconds": auth.ACCESS_TOKEN_EXPIRE_SECONDS,
+    }
+
+
+@router.post("/api/auth/logout")
+async def logout_session(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    _validate_session_request_origin(request)
+    auth.revoke_auth_session(
+        db,
+        request.cookies.get(settings.AUTH_SESSION_COOKIE_NAME),
+    )
+    auth.clear_auth_session_cookie(response)
+    return {"status": "ok"}
 
 @router.get("/api/users/me", response_model=schemas.UserResponse)
 async def get_my_profile(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):

@@ -1,5 +1,11 @@
+import hashlib
+from datetime import datetime, timedelta, timezone
+
+import jwt
 import pytest
-from models import GenerationLog, User
+
+from config import settings
+from models import AuthSession, GenerationLog, User
 from auth import get_current_user, get_current_user_optional
 
 
@@ -214,6 +220,168 @@ def test_google_login_keeps_username(client, db):
     finally:
         # Restore mock
         auth_module.verify_google_token = original_verify
+
+
+def test_google_login_creates_secure_server_session(client, db, monkeypatch):
+    import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "verify_google_token", lambda token: {
+        "email": "sliding-session@example.com",
+        "sub": "google-sliding-session",
+        "email_verified": True,
+        "name": "Sliding Session",
+    })
+
+    response = client.post(
+        "/skin/api/auth/google",
+        json={"token": "mock-token"},
+        headers={"Origin": "http://localhost:5173"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["expires_in_seconds"] == settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    claims = jwt.decode(
+        body["access_token"],
+        settings.JWT_SECRET_KEY,
+        algorithms=[settings.JWT_ALGORITHM],
+    )
+    assert claims["type"] == "access"
+    assert claims["sid"]
+    assert claims["jti"]
+
+    set_cookie = response.headers["set-cookie"]
+    assert f"{settings.AUTH_SESSION_COOKIE_NAME}=" in set_cookie
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=lax" in set_cookie
+    assert "Path=/skin/api/auth" in set_cookie
+
+    raw_session = client.cookies.get(settings.AUTH_SESSION_COOKIE_NAME)
+    session_id, secret = raw_session.split(".", 1)
+    session = db.query(AuthSession).filter(AuthSession.id == session_id).one()
+    assert session.user_id == claims["sub"]
+    assert session.token_hash == hashlib.sha256(secret.encode("utf-8")).digest()
+    assert secret.encode("utf-8") not in session.token_hash
+
+
+def test_refresh_slides_session_and_keeps_cookie_stable(client, db, monkeypatch):
+    import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "verify_google_token", lambda token: {
+        "email": "refresh-session@example.com",
+        "sub": "google-refresh-session",
+        "email_verified": True,
+        "name": "Refresh Session",
+    })
+    login = client.post("/skin/api/auth/google", json={"token": "mock-token"})
+    assert login.status_code == 200
+    raw_session = client.cookies.get(settings.AUTH_SESSION_COOKIE_NAME)
+    session_id = raw_session.split(".", 1)[0]
+    session = db.query(AuthSession).filter(AuthSession.id == session_id).one()
+    session.expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    old_expiry = session.expires_at
+    db.commit()
+
+    response = client.post(
+        "/skin/api/auth/refresh",
+        headers={"Origin": "http://localhost:5173"},
+    )
+
+    assert response.status_code == 200
+    assert client.cookies.get(settings.AUTH_SESSION_COOKIE_NAME) == raw_session
+    db.refresh(session)
+    refreshed_expiry = session.expires_at
+    if refreshed_expiry.tzinfo is None:
+        refreshed_expiry = refreshed_expiry.replace(tzinfo=timezone.utc)
+    if old_expiry.tzinfo is None:
+        old_expiry = old_expiry.replace(tzinfo=timezone.utc)
+    assert refreshed_expiry > old_expiry
+    assert refreshed_expiry <= datetime.now(timezone.utc) + timedelta(
+        days=settings.AUTH_SESSION_IDLE_DAYS,
+        seconds=5,
+    )
+    claims = jwt.decode(
+        response.json()["access_token"],
+        settings.JWT_SECRET_KEY,
+        algorithms=[settings.JWT_ALGORITHM],
+    )
+    assert claims["sid"] == session_id
+    assert claims["sub"] == session.user_id
+
+
+def test_logout_revokes_session_and_refresh_cannot_reuse_it(client, db, monkeypatch):
+    import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "verify_google_token", lambda token: {
+        "email": "logout-session@example.com",
+        "sub": "google-logout-session",
+        "email_verified": True,
+        "name": "Logout Session",
+    })
+    login = client.post("/skin/api/auth/google", json={"token": "mock-token"})
+    assert login.status_code == 200
+    access_token = login.json()["access_token"]
+    raw_session = client.cookies.get(settings.AUTH_SESSION_COOKIE_NAME)
+    session_id = raw_session.split(".", 1)[0]
+
+    before_logout = client.get(
+        "/skin/api/users/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert before_logout.status_code == 200
+
+    response = client.post(
+        "/skin/api/auth/logout",
+        headers={"Origin": "http://localhost:5173"},
+    )
+    assert response.status_code == 200
+    assert client.cookies.get(settings.AUTH_SESSION_COOKIE_NAME) is None
+    session = db.query(AuthSession).filter(AuthSession.id == session_id).one()
+    assert session.revoked_at is not None
+
+    after_logout = client.get(
+        "/skin/api/users/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    assert after_logout.status_code == 401
+
+    client.cookies.set(settings.AUTH_SESSION_COOKIE_NAME, raw_session, path="/skin/api/auth")
+    refresh = client.post("/skin/api/auth/refresh")
+    assert refresh.status_code == 401
+    assert refresh.json()["detail"]["code"] == "SESSION_EXPIRED"
+    assert "Max-Age=0" in refresh.headers["set-cookie"]
+
+
+def test_refresh_rejects_tampered_cookie_and_cross_origin(client, db, monkeypatch):
+    import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "verify_google_token", lambda token: {
+        "email": "session-security@example.com",
+        "sub": "google-session-security",
+        "email_verified": True,
+        "name": "Session Security",
+    })
+    login = client.post("/skin/api/auth/google", json={"token": "mock-token"})
+    assert login.status_code == 200
+    raw_session = client.cookies.get(settings.AUTH_SESSION_COOKIE_NAME)
+
+    rejected_origin = client.post(
+        "/skin/api/auth/refresh",
+        headers={"Origin": "https://attacker.example"},
+    )
+    assert rejected_origin.status_code == 403
+    assert rejected_origin.json()["detail"]["code"] == "SESSION_ORIGIN_REJECTED"
+
+    session_id = raw_session.split(".", 1)[0]
+    client.cookies.clear()
+    client.cookies.set(
+        settings.AUTH_SESSION_COOKIE_NAME,
+        f"{session_id}.{'x' * 43}",
+        path="/skin/api/auth",
+    )
+    tampered = client.post("/skin/api/auth/refresh")
+    assert tampered.status_code == 401
+    assert tampered.json()["detail"]["code"] == "SESSION_INVALID"
 
 
 def test_google_login_rejects_unverified_email(client, monkeypatch):

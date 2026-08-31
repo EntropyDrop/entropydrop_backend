@@ -43,7 +43,14 @@ class UserResponse(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
+    expires_in_seconds: int
     user: UserResponse
+
+
+class AccessTokenResponse(BaseModel):
+    access_token: str
+    token_type: str
+    expires_in_seconds: int
 
 class CollectionCreate(BaseModel):
     name: str = Field(..., max_length=100)

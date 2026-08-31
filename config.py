@@ -31,7 +31,13 @@ class Settings(BaseSettings):
     # JWT Auth Config
     JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = ""
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 0
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    AUTH_SESSION_IDLE_DAYS: int = 7
+    AUTH_SESSION_ABSOLUTE_DAYS: int = 90
+    AUTH_SESSION_MAX_PER_USER: int = 10
+    AUTH_SESSION_COOKIE_NAME: str = "ed_session"
+    AUTH_SESSION_COOKIE_SECURE: bool = False
+    AUTH_SESSION_COOKIE_DOMAIN: str = ""
 
     # Space uses the same JWT/users table. These settings identify the initial
     # persistent world and tune the integrated realtime WebSocket gateway.
@@ -127,6 +133,18 @@ def validate_runtime_settings() -> None:
 
     if settings.ACCESS_TOKEN_EXPIRE_MINUTES <= 0:
         errors.append("ACCESS_TOKEN_EXPIRE_MINUTES must be greater than 0")
+
+    if settings.AUTH_SESSION_IDLE_DAYS <= 0:
+        errors.append("AUTH_SESSION_IDLE_DAYS must be greater than 0")
+
+    if settings.AUTH_SESSION_ABSOLUTE_DAYS < settings.AUTH_SESSION_IDLE_DAYS:
+        errors.append("AUTH_SESSION_ABSOLUTE_DAYS must be at least AUTH_SESSION_IDLE_DAYS")
+
+    if settings.AUTH_SESSION_MAX_PER_USER <= 0:
+        errors.append("AUTH_SESSION_MAX_PER_USER must be greater than 0")
+
+    if not settings.AUTH_SESSION_COOKIE_SECURE:
+        errors.append("AUTH_SESSION_COOKIE_SECURE must be enabled in production")
 
     if not settings.DATABASE_URL or settings.DATABASE_URL.startswith("sqlite"):
         errors.append("DATABASE_URL must point to a production database")

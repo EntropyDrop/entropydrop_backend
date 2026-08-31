@@ -61,6 +61,37 @@ class User(Base):
         return self.is_pro
 
 
+class AuthSession(Base):
+    """Server-revocable browser login session; only a token hash is persisted."""
+    __tablename__ = "auth_sessions"
+
+    id = Column(String(32), primary_key=True, default=lambda: secrets.token_urlsafe(24)[:32])
+    user_id = Column(
+        String(16),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash = Column(LargeBinary(32), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
+    last_used_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+    )
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    absolute_expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_auth_sessions_user_expires", "user_id", "expires_at"),
+    )
+
+
 class SpaceWorld(Base):
     """Space world control-plane metadata; user identity remains in users."""
     __tablename__ = "worlds"
