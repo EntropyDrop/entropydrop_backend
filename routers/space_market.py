@@ -1,6 +1,7 @@
 import datetime
 import hashlib
 import json
+import logging
 import math
 import re
 from typing import Any, Literal
@@ -23,11 +24,13 @@ from sqlalchemy.orm import Session, load_only
 
 import auth
 import models
+import s3_utils
 from database import get_db
 from rate_limit import limiter
 
 
 router = APIRouter(prefix="/space/api/v2/market", tags=["space-market"])
+logger = logging.getLogger(__name__)
 
 SPACE_MARKET_LICENSE = "AGPL-3.0-only"
 SPACE_MARKET_DAILY_PUBLISH_LIMIT = 10
@@ -41,6 +44,7 @@ SPACE_MARKET_MAX_BOUNDS = 64
 SPACE_MARKET_MAX_COORDINATE = SPACE_MARKET_MAX_BOUNDS * 2
 SPACE_MARKET_PREVIEW_BLOCKS = 64
 SPACE_MARKET_RATE_LIMIT = "120/minute; 2000/hour"
+SPACE_MARKET_OBJECT_PREFIX = "space-market/resources"
 COMPONENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -392,6 +396,52 @@ def market_content_digest(canonical: dict[str, Any]) -> bytes:
     return hashlib.sha256(encoded).digest()
 
 
+def _market_object_key(resource_id: str, digest: bytes) -> str:
+    return f"{SPACE_MARKET_OBJECT_PREFIX}/{resource_id}/{digest.hex()}.json"
+
+
+def _upload_market_object(encoded: bytes, object_key: str) -> None:
+    s3_utils.upload_to_s3(
+        encoded,
+        object_key,
+        is_public=True,
+        content_type="application/json; charset=utf-8",
+    )
+
+
+def _market_storage_error(action: str) -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            "code": "MARKET_STORAGE_UNAVAILABLE",
+            "message": f"Market object storage could not {action} the resource.",
+        },
+    )
+
+
+def _is_missing_market_object(error: Exception) -> bool:
+    response = getattr(error, "response", None)
+    code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+    return str(code) in {"404", "NoSuchKey", "NotFound"}
+
+
+def _cleanup_unreferenced_market_object(db: Session, object_key: str) -> None:
+    """Best-effort compensation after a database write fails."""
+    try:
+        referenced = db.query(models.SpaceMarketResource.id).filter(
+            models.SpaceMarketResource.object_key == object_key,
+        ).first()
+    except Exception:
+        logger.exception("Could not verify whether market object %s is referenced", object_key)
+        return
+    if referenced:
+        return
+    try:
+        s3_utils.delete_from_s3_strict(object_key, is_public=True)
+    except Exception:
+        logger.exception("Could not remove unreferenced market object %s", object_key)
+
+
 def _market_preview(kind: str, canonical: dict[str, Any]) -> dict[str, Any]:
     if kind == "colorset":
         return {"colors": canonical["colors"]}
@@ -559,14 +609,24 @@ def publish_market_resource(
             "daily_limit": SPACE_MARKET_DAILY_PUBLISH_LIMIT,
         })
 
+    resource_id = models.generate_base58_id()
+    object_key = _market_object_key(resource_id, digest)
+    try:
+        _upload_market_object(encoded, object_key)
+    except Exception as error:
+        logger.exception("Could not upload market resource %s", resource_id)
+        raise _market_storage_error("store") from error
+
     resource = models.SpaceMarketResource(
+        id=resource_id,
         publisher_user_id=current_user.id,
         kind=publish_request.kind,
         schema_version=2,
         name=canonical["name"],
         license=SPACE_MARKET_LICENSE,
         content_digest=digest,
-        content=canonical,
+        object_key=object_key,
+        content=None,
         preview=_market_preview(publish_request.kind, canonical),
         size_bytes=len(encoded),
         block_count=len(canonical.get("blocks", [])),
@@ -578,9 +638,9 @@ def publish_market_resource(
     db.add(resource)
     try:
         db.commit()
-        db.refresh(resource)
     except IntegrityError as error:
         db.rollback()
+        _cleanup_unreferenced_market_object(db, object_key)
         duplicate = db.query(models.SpaceMarketResource).filter(models.SpaceMarketResource.content_digest == digest).first()
         if duplicate:
             raise HTTPException(status_code=409, detail={
@@ -589,6 +649,11 @@ def publish_market_resource(
                 "resource_id": duplicate.id,
             }) from error
         raise
+    except Exception:
+        db.rollback()
+        _cleanup_unreferenced_market_object(db, object_key)
+        raise
+    db.refresh(resource)
     return {"resource": _resource_response(resource, current_user, False), "quota": _quota_response(db, current_user.id)}
 
 
@@ -606,10 +671,36 @@ def download_market_resource(
     ).first()
     if resource is None:
         raise HTTPException(status_code=404, detail={"code": "MARKET_RESOURCE_NOT_FOUND"})
+
+    uploaded_object_key = None
+    if not resource.object_key:
+        if resource.content is None:
+            raise _market_storage_error("load")
+        encoded = json.dumps(
+            resource.content,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        uploaded_object_key = _market_object_key(resource.id, bytes(resource.content_digest))
+        try:
+            _upload_market_object(encoded, uploaded_object_key)
+        except Exception as error:
+            logger.exception("Could not migrate legacy market resource %s", resource.id)
+            raise _market_storage_error("store") from error
+        resource.object_key = uploaded_object_key
+        resource.content = None
+
     db.query(models.SpaceMarketResource).filter(models.SpaceMarketResource.id == resource.id).update({
         models.SpaceMarketResource.downloads_count: models.SpaceMarketResource.downloads_count + 1,
     }, synchronize_session=False)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        if uploaded_object_key:
+            _cleanup_unreferenced_market_object(db, uploaded_object_key)
+        raise
     db.refresh(resource)
     return {
         "id": resource.id,
@@ -618,7 +709,7 @@ def download_market_resource(
         "license": resource.license,
         "digest": bytes(resource.content_digest).hex(),
         "downloads_count": resource.downloads_count,
-        "payload": resource.content,
+        "download_url": s3_utils.get_cdn_url(resource.object_key),
     }
 
 
@@ -666,7 +757,43 @@ def admin_delete_market_resource(
     ).with_for_update().first()
     if resource is None:
         raise HTTPException(status_code=404, detail={"code": "MARKET_RESOURCE_NOT_FOUND"})
+
+    backup_content = None
+    object_deleted = False
+    invalidation_requested = False
+    if resource.object_key:
+        try:
+            backup_content = s3_utils.download_from_s3(resource.object_key, is_public=True)
+        except Exception as error:
+            if not _is_missing_market_object(error):
+                logger.exception("Could not read market resource %s before deletion", resource.id)
+                raise _market_storage_error("read before deleting") from error
+        try:
+            invalidation_requested = s3_utils.invalidate_cdn_object(resource.object_key)
+            s3_utils.delete_from_s3_strict(resource.object_key, is_public=True)
+            object_deleted = True
+        except Exception as error:
+            logger.exception("Could not delete market resource object %s", resource.id)
+            raise _market_storage_error("delete") from error
+
     resource.deleted_at = datetime.datetime.now(datetime.timezone.utc)
     resource.deleted_by_user_id = current_admin.id
-    db.commit()
-    return {"deleted": True, "resource_id": resource.id}
+    try:
+        db.commit()
+    except Exception as error:
+        db.rollback()
+        if object_deleted and backup_content is not None:
+            try:
+                _upload_market_object(backup_content, resource.object_key)
+            except Exception:
+                logger.exception("Could not restore market resource %s after database failure", resource.id)
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "MARKET_DELETE_FAILED", "message": "The market resource was not deleted."},
+        ) from error
+    return {
+        "deleted": True,
+        "resource_id": resource.id,
+        "cdn_object_deleted": object_deleted,
+        "cdn_invalidation_requested": invalidation_requested,
+    }

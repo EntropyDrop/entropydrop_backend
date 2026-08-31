@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     AWS_BUCKET_NAME: str = ""
     AWS_PRIVATE_BUCKET_NAME: str = ""
     AWS_CDN_DOMAIN: str = ""
+    AWS_CLOUDFRONT_DISTRIBUTION_ID: str = ""
     AWS_DOMAIN_NAME: str = ""
 
     # AWS Infrastructure (Self-managed)

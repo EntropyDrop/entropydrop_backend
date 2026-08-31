@@ -1,7 +1,47 @@
+import json
+
+import pytest
+
 import auth
 from auth import get_current_user
 from main import app
 from models import SpaceMarketResource, SpaceMarketResourceLike, User
+from routers import space_market
+
+
+@pytest.fixture(autouse=True)
+def market_object_storage(monkeypatch):
+    objects: dict[str, bytes] = {}
+    invalidations: list[str] = []
+
+    def upload(file_content, key, is_public, content_type="image/png"):
+        assert is_public is True
+        assert content_type == "application/json; charset=utf-8"
+        objects[key] = bytes(file_content)
+        return key
+
+    def download(key, is_public):
+        assert is_public is True
+        return objects[key]
+
+    def delete(key, is_public):
+        assert is_public is True
+        objects.pop(key, None)
+
+    def invalidate(key):
+        invalidations.append(key)
+        return True
+
+    monkeypatch.setattr(space_market.s3_utils, "upload_to_s3", upload)
+    monkeypatch.setattr(space_market.s3_utils, "download_from_s3", download)
+    monkeypatch.setattr(space_market.s3_utils, "delete_from_s3_strict", delete)
+    monkeypatch.setattr(space_market.s3_utils, "invalidate_cdn_object", invalidate)
+    monkeypatch.setattr(
+        space_market.s3_utils,
+        "get_cdn_url",
+        lambda key: f"https://cdn.example.test/{key}",
+    )
+    return {"objects": objects, "invalidations": invalidations}
 
 
 def _user(db, user_id: str = "market-user", email: str | None = None):
@@ -77,7 +117,7 @@ def _publish(client, kind: str, payload: dict):
     return client.post("/space/api/v2/market/resources", json={"kind": kind, "payload": payload})
 
 
-def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client, db):
+def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client, db, market_object_storage):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
 
@@ -93,9 +133,12 @@ def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client
     assert data["quota"] == {"daily_limit": 10, "published_today": 1, "remaining_today": 9}
 
     stored = db.query(SpaceMarketResource).one()
-    assert stored.content["blocks"][0]["entityId"] == "arm"
-    assert stored.content["useGravity"] is True
-    assert stored.content["bearingAxis"] == [0, 1, 0]
+    assert stored.content is None
+    assert stored.object_key.startswith(f"space-market/resources/{stored.id}/")
+    canonical = json.loads(market_object_storage["objects"][stored.object_key])
+    assert canonical["blocks"][0]["entityId"] == "arm"
+    assert canonical["useGravity"] is True
+    assert canonical["bearingAxis"] == [0, 1, 0]
 
 
 def test_market_digest_rejects_renamed_and_reordered_duplicate_content(client, db):
@@ -146,7 +189,7 @@ def test_market_validates_hierarchy_and_rejects_unknown_fields(client, db):
     assert db.query(SpaceMarketResource).count() == 0
 
 
-def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(client, db):
+def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(client, db, market_object_storage):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
     entity = _entity()
@@ -156,9 +199,10 @@ def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(clien
 
     assert response.status_code == 201, response.text
     stored = db.query(SpaceMarketResource).one()
-    assert stored.content["rootId"] == "root"
-    assert stored.content["nodeCount"] == 2
-    assert stored.content["childEntities"][0]["collisionEnabled"] is False
+    canonical = json.loads(market_object_storage["objects"][stored.object_key])
+    assert canonical["rootId"] == "root"
+    assert canonical["nodeCount"] == 2
+    assert canonical["childEntities"][0]["collisionEnabled"] is False
 
     non_root = _entity("Non-root")
     non_root["rootId"] = "arm"
@@ -179,7 +223,7 @@ def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(clien
     assert _publish(client, "entity", too_many_children).status_code == 422
 
 
-def test_market_canonicalizes_the_only_block_id_and_rejects_standard_micro_overlap(client, db):
+def test_market_canonicalizes_the_only_block_id_and_rejects_standard_micro_overlap(client, db, market_object_storage):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
     omitted = _blockset("Implicit block id")
@@ -187,7 +231,8 @@ def test_market_canonicalizes_the_only_block_id_and_rejects_standard_micro_overl
         block.pop("block")
     assert _publish(client, "blockset", omitted).status_code == 201
     stored = db.query(SpaceMarketResource).one()
-    assert all(block["block"] == 1 for block in stored.content["blocks"])
+    canonical = json.loads(market_object_storage["objects"][stored.object_key])
+    assert all(block["block"] == 1 for block in canonical["blocks"])
 
     explicit = _blockset("Explicit block id")
     duplicate = _publish(client, "blockset", explicit)
@@ -253,7 +298,41 @@ def test_market_publish_body_limit_counts_bytes_when_content_length_lies(client)
     assert response.json()["detail"]["code"] == "MARKET_RESOURCE_TOO_LARGE"
 
 
-def test_market_download_like_and_rankings(client, db):
+def test_market_does_not_create_a_row_when_cdn_upload_fails(client, db, monkeypatch):
+    user = _user(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    def fail_upload(*_args, **_kwargs):
+        raise RuntimeError("storage unavailable")
+
+    monkeypatch.setattr(space_market.s3_utils, "upload_to_s3", fail_upload)
+    response = _publish(client, "colorset", _colorset())
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "MARKET_STORAGE_UNAVAILABLE"
+    assert db.query(SpaceMarketResource).count() == 0
+
+
+def test_market_lazily_moves_legacy_database_content_to_cdn(client, db, market_object_storage):
+    user = _user(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+    resource = _publish(client, "blockset", _blockset()).json()["resource"]
+    stored = db.query(SpaceMarketResource).one()
+    canonical = json.loads(market_object_storage["objects"].pop(stored.object_key))
+    stored.object_key = None
+    stored.content = canonical
+    db.commit()
+
+    download = client.get(f"/space/api/v2/market/resources/{resource['id']}/download")
+
+    assert download.status_code == 200
+    db.refresh(stored)
+    assert stored.content is None
+    assert stored.object_key in market_object_storage["objects"]
+    assert download.json()["download_url"].endswith(stored.object_key)
+
+
+def test_market_download_like_and_rankings(client, db, market_object_storage):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
     first = _publish(client, "blockset", _blockset("Popular", 0x111111)).json()["resource"]
@@ -263,7 +342,9 @@ def test_market_download_like_and_rankings(client, db):
         download = client.get(f"/space/api/v2/market/resources/{first['id']}/download")
         assert download.status_code == 200
         assert download.json()["license"] == "AGPL-3.0-only"
-        assert download.json()["payload"]["type"] == "space-blockset"
+        assert download.json()["download_url"].startswith("https://cdn.example.test/space-market/resources/")
+        object_key = download.json()["download_url"].removeprefix("https://cdn.example.test/")
+        assert json.loads(market_object_storage["objects"][object_key])["type"] == "space-blockset"
     liked = client.post(f"/space/api/v2/market/resources/{second['id']}/like")
     assert liked.json() == {"is_liked": True, "likes_count": 1}
     assert db.query(SpaceMarketResourceLike).count() == 1
@@ -281,11 +362,14 @@ def test_market_download_like_and_rankings(client, db):
     assert unliked.json() == {"is_liked": False, "likes_count": 0}
 
 
-def test_only_admin_can_soft_delete_market_resource(client, db, monkeypatch):
+def test_only_admin_can_soft_delete_market_resource(client, db, monkeypatch, market_object_storage):
     user = _user(db, "ordinary")
     admin = _user(db, "market-admin", "market-admin@example.com")
     app.dependency_overrides[get_current_user] = lambda: user
     resource = _publish(client, "colorset", _colorset()).json()["resource"]
+    stored = db.query(SpaceMarketResource).one()
+    object_key = stored.object_key
+    assert object_key in market_object_storage["objects"]
 
     denied = client.delete(f"/space/api/v2/market/resources/{resource['id']}")
     assert denied.status_code == 403
@@ -295,13 +379,48 @@ def test_only_admin_can_soft_delete_market_resource(client, db, monkeypatch):
     deleted = client.delete(f"/space/api/v2/market/resources/{resource['id']}")
     assert deleted.status_code == 200
     assert deleted.json()["deleted"] is True
+    assert deleted.json()["cdn_object_deleted"] is True
+    assert deleted.json()["cdn_invalidation_requested"] is True
+    assert object_key not in market_object_storage["objects"]
+    assert market_object_storage["invalidations"] == [object_key]
     assert db.query(SpaceMarketResource).one().deleted_at is not None
     assert client.get(f"/space/api/v2/market/resources/{resource['id']}/download").status_code == 404
     assert client.get("/space/api/v2/market/resources").json()["total"] == 0
 
-    # Soft deletion hides content but does not erase its digest or today's quota usage.
+    # The row remains as an audit/tombstone while CDN content is gone. Its digest
+    # and today's quota usage remain reserved.
     app.dependency_overrides[get_current_user] = lambda: user
     duplicate = _publish(client, "colorset", _colorset("Renamed after deletion"))
     assert duplicate.status_code == 409
     market = client.get("/space/api/v2/market/resources").json()
     assert market["quota"] == {"daily_limit": 10, "published_today": 1, "remaining_today": 9}
+
+
+def test_admin_delete_keeps_market_row_active_when_cdn_cleanup_fails(
+    client,
+    db,
+    monkeypatch,
+    market_object_storage,
+):
+    user = _user(db, "publisher")
+    admin = _user(db, "cleanup-admin", "cleanup-admin@example.com")
+    app.dependency_overrides[get_current_user] = lambda: user
+    resource = _publish(client, "colorset", _colorset()).json()["resource"]
+    stored = db.query(SpaceMarketResource).one()
+    object_key = stored.object_key
+
+    monkeypatch.setattr(auth.settings, "ADMIN_EMAILS", admin.email)
+    app.dependency_overrides[get_current_user] = lambda: admin
+    monkeypatch.setattr(
+        space_market.s3_utils,
+        "invalidate_cdn_object",
+        lambda _key: (_ for _ in ()).throw(RuntimeError("invalidation denied")),
+    )
+
+    response = client.delete(f"/space/api/v2/market/resources/{resource['id']}")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "MARKET_STORAGE_UNAVAILABLE"
+    db.refresh(stored)
+    assert stored.deleted_at is None
+    assert object_key in market_object_storage["objects"]

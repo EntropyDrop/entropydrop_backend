@@ -192,6 +192,10 @@ class SpaceMarketResource(Base):
             "downloads_count >= 0 AND likes_count >= 0",
             name="ck_space_market_resource_counts",
         ),
+        CheckConstraint(
+            "object_key IS NOT NULL OR content IS NOT NULL",
+            name="ck_space_market_resource_storage",
+        ),
         Index(
             "ix_space_market_resources_downloads",
             "deleted_at", "kind", "downloads_count", "created_at",
@@ -221,7 +225,10 @@ class SpaceMarketResource(Base):
     name = Column(String(80), nullable=False)
     license = Column(String(32), nullable=False, default="AGPL-3.0-only", server_default="AGPL-3.0-only")
     content_digest = Column(LargeBinary(32), nullable=False)
-    content = Column(JSON, nullable=False)
+    object_key = Column(String(512), nullable=True)
+    # Nullable legacy fallback. New publications keep canonical content only in
+    # object storage; existing rows are moved lazily on their next download.
+    content = Column(JSON, nullable=True)
     preview = Column(JSON, nullable=False)
     size_bytes = Column(Integer, nullable=False)
     block_count = Column(Integer, nullable=False, default=0, server_default="0")

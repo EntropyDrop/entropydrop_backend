@@ -544,8 +544,16 @@ browser backpack entry --untrusted placement command--> authoritative world muta
   it does not create a server inventory record.
 - Clearing browser site data loses local slots. A player can download a published resource
   again, but the market is not cross-device synchronization, backup, or slot recovery.
-- Market rows retain publisher attribution, aggregate download/like counts, and one like
-  per authenticated user. Administrators soft-delete resources from public results.
+- Market rows retain publisher attribution, aggregate download/like counts, the immutable
+  object key, and one like per authenticated user. Canonical payloads are public S3 objects
+  served through the configured CDN; the download API records the download and returns the
+  CDN URL instead of proxying the payload through the application server.
+- Administrators retain a soft-deleted database tombstone for attribution, quota, and digest
+  deduplication, but deletion removes the S3 object and requests a CloudFront invalidation.
+  When a CDN domain is configured, `AWS_CLOUDFRONT_DISTRIBUTION_ID` is required so an
+  immutable cached copy cannot remain downloadable after a successful admin response. The
+  backend AWS identity therefore needs `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`,
+  and `cloudfront:CreateInvalidation` permissions for this flow.
 
 #### 9.4.1 Canonical publish contract
 
@@ -563,12 +571,18 @@ API rejects duplicate occupancy, standard/micro overlap in one cell, bounds abov
 references, hierarchy cycles, duplicate ids, non-finite physics values, oversized scripts,
 and resources above the block/component/constraint/byte budgets.
 
-Before storage, the API recomputes derived counts, normalizes colors and numbers, and sorts
+Before object storage, the API recomputes derived counts, normalizes colors and numbers, and sorts
 order-insensitive arrays. SHA-256 is computed over this canonical content without the
 display name or derived counts, so renaming or reordering cannot evade the global duplicate
 constraint. Deleted rows continue to reserve their digest. Every publication has the fixed
 SPDX license `AGPL-3.0-only`; each user may make at most ten successful publications per
 UTC day, including resources later deleted by an administrator.
+
+New publications upload canonical JSON to
+`space-market/resources/{resource_id}/{digest}.json` before the database row is committed.
+If the database write fails, the API removes the unreferenced object. Rows created before
+CDN storage retain their legacy JSON only until the first download, which uploads the
+canonical object and clears the database copy.
 
 ### 9.5 `build_assets`: Durable World Entity Definitions
 

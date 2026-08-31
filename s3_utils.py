@@ -1,3 +1,5 @@
+import uuid
+
 import boto3
 from botocore.exceptions import ClientError
 from config import settings
@@ -62,6 +64,42 @@ def delete_from_s3(key: str, is_public: bool):
         s3_client.delete_object(Bucket=bucket, Key=key)
     except ClientError as e:
         print(f"Error deleting {key} from S3: {e}")
+
+def delete_from_s3_strict(key: str, is_public: bool) -> None:
+    """Delete an object and let the caller handle storage errors."""
+    if not key:
+        return
+    bucket = settings.AWS_BUCKET_NAME if is_public else settings.AWS_PRIVATE_BUCKET_NAME
+    s3_client.delete_object(Bucket=bucket, Key=key)
+
+def invalidate_cdn_object(key: str) -> bool:
+    """Request immediate CloudFront invalidation for one public object.
+
+    A configured CDN domain without a distribution id is treated as a
+    configuration error. Silently deleting only the S3 origin could leave an
+    immutable cached market resource downloadable for up to a year.
+    """
+    if not key or not settings.AWS_CDN_DOMAIN.strip():
+        return False
+    distribution_id = settings.AWS_CLOUDFRONT_DISTRIBUTION_ID.strip()
+    if not distribution_id:
+        raise RuntimeError(
+            "AWS_CLOUDFRONT_DISTRIBUTION_ID is required when AWS_CDN_DOMAIN is configured"
+        )
+    cloudfront_client = boto3.client(
+        "cloudfront",
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION or None,
+    )
+    cloudfront_client.create_invalidation(
+        DistributionId=distribution_id,
+        InvalidationBatch={
+            "Paths": {"Quantity": 1, "Items": [f"/{key.lstrip('/')}"]},
+            "CallerReference": f"space-market-{uuid.uuid4()}",
+        },
+    )
+    return True
 
 def upload_to_s3(file_content: bytes, key: str, is_public: bool, content_type: str = "image/png") -> str:
     """
