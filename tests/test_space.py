@@ -77,7 +77,7 @@ def test_space_bootstrap_blocks_user_without_skin(client, db):
     assert response.status_code == 409
     assert response.json()["detail"] == {
         "code": "SKIN_REQUIRED",
-        "message": "进入 Space 前需要先设置角色皮肤。",
+        "message": "You must set a character skin before entering Space.",
         "action_url": "/skin/edit",
     }
     assert db.query(SpaceWorldPlayerProfile).count() == 0

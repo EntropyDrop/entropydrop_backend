@@ -151,7 +151,7 @@ def _decode_chunk_overlay(snapshot: models.SpaceChunkSnapshot | None) -> dict:
     except (ValueError, zstd.ZstdError) as exc:
         raise HTTPException(
             status_code=500,
-            detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "世界区块快照校验失败。"},
+            detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "World chunk snapshot checksum verification failed."},
         ) from exc
     if (
         snapshot.uncompressed_size != len(encoded)
@@ -159,14 +159,14 @@ def _decode_chunk_overlay(snapshot: models.SpaceChunkSnapshot | None) -> dict:
     ):
         raise HTTPException(
             status_code=500,
-            detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "世界区块快照校验失败。"},
+            detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "World chunk snapshot checksum verification failed."},
         )
     try:
         payload = json.loads(encoded.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=500,
-            detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "世界区块快照损坏。"},
+            detail={"code": "CORRUPT_CHUNK_SNAPSHOT", "message": "World chunk snapshot corrupted."},
         ) from exc
     return {
         "standard": payload.get("standard", []) if isinstance(payload.get("standard"), list) else [],
@@ -184,7 +184,7 @@ def _encode_chunk_overlay(payload: dict) -> tuple[bytes, bytes, int, int]:
     if len(encoded) > MAX_CHUNK_SNAPSHOT_BYTES:
         raise HTTPException(
             status_code=413,
-            detail={"code": "CHUNK_OVERLAY_TOO_LARGE", "message": "单个区块的方块修改数据过大。"},
+            detail={"code": "CHUNK_OVERLAY_TOO_LARGE", "message": "Chunk block modifications exceed size limit."},
         )
     compressed = zstd.ZstdCompressor(level=6).compress(encoded)
     if len(compressed) < len(encoded):
@@ -346,7 +346,7 @@ def _terrain_batch_client_created_at(
     if created_at < now - datetime.timedelta(days=retention_days):
         raise HTTPException(
             status_code=409,
-            detail={"code": "TERRAIN_BATCH_EXPIRED", "message": "地形编辑批次已超过安全重试期限。"},
+            detail={"code": "TERRAIN_BATCH_EXPIRED", "message": "Terrain batch edit has expired safe retry window."},
         )
     if created_at > now + datetime.timedelta(seconds=TERRAIN_BATCH_MAX_FUTURE_SKEW_SECONDS):
         raise HTTPException(status_code=422, detail={"code": "INVALID_TERRAIN_BATCH_TIMESTAMP"})
@@ -551,7 +551,7 @@ def bootstrap_space(
             status_code=409,
             detail={
                 "code": "SKIN_REQUIRED",
-                "message": "进入 Space 前需要先设置角色皮肤。",
+                "message": "You must set a character skin before entering Space.",
                 "action_url": "/skin/edit",
             },
         )
@@ -1084,7 +1084,7 @@ def apply_terrain_mutation_batch(
             return _terrain_receipt_response(world.id, batch_id, duplicate.result)
         raise HTTPException(
             status_code=409,
-            detail={"code": "TERRAIN_BATCH_RETRY", "message": "世界正在更新，请重试同一批次。"},
+            detail={"code": "TERRAIN_BATCH_RETRY", "message": "World state is updating, please retry the batch."},
         ) from exc
     # Wake connected clients immediately; the durable REST cursor remains the
     # source of truth and transports the potentially large chunk payload.
