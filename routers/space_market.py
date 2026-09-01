@@ -1,6 +1,4 @@
 import datetime
-import hashlib
-import json
 import logging
 import math
 import re
@@ -27,6 +25,13 @@ import models
 import s3_utils
 from database import get_db
 from rate_limit import limiter
+from space.inventory_codec import (
+    SCHEMA_VERSION as INVENTORY_SCHEMA_VERSION,
+    InventoryCodecError,
+    decode_inventory_resource,
+    encode_inventory_resource,
+    inventory_content_digest,
+)
 
 
 router = APIRouter(prefix="/space/api/v2/market", tags=["space-market"])
@@ -42,7 +47,6 @@ SPACE_MARKET_MAX_SCRIPT_BYTES = 64 * 1024
 SPACE_MARKET_MAX_TOTAL_SCRIPT_BYTES = 512 * 1024
 SPACE_MARKET_MAX_BOUNDS = 64
 SPACE_MARKET_MAX_COORDINATE = SPACE_MARKET_MAX_BOUNDS * 2
-SPACE_MARKET_PREVIEW_BLOCKS = 64
 SPACE_MARKET_RATE_LIMIT = "120/minute; 2000/hour"
 SPACE_MARKET_OBJECT_PREFIX = "space-market/resources"
 COMPONENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -105,7 +109,7 @@ class MarketVoxel(StrictResourceModel):
 
 class BlockSetPayload(StrictResourceModel):
     type: Literal["space-blockset"]
-    version: Literal[2]
+    version: Literal[3]
     name: StrictStr = Field(min_length=1, max_length=80)
     blockCount: StrictInt | None = Field(default=None, ge=1, le=SPACE_MARKET_MAX_BLOCKS)
     blocks: list[MarketVoxel] = Field(min_length=1, max_length=SPACE_MARKET_MAX_BLOCKS)
@@ -204,7 +208,7 @@ class EntityConstraint(StrictResourceModel):
 
 class EntityPayload(StrictResourceModel):
     type: Literal["space-entity"]
-    version: Literal[2]
+    version: Literal[3]
     name: StrictStr = Field(min_length=1, max_length=80)
     rootId: Literal["root"] = "root"
     nodeCount: StrictInt | None = Field(default=None, ge=1, le=SPACE_MARKET_MAX_COMPONENTS)
@@ -309,7 +313,7 @@ class EntityPayload(StrictResourceModel):
 
 class ColorSetPayload(StrictResourceModel):
     type: Literal["space-colorset"]
-    version: Literal[2]
+    version: Literal[3]
     name: StrictStr = Field(min_length=1, max_length=80)
     colors: list[StrictStr] = Field(min_length=9, max_length=9)
 
@@ -323,11 +327,6 @@ class ColorSetPayload(StrictResourceModel):
             raise ValueError("colors must be six-digit #rrggbb values")
         self.colors = normalized
         return self
-
-
-class SpaceMarketPublishRequest(StrictResourceModel):
-    kind: Literal["blockset", "entity", "colorset"]
-    payload: dict[str, Any]
 
 
 def _voxel_sort_key(block: MarketVoxel) -> tuple[int, int, int, int, int, int, int, str]:
@@ -381,23 +380,18 @@ def validate_market_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any
         raise ValueError("unsupported resource kind")
     model = model_type.model_validate(payload)
     canonical = model.model_dump(exclude_none=True)
-    encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    encoded = encode_inventory_resource(kind, canonical)
     if len(encoded) > SPACE_MARKET_MAX_RESOURCE_BYTES:
         raise ValueError("canonical resource exceeds 8 MiB")
     return canonical
 
 
-def market_content_digest(canonical: dict[str, Any]) -> bytes:
-    digest_payload = dict(canonical)
-    digest_payload.pop("name", None)
-    digest_payload.pop("blockCount", None)
-    digest_payload.pop("nodeCount", None)
-    encoded = json.dumps(digest_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return hashlib.sha256(encoded).digest()
+def market_content_digest(kind: str, canonical: dict[str, Any]) -> bytes:
+    return inventory_content_digest(kind, canonical)
 
 
 def _market_object_key(resource_id: str, digest: bytes) -> str:
-    return f"{SPACE_MARKET_OBJECT_PREFIX}/{resource_id}/{digest.hex()}.json"
+    return f"{SPACE_MARKET_OBJECT_PREFIX}/{resource_id}/{digest.hex()}.pb"
 
 
 def _upload_market_object(encoded: bytes, object_key: str) -> None:
@@ -405,7 +399,7 @@ def _upload_market_object(encoded: bytes, object_key: str) -> None:
         encoded,
         object_key,
         is_public=True,
-        content_type="application/json; charset=utf-8",
+        content_type="application/x-protobuf",
     )
 
 
@@ -442,22 +436,6 @@ def _cleanup_unreferenced_market_object(db: Session, object_key: str) -> None:
         logger.exception("Could not remove unreferenced market object %s", object_key)
 
 
-def _market_preview(kind: str, canonical: dict[str, Any]) -> dict[str, Any]:
-    if kind == "colorset":
-        return {"colors": canonical["colors"]}
-    blocks = []
-    for block in canonical.get("blocks", [])[:SPACE_MARKET_PREVIEW_BLOCKS]:
-        micro = block.get("mx") is not None
-        blocks.append({
-            "x": block["dx"] + (block.get("mx", 0) / 5 if micro else 0),
-            "y": block["dy"] + (block.get("my", 0) / 5 if micro else 0),
-            "z": block["dz"] + (block.get("mz", 0) / 5 if micro else 0),
-            "size": 0.2 if micro else 1,
-            "color": block["color"],
-        })
-    return {"blocks": blocks}
-
-
 def _utc_day_bounds(now: datetime.datetime | None = None) -> tuple[datetime.datetime, datetime.datetime]:
     current = now or datetime.datetime.now(datetime.timezone.utc)
     start = current.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -490,6 +468,7 @@ def _resource_response(resource: models.SpaceMarketResource, publisher: models.U
         "name": resource.name,
         "license": resource.license,
         "digest": bytes(resource.content_digest).hex(),
+        "content_url": s3_utils.get_cdn_url(resource.object_key),
         "publisher": {"id": resource.publisher_user_id, "username": publisher.username if publisher else None},
         "size_bytes": resource.size_bytes,
         "block_count": resource.block_count,
@@ -498,7 +477,6 @@ def _resource_response(resource: models.SpaceMarketResource, publisher: models.U
         "downloads_count": resource.downloads_count,
         "likes_count": resource.likes_count,
         "is_liked": is_liked,
-        "preview": resource.preview,
         "created_at": resource.created_at.isoformat(),
     }
 
@@ -548,7 +526,7 @@ def list_market_resources(
         models.SpaceMarketResource.name,
         models.SpaceMarketResource.license,
         models.SpaceMarketResource.content_digest,
-        models.SpaceMarketResource.preview,
+        models.SpaceMarketResource.object_key,
         models.SpaceMarketResource.size_bytes,
         models.SpaceMarketResource.block_count,
         models.SpaceMarketResource.node_count,
@@ -581,19 +559,31 @@ def list_market_resources(
 
 @router.post("/resources", status_code=201)
 @limiter.limit(SPACE_MARKET_RATE_LIMIT)
-def publish_market_resource(
+async def publish_market_resource(
     request: Request,
-    publish_request: SpaceMarketPublishRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
+    content_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+    if content_type != "application/x-protobuf":
+        raise HTTPException(status_code=415, detail={
+            "code": "MARKET_PROTOBUF_REQUIRED",
+            "message": "Market resources must be uploaded as application/x-protobuf.",
+        })
+    encoded_request = await request.body()
+    if not encoded_request or len(encoded_request) > SPACE_MARKET_MAX_RESOURCE_BYTES:
+        raise HTTPException(status_code=413, detail={
+            "code": "MARKET_RESOURCE_TOO_LARGE",
+            "message": "Market resource must be a non-empty Protobuf message no larger than 8 MiB.",
+        })
     try:
-        canonical = validate_market_payload(publish_request.kind, publish_request.payload)
-    except (ValidationError, ValueError) as error:
+        kind, decoded = decode_inventory_resource(encoded_request)
+        canonical = validate_market_payload(kind, decoded)
+    except (InventoryCodecError, ValidationError, ValueError) as error:
         raise _validation_error_response(error) from error
 
-    encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    digest = market_content_digest(canonical)
+    encoded = encode_inventory_resource(kind, canonical)
+    digest = market_content_digest(kind, canonical)
     db.query(models.User).filter(models.User.id == current_user.id).with_for_update().first()
     existing = db.query(models.SpaceMarketResource).filter(models.SpaceMarketResource.content_digest == digest).first()
     if existing:
@@ -620,14 +610,12 @@ def publish_market_resource(
     resource = models.SpaceMarketResource(
         id=resource_id,
         publisher_user_id=current_user.id,
-        kind=publish_request.kind,
-        schema_version=2,
+        kind=kind,
+        schema_version=INVENTORY_SCHEMA_VERSION,
         name=canonical["name"],
         license=SPACE_MARKET_LICENSE,
         content_digest=digest,
         object_key=object_key,
-        content=None,
-        preview=_market_preview(publish_request.kind, canonical),
         size_bytes=len(encoded),
         block_count=len(canonical.get("blocks", [])),
         node_count=int(canonical.get("nodeCount", 0)),
@@ -672,24 +660,8 @@ def download_market_resource(
     if resource is None:
         raise HTTPException(status_code=404, detail={"code": "MARKET_RESOURCE_NOT_FOUND"})
 
-    uploaded_object_key = None
     if not resource.object_key:
-        if resource.content is None:
-            raise _market_storage_error("load")
-        encoded = json.dumps(
-            resource.content,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        uploaded_object_key = _market_object_key(resource.id, bytes(resource.content_digest))
-        try:
-            _upload_market_object(encoded, uploaded_object_key)
-        except Exception as error:
-            logger.exception("Could not migrate legacy market resource %s", resource.id)
-            raise _market_storage_error("store") from error
-        resource.object_key = uploaded_object_key
-        resource.content = None
+        raise _market_storage_error("load")
 
     db.query(models.SpaceMarketResource).filter(models.SpaceMarketResource.id == resource.id).update({
         models.SpaceMarketResource.downloads_count: models.SpaceMarketResource.downloads_count + 1,
@@ -698,8 +670,6 @@ def download_market_resource(
         db.commit()
     except Exception:
         db.rollback()
-        if uploaded_object_key:
-            _cleanup_unreferenced_market_object(db, uploaded_object_key)
         raise
     db.refresh(resource)
     return {

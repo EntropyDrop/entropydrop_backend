@@ -1,0 +1,154 @@
+syntax = "proto3";
+
+package entropydrop.space.inventory.v3;
+
+// Canonical binary contract for browser backpacks, portable files, market
+// uploads, and immutable CDN objects. Derived counts and the constant block id
+// are intentionally omitted.
+message InventoryResource {
+  uint32 schema_version = 1;
+
+  oneof content {
+    BlockSet block_set = 10;
+    Entity entity = 11;
+    ColorSet color_set = 12;
+  }
+}
+
+message Voxel {
+  sint32 dx = 1;
+  sint32 dy = 2;
+  sint32 dz = 3;
+  // Present only for micro voxels. Value = 1 + mx + 5*my + 25*mz.
+  optional uint32 micro_index = 4;
+  fixed32 color = 5;
+  optional string part = 6;
+  // Entity root is 0; children use their one-based position in Entity.components.
+  uint32 component_index = 7;
+}
+
+message BlockSet {
+  string name = 1;
+  repeated Voxel blocks = 2;
+}
+
+message ColorSet {
+  string name = 1;
+  repeated fixed32 colors = 2 [packed = true];
+}
+
+message Vector3 {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}
+
+enum BodyType {
+  BODY_TYPE_DYNAMIC = 0;
+  BODY_TYPE_KINEMATIC = 1;
+}
+
+enum EntityMode {
+  ENTITY_MODE_FREE_PHYSICS = 0;
+  ENTITY_MODE_BEARING = 1;
+  ENTITY_MODE_PISTON = 2;
+  ENTITY_MODE_DRIVABLE = 3;
+  ENTITY_MODE_PROJECTILE = 4;
+  ENTITY_MODE_PROGRAMMABLE = 5;
+}
+
+message Component {
+  string id = 1;
+  uint32 parent_index = 2;
+  optional bool collision_enabled = 3;
+  optional Vector3 pivot = 4;
+  optional BodyType body_type = 5;
+  optional double mass = 6;
+  optional double restitution = 7;
+  optional double friction = 8;
+}
+
+message EntityScript {
+  uint32 component_index = 1;
+  string code = 2;
+}
+
+message EntityEnabled {
+  uint32 component_index = 1;
+  bool enabled = 2;
+}
+
+enum ConstraintType {
+  CONSTRAINT_TYPE_POINT = 0;
+  CONSTRAINT_TYPE_HINGE = 1;
+  CONSTRAINT_TYPE_WELD = 2;
+}
+
+message ConstraintLimits {
+  double min = 1;
+  double max = 2;
+}
+
+message EntityConstraint {
+  string id = 1;
+  ConstraintType type = 2;
+  bool body_a_is_world = 3;
+  uint32 body_a_component_index = 4;
+  uint32 body_b_component_index = 5;
+  optional Vector3 anchor_a = 6;
+  optional Vector3 anchor_b = 7;
+  optional Vector3 axis_a = 8;
+  optional Vector3 axis_b = 9;
+  optional Vector3 reference_a = 10;
+  optional Vector3 reference_b = 11;
+  optional ConstraintLimits limits = 12;
+  double stiffness = 13;
+  bool collide_connected = 14;
+}
+
+message Entity {
+  string name = 1;
+  repeated Component components = 2;
+  repeated Voxel blocks = 3;
+  repeated EntityScript scripts = 4;
+  repeated EntityEnabled enabled = 5;
+  repeated EntityConstraint constraints = 6;
+  EntityMode mode = 7;
+  BodyType body_type = 8;
+  optional double mass = 9;
+  optional double restitution = 10;
+  optional double friction = 11;
+  optional bool use_gravity = 12;
+  optional Vector3 bearing_axis = 13;
+  optional double bearing_rpm = 14;
+  optional Vector3 piston_axis = 15;
+  optional double piston_distance = 16;
+  optional double piston_speed = 17;
+  optional Vector3 cockpit_position = 18;
+  optional bool is_vehicle = 19;
+}
+
+enum InventoryCategory {
+  INVENTORY_CATEGORY_BLOCK_SET = 0;
+  INVENTORY_CATEGORY_ENTITY = 1;
+  INVENTORY_CATEGORY_COLOR_SET = 2;
+}
+
+message InventorySlot {
+  uint32 index = 1;
+  InventoryResource resource = 2;
+}
+
+message InventoryGroup {
+  uint32 selected = 1;
+  repeated InventorySlot slots = 2;
+}
+
+message Backpack {
+  uint32 schema_version = 1;
+  InventoryCategory active_category = 2;
+  InventoryGroup block_sets = 3;
+  InventoryGroup entities = 4;
+  InventoryGroup color_sets = 5;
+}
+

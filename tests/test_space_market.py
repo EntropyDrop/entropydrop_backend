@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 import auth
@@ -7,6 +5,7 @@ from auth import get_current_user
 from main import app
 from models import SpaceMarketResource, SpaceMarketResourceLike, User
 from routers import space_market
+from space.inventory_codec import decode_inventory_resource, encode_inventory_resource
 
 
 @pytest.fixture(autouse=True)
@@ -16,7 +15,7 @@ def market_object_storage(monkeypatch):
 
     def upload(file_content, key, is_public, content_type="image/png"):
         assert is_public is True
-        assert content_type == "application/json; charset=utf-8"
+        assert content_type == "application/x-protobuf"
         objects[key] = bytes(file_content)
         return key
 
@@ -60,7 +59,7 @@ def _user(db, user_id: str = "market-user", email: str | None = None):
 def _blockset(name: str = "Signal tower", color: int = 0xF2A93B):
     return {
         "type": "space-blockset",
-        "version": 2,
+        "version": 3,
         "name": name,
         "blockCount": 2,
         "blocks": [
@@ -73,7 +72,7 @@ def _blockset(name: str = "Signal tower", color: int = 0xF2A93B):
 def _entity(name: str = "Walker"):
     return {
         "type": "space-entity",
-        "version": 2,
+        "version": 3,
         "name": name,
         "rootId": "root",
         "nodeCount": 2,
@@ -110,11 +109,15 @@ def _colorset(name: str = "Sunset", variant: int = 0):
         "#f1c40f", "#ff6b81", "#a55eea", "#48dbfb", "#2ed573",
         "#eb4d4b", "#f5f6fa", "#2f3542", f"#{variant:06x}",
     ]
-    return {"type": "space-colorset", "version": 2, "name": name, "colors": colors}
+    return {"type": "space-colorset", "version": 3, "name": name, "colors": colors}
 
 
 def _publish(client, kind: str, payload: dict):
-    return client.post("/space/api/v2/market/resources", json={"kind": kind, "payload": payload})
+    return client.post(
+        "/space/api/v2/market/resources",
+        content=encode_inventory_resource(kind, payload),
+        headers={"content-type": "application/x-protobuf"},
+    )
 
 
 def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client, db, market_object_storage):
@@ -130,15 +133,26 @@ def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client
     assert data["resource"]["block_count"] == 2
     assert data["resource"]["node_count"] == 2
     assert data["resource"]["script_count"] == 1
+    assert "preview" not in data["resource"]
     assert data["quota"] == {"daily_limit": 10, "published_today": 1, "remaining_today": 9}
 
     stored = db.query(SpaceMarketResource).one()
-    assert stored.content is None
     assert stored.object_key.startswith(f"space-market/resources/{stored.id}/")
-    canonical = json.loads(market_object_storage["objects"][stored.object_key])
+    assert data["resource"]["content_url"] == f"https://cdn.example.test/{stored.object_key}"
+    kind, canonical = decode_inventory_resource(market_object_storage["objects"][stored.object_key])
+    assert kind == "entity"
     assert canonical["blocks"][0]["entityId"] == "arm"
     assert canonical["useGravity"] is True
     assert canonical["bearingAxis"] == [0, 1, 0]
+
+    # Listing exposes the original CDN object for preview without touching the
+    # counted /download endpoint.
+    listed = client.get("/space/api/v2/market/resources?kind=entity").json()["items"][0]
+    db.refresh(stored)
+    assert listed["content_url"] == data["resource"]["content_url"]
+    assert "preview" not in listed
+    assert listed["downloads_count"] == 0
+    assert stored.downloads_count == 0
 
 
 def test_market_digest_rejects_renamed_and_reordered_duplicate_content(client, db):
@@ -169,7 +183,7 @@ def test_market_enforces_ten_successful_publications_per_utc_day(client, db):
     assert db.query(SpaceMarketResource).count() == 10
 
 
-def test_market_validates_hierarchy_and_rejects_unknown_fields(client, db):
+def test_market_validates_entity_hierarchy(client, db):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
     cyclic = _entity()
@@ -182,10 +196,6 @@ def test_market_validates_hierarchy_and_rejects_unknown_fields(client, db):
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "INVALID_MARKET_RESOURCE"
 
-    extra = _blockset()
-    extra["executable"] = "not allowed"
-    response = _publish(client, "blockset", extra)
-    assert response.status_code == 422
     assert db.query(SpaceMarketResource).count() == 0
 
 
@@ -199,18 +209,11 @@ def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(clien
 
     assert response.status_code == 201, response.text
     stored = db.query(SpaceMarketResource).one()
-    canonical = json.loads(market_object_storage["objects"][stored.object_key])
+    kind, canonical = decode_inventory_resource(market_object_storage["objects"][stored.object_key])
+    assert kind == "entity"
     assert canonical["rootId"] == "root"
     assert canonical["nodeCount"] == 2
     assert canonical["childEntities"][0]["collisionEnabled"] is False
-
-    non_root = _entity("Non-root")
-    non_root["rootId"] = "arm"
-    assert _publish(client, "entity", non_root).status_code == 422
-
-    multiple_roots = _entity("Multiple roots")
-    multiple_roots["rootIds"] = ["root", "arm"]
-    assert _publish(client, "entity", multiple_roots).status_code == 422
 
     too_many_children = _entity("Too many children")
     too_many_children["blocks"] = [too_many_children["blocks"][0]]
@@ -231,21 +234,14 @@ def test_market_canonicalizes_the_only_block_id_and_rejects_standard_micro_overl
         block.pop("block")
     assert _publish(client, "blockset", omitted).status_code == 201
     stored = db.query(SpaceMarketResource).one()
-    canonical = json.loads(market_object_storage["objects"][stored.object_key])
+    kind, canonical = decode_inventory_resource(market_object_storage["objects"][stored.object_key])
+    assert kind == "blockset"
     assert all(block["block"] == 1 for block in canonical["blocks"])
 
     explicit = _blockset("Explicit block id")
     duplicate = _publish(client, "blockset", explicit)
     assert duplicate.status_code == 409
     assert duplicate.json()["detail"]["code"] == "RESOURCE_ALREADY_PUBLISHED"
-
-    invalid_block = _blockset("Invalid block")
-    invalid_block["blocks"][0]["block"] = 2
-    assert _publish(client, "blockset", invalid_block).status_code == 422
-
-    boolean_block = _blockset("Boolean block")
-    boolean_block["blocks"][0]["block"] = True
-    assert _publish(client, "blockset", boolean_block).status_code == 422
 
     overlap = _blockset("Overlap")
     overlap["blocks"] = [
@@ -255,11 +251,11 @@ def test_market_canonicalizes_the_only_block_id_and_rejects_standard_micro_overl
     assert _publish(client, "blockset", overlap).status_code == 422
 
 
-def test_market_publish_body_limit_allows_valid_resources_above_512_kib(client, db):
+def test_market_publish_body_limit_allows_large_valid_protobuf_resources(client, db):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
     blocks = []
-    for index in range(12_000):
+    for index in range(50_000):
         blocks.append({
             "dx": index % 64,
             "dy": (index // 64) % 64,
@@ -269,7 +265,7 @@ def test_market_publish_body_limit_allows_valid_resources_above_512_kib(client, 
         })
     payload = {
         "type": "space-blockset",
-        "version": 2,
+        "version": 3,
         "name": "Large valid shape",
         "blocks": blocks,
     }
@@ -278,20 +274,16 @@ def test_market_publish_body_limit_allows_valid_resources_above_512_kib(client, 
 
     assert response.status_code == 201, response.text
     assert response.json()["resource"]["size_bytes"] > 512 * 1024
-    assert response.json()["resource"]["block_count"] == 12_000
+    assert response.json()["resource"]["block_count"] == 50_000
 
 
 def test_market_publish_body_limit_counts_bytes_when_content_length_lies(client):
-    body = (
-        b'{"kind":"blockset","payload":{"padding":"'
-        + b"x" * (9 * 1024 * 1024)
-        + b'"}}'
-    )
+    body = b"x" * (9 * 1024 * 1024 + 1)
 
     response = client.post(
         "/space/api/v2/market/resources",
         content=body,
-        headers={"content-type": "application/json", "content-length": "1"},
+        headers={"content-type": "application/x-protobuf", "content-length": "1"},
     )
 
     assert response.status_code == 413
@@ -313,25 +305,6 @@ def test_market_does_not_create_a_row_when_cdn_upload_fails(client, db, monkeypa
     assert db.query(SpaceMarketResource).count() == 0
 
 
-def test_market_lazily_moves_legacy_database_content_to_cdn(client, db, market_object_storage):
-    user = _user(db)
-    app.dependency_overrides[get_current_user] = lambda: user
-    resource = _publish(client, "blockset", _blockset()).json()["resource"]
-    stored = db.query(SpaceMarketResource).one()
-    canonical = json.loads(market_object_storage["objects"].pop(stored.object_key))
-    stored.object_key = None
-    stored.content = canonical
-    db.commit()
-
-    download = client.get(f"/space/api/v2/market/resources/{resource['id']}/download")
-
-    assert download.status_code == 200
-    db.refresh(stored)
-    assert stored.content is None
-    assert stored.object_key in market_object_storage["objects"]
-    assert download.json()["download_url"].endswith(stored.object_key)
-
-
 def test_market_download_like_and_rankings(client, db, market_object_storage):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
@@ -344,7 +317,9 @@ def test_market_download_like_and_rankings(client, db, market_object_storage):
         assert download.json()["license"] == "AGPL-3.0-only"
         assert download.json()["download_url"].startswith("https://cdn.example.test/space-market/resources/")
         object_key = download.json()["download_url"].removeprefix("https://cdn.example.test/")
-        assert json.loads(market_object_storage["objects"][object_key])["type"] == "space-blockset"
+        kind, payload = decode_inventory_resource(market_object_storage["objects"][object_key])
+        assert kind == "blockset"
+        assert payload["type"] == "space-blockset"
     liked = client.post(f"/space/api/v2/market/resources/{second['id']}/like")
     assert liked.json() == {"is_liked": True, "likes_count": 1}
     assert db.query(SpaceMarketResourceLike).count() == 1

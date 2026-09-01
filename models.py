@@ -217,14 +217,17 @@ class SpaceMarketResource(Base):
             "kind IN ('blockset', 'entity', 'colorset')",
             name="ck_space_market_resource_kind",
         ),
-        CheckConstraint("schema_version = 2", name="ck_space_market_resource_schema_version"),
+        CheckConstraint(
+            "deleted_at IS NOT NULL OR schema_version = 3",
+            name="ck_space_market_resource_schema_version",
+        ),
         CheckConstraint("license = 'AGPL-3.0-only'", name="ck_space_market_resource_license"),
         CheckConstraint(
             "downloads_count >= 0 AND likes_count >= 0",
             name="ck_space_market_resource_counts",
         ),
         CheckConstraint(
-            "object_key IS NOT NULL OR content IS NOT NULL",
+            "deleted_at IS NOT NULL OR object_key IS NOT NULL",
             name="ck_space_market_resource_storage",
         ),
         Index(
@@ -252,15 +255,11 @@ class SpaceMarketResource(Base):
         nullable=True,
     )
     kind = Column(String(16), nullable=False)
-    schema_version = Column(SmallInteger, nullable=False, default=2, server_default="2")
+    schema_version = Column(SmallInteger, nullable=False, default=3, server_default="3")
     name = Column(String(80), nullable=False)
     license = Column(String(32), nullable=False, default="AGPL-3.0-only", server_default="AGPL-3.0-only")
     content_digest = Column(LargeBinary(32), nullable=False)
     object_key = Column(String(512), nullable=True)
-    # Nullable legacy fallback. New publications keep canonical content only in
-    # object storage; existing rows are moved lazily on their next download.
-    content = Column(JSON, nullable=True)
-    preview = Column(JSON, nullable=False)
     size_bytes = Column(Integer, nullable=False)
     block_count = Column(Integer, nullable=False, default=0, server_default="0")
     node_count = Column(Integer, nullable=False, default=0, server_default="0")
