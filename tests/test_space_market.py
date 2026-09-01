@@ -61,7 +61,6 @@ def _blockset(name: str = "Signal tower", color: int = 0xF2A93B):
         "type": "space-blockset",
         "version": 3,
         "name": name,
-        "blockCount": 2,
         "blocks": [
             {"dx": 1, "dy": 0, "dz": 0, "block": 1, "color": color},
             {"dx": 0, "dy": 0, "dz": 0, "mx": 1, "my": 2, "mz": 3, "block": 1, "color": 0x48DBFB},
@@ -74,33 +73,26 @@ def _entity(name: str = "Walker"):
         "type": "space-entity",
         "version": 3,
         "name": name,
-        "rootId": "root",
-        "nodeCount": 2,
-        "blockCount": 2,
-        "blocks": [
-            {"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 0xF2A93B, "entityId": "root"},
-            {"dx": 1, "dy": 0, "dz": 0, "block": 1, "color": 0x48DBFB, "entityId": "arm"},
-        ],
-        "childEntities": [{
-            "id": "arm",
-            "parentId": "root",
-            "kind": "child",
-            "pivot": [1.5, 0.5, 0.5],
-            "bodyType": "kinematic",
-        }],
-        "scripts": [{"id": "arm", "code": "self.setLocalSpin([0,1,0], 8);"}],
-        "enabled": [{"id": "arm", "enabled": True}],
+        "root": {
+            "id": "root",
+            "body": {"type": "dynamic", "useGravity": True},
+            "blocks": [
+                {"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 0xF2A93B},
+            ],
+            "seats": [{"position": [0, 1, 0]}],
+            "children": [{
+                "id": "arm",
+                "pivot": [1.5, 0.5, 0.5],
+                "body": {"type": "kinematic"},
+                "blocks": [
+                    {"dx": 1, "dy": 0, "dz": 0, "block": 1, "color": 0x48DBFB},
+                ],
+                "script": "self.setLocalSpin([0,1,0], 8);",
+                "seats": [{"position": [0, 0, 0]}, {"position": [1, 0, 0]}],
+                "children": [],
+            }],
+        },
         "constraints": [],
-        "mode": "programmable",
-        "bodyType": "dynamic",
-        "useGravity": True,
-        "bearingAxis": [0, 1, 0],
-        "bearingRpm": 16,
-        "pistonAxis": [0, 1, 0],
-        "pistonDistance": 4,
-        "pistonSpeed": 2,
-        "cockpitPosition": [0, 1, 0],
-        "isVehicle": True,
     }
 
 
@@ -141,9 +133,9 @@ def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client
     assert data["resource"]["content_url"] == f"https://cdn.example.test/{stored.object_key}"
     kind, canonical = decode_inventory_resource(market_object_storage["objects"][stored.object_key])
     assert kind == "entity"
-    assert canonical["blocks"][0]["entityId"] == "arm"
-    assert canonical["useGravity"] is True
-    assert canonical["bearingAxis"] == [0, 1, 0]
+    assert canonical["root"]["children"][0]["id"] == "arm"
+    assert canonical["root"]["body"]["useGravity"] is True
+    assert len(canonical["root"]["children"][0]["seats"]) == 2
 
     # Listing exposes the original CDN object for preview without touching the
     # counted /download endpoint.
@@ -186,13 +178,15 @@ def test_market_enforces_ten_successful_publications_per_utc_day(client, db):
 def test_market_validates_entity_hierarchy(client, db):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
-    cyclic = _entity()
-    cyclic["childEntities"] = [
-        {"id": "arm", "parentId": "hand"},
-        {"id": "hand", "parentId": "arm"},
-    ]
-    cyclic["blocks"][1]["entityId"] = "hand"
-    response = _publish(client, "entity", cyclic)
+    duplicate = _entity()
+    duplicate["root"]["children"].append({
+        "id": "arm",
+        "body": {"type": "kinematic"},
+        "blocks": [],
+        "seats": [],
+        "children": [],
+    })
+    response = _publish(client, "entity", duplicate)
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "INVALID_MARKET_RESOURCE"
 
@@ -203,7 +197,7 @@ def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(clien
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
     entity = _entity()
-    entity["childEntities"][0]["collisionEnabled"] = False
+    entity["root"]["children"][0]["body"]["collisionEnabled"] = False
 
     response = _publish(client, "entity", entity)
 
@@ -211,18 +205,20 @@ def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(clien
     stored = db.query(SpaceMarketResource).one()
     kind, canonical = decode_inventory_resource(market_object_storage["objects"][stored.object_key])
     assert kind == "entity"
-    assert canonical["rootId"] == "root"
-    assert canonical["nodeCount"] == 2
-    assert canonical["childEntities"][0]["collisionEnabled"] is False
+    assert canonical["root"]["id"] == "root"
+    assert canonical["root"]["children"][0]["body"]["collisionEnabled"] is False
 
     too_many_children = _entity("Too many children")
-    too_many_children["blocks"] = [too_many_children["blocks"][0]]
-    too_many_children["childEntities"] = [
-        {"id": f"node_{index}", "parentId": "root"}
+    too_many_children["root"]["children"] = [
+        {
+            "id": f"node_{index}",
+            "body": {"type": "kinematic"},
+            "blocks": [],
+            "seats": [],
+            "children": [],
+        }
         for index in range(64)
     ]
-    too_many_children["scripts"] = []
-    too_many_children["enabled"] = []
     assert _publish(client, "entity", too_many_children).status_code == 422
 
 

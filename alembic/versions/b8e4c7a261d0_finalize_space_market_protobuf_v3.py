@@ -3,9 +3,8 @@
 Revision ID: b8e4c7a261d0
 Revises: a6b3d9f142ce
 
-Existing installations must run ``tools/convert_space_market_to_protobuf.py``
-between the prepare and finalize revisions. Fresh databases can upgrade through
-both revisions normally because they contain no legacy market rows.
+Fresh databases upgrade through this revision normally because they contain no
+legacy market rows. Pre-launch environments with v2 data must be reset.
 """
 
 from typing import Sequence, Union
@@ -31,8 +30,8 @@ def upgrade() -> None:
         """)).scalar_one()
         if remaining:
             raise RuntimeError(
-                f"{remaining} active Space market resources still need Protobuf conversion; "
-                "run scripts/convert_space_market_to_protobuf.py first"
+                f"{remaining} unsupported pre-launch Space market resources remain; "
+                "reset them before finalizing the schema"
             )
 
     op.drop_constraint(

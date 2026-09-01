@@ -570,15 +570,15 @@ The API decodes the binary message and then validates a closed canonical model
 (`extra=forbid`):
 
 - `space-blockset`: a non-empty name and bounded voxel array;
-- `space-entity`: the same voxel representation plus one explicit `root`, a tree of at
-  most 63 child components, scripts, enabled flags, constraints, collision flags,
-  physics mode/material, bearing/piston parameters, cockpit, gravity and vehicle state;
+- `space-entity`: one recursive `root` component with at most 63 descendants. Every
+  component owns its voxels, body/material/gravity/collision config, optional script,
+  script-disabled flag, zero or more driver seats, and recursively nested children;
 - `space-colorset`: exactly nine normalized six-digit `#rrggbb` values.
 
 Every voxel has the sole portable block id `1`. Voxel base coordinates (`dx/dy/dz`) are safe integers. A micro voxel provides all three
 integer offsets (`mx/my/mz`) in `0..4`; omission of all three means a standard voxel. The
 API rejects duplicate occupancy, standard/micro overlap in one cell, bounds above 64 cells on an axis, unknown component
-references, hierarchy cycles, duplicate ids, non-finite physics values, oversized scripts,
+references, duplicate ids, excessive hierarchy depth, non-finite physics values, oversized scripts,
 and resources above the block/component/constraint/byte budgets.
 
 Before object storage, the API recomputes derived counts, normalizes colors and numbers,
@@ -591,22 +591,10 @@ UTC day, including resources later deleted by an administrator.
 
 New publications upload canonical Protobuf as `application/x-protobuf` to
 `space-market/resources/{resource_id}/{digest}.pb` before the database row is committed.
-If the database write fails, the API removes the unreferenced object. The v3 schema no
-longer contains a database JSON fallback; historical v2 rows are converted once with
-`scripts/convert_space_market_to_protobuf.py` before the final migration removes `content`.
-
-Existing installations deploy the conversion in five explicit steps:
-
-```bash
-python -m alembic upgrade a6b3d9f142ce
-python scripts/convert_space_market_to_protobuf.py --dry-run
-python scripts/convert_space_market_to_protobuf.py
-python -m alembic upgrade b8e4c7a261d0
-python -m alembic upgrade c3f7a92d10be
-```
-
-The converter is idempotent: it uploads `.pb` before repointing a row and removes an old
-`.json` object only after commit. The final migration aborts while any active v2 row remains.
+If the database write fails, the API removes the unreferenced object. The pre-launch v3
+schema has no database JSON fallback and intentionally accepts no older entity wire shape.
+Voxel ownership follows recursive component nesting, so voxels carry neither component
+indexes nor `part`; mountability is derived solely from explicit component seats.
 
 ### 9.5 `build_assets`: Durable World Entity Definitions
 

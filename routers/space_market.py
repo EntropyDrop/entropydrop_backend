@@ -45,6 +45,8 @@ SPACE_MARKET_MAX_COMPONENTS = 64
 SPACE_MARKET_MAX_CONSTRAINTS = 256
 SPACE_MARKET_MAX_SCRIPT_BYTES = 64 * 1024
 SPACE_MARKET_MAX_TOTAL_SCRIPT_BYTES = 512 * 1024
+SPACE_MARKET_MAX_SEATS = 256
+SPACE_MARKET_MAX_COMPONENT_DEPTH = 16
 SPACE_MARKET_MAX_BOUNDS = 64
 SPACE_MARKET_MAX_COORDINATE = SPACE_MARKET_MAX_BOUNDS * 2
 SPACE_MARKET_RATE_LIMIT = "120/minute; 2000/hour"
@@ -93,7 +95,6 @@ class MarketVoxel(StrictResourceModel):
     mz: StrictInt | None = None
     block: StrictInt = Field(default=1, ge=1, le=1)
     color: StrictInt = Field(ge=0, le=0xFFFFFF)
-    part: StrictStr | None = Field(default=None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def validate_grid(self):
@@ -111,7 +112,6 @@ class BlockSetPayload(StrictResourceModel):
     type: Literal["space-blockset"]
     version: Literal[3]
     name: StrictStr = Field(min_length=1, max_length=80)
-    blockCount: StrictInt | None = Field(default=None, ge=1, le=SPACE_MARKET_MAX_BLOCKS)
     blocks: list[MarketVoxel] = Field(min_length=1, max_length=SPACE_MARKET_MAX_BLOCKS)
 
     @model_validator(mode="after")
@@ -120,33 +120,20 @@ class BlockSetPayload(StrictResourceModel):
         if not self.name:
             raise ValueError("resource name may not be blank")
         _validate_voxel_collection(self.blocks, lambda _block: "blockset")
-        self.blockCount = len(self.blocks)
         self.blocks.sort(key=_voxel_sort_key)
         return self
 
 
-class EntityVoxel(MarketVoxel):
-    entityId: StrictStr = Field(min_length=1, max_length=64)
-
-
-class EntityChild(StrictResourceModel):
-    id: StrictStr = Field(min_length=1, max_length=64)
-    parentId: StrictStr = Field(min_length=1, max_length=64)
-    kind: Literal["child"] | None = None
-    collisionEnabled: StrictBool | None = None
-    pivot: Vector3 | None = None
-    bodyType: Literal["dynamic", "kinematic"] | None = None
+class ComponentBody(StrictResourceModel):
+    type: Literal["dynamic", "kinematic"]
     mass: Number | None = None
     restitution: Number | None = None
     friction: Number | None = None
+    useGravity: StrictBool | None = None
+    collisionEnabled: StrictBool | None = None
 
     @model_validator(mode="after")
     def validate_physics(self):
-        if not _valid_component_id(self.id, allow_root=False):
-            raise ValueError("child component id is not portable")
-        if not _valid_component_id(self.parentId):
-            raise ValueError("child parent id is not portable")
-        _validate_vector(self.pivot, "component pivot", SPACE_MARKET_MAX_COORDINATE)
         if self.mass is not None:
             self.mass = _finite_number(self.mass, "component mass", 0.1, 1e12)
         if self.restitution is not None:
@@ -156,14 +143,37 @@ class EntityChild(StrictResourceModel):
         return self
 
 
-class EntityScript(StrictResourceModel):
-    id: StrictStr = Field(min_length=1, max_length=64)
-    code: StrictStr
+class ComponentSeat(StrictResourceModel):
+    position: Vector3
+
+    @model_validator(mode="after")
+    def validate_position(self):
+        _validate_vector(self.position, "seat position", SPACE_MARKET_MAX_COORDINATE)
+        return self
 
 
-class EntityEnabled(StrictResourceModel):
+class EntityComponent(StrictResourceModel):
     id: StrictStr = Field(min_length=1, max_length=64)
-    enabled: StrictBool
+    pivot: Vector3 | None = None
+    body: ComponentBody
+    blocks: list[MarketVoxel] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_BLOCKS)
+    script: StrictStr | None = None
+    scriptDisabled: StrictBool = False
+    seats: list[ComponentSeat] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_SEATS)
+    children: list["EntityComponent"] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_COMPONENTS - 1)
+
+    @model_validator(mode="after")
+    def validate_component(self):
+        if not _valid_component_id(self.id):
+            raise ValueError("component id is not portable")
+        _validate_vector(self.pivot, "component pivot", SPACE_MARKET_MAX_COORDINATE)
+        if self.script is not None and len(self.script.encode("utf-8")) > SPACE_MARKET_MAX_SCRIPT_BYTES:
+            raise ValueError("one component script exceeds 64 KiB")
+        if self.blocks:
+            _validate_voxel_collection(self.blocks, lambda _block: self.id)
+            self.blocks.sort(key=_voxel_sort_key)
+        self.children.sort(key=lambda child: child.id)
+        return self
 
 
 class ConstraintLimits(StrictResourceModel):
@@ -210,27 +220,8 @@ class EntityPayload(StrictResourceModel):
     type: Literal["space-entity"]
     version: Literal[3]
     name: StrictStr = Field(min_length=1, max_length=80)
-    rootId: Literal["root"] = "root"
-    nodeCount: StrictInt | None = Field(default=None, ge=1, le=SPACE_MARKET_MAX_COMPONENTS)
-    blockCount: StrictInt | None = Field(default=None, ge=1, le=SPACE_MARKET_MAX_BLOCKS)
-    blocks: list[EntityVoxel] = Field(min_length=1, max_length=SPACE_MARKET_MAX_BLOCKS)
-    childEntities: list[EntityChild] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_COMPONENTS - 1)
-    scripts: list[EntityScript] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_COMPONENTS)
-    enabled: list[EntityEnabled] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_COMPONENTS)
+    root: EntityComponent
     constraints: list[EntityConstraint] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_CONSTRAINTS)
-    mode: Literal["free_physics", "bearing", "piston", "drivable", "projectile", "programmable"] = "free_physics"
-    bodyType: Literal["dynamic", "kinematic"] = "dynamic"
-    mass: Number | None = None
-    restitution: Number | None = None
-    friction: Number | None = None
-    useGravity: StrictBool | None = None
-    bearingAxis: Vector3 | None = None
-    bearingRpm: Number | None = None
-    pistonAxis: Vector3 | None = None
-    pistonDistance: Number | None = None
-    pistonSpeed: Number | None = None
-    cockpitPosition: Vector3 | None = None
-    isVehicle: StrictBool | None = None
 
     @model_validator(mode="after")
     def validate_entity(self):
@@ -238,41 +229,38 @@ class EntityPayload(StrictResourceModel):
         if not self.name:
             raise ValueError("resource name may not be blank")
 
-        child_ids = [child.id for child in self.childEntities]
-        if len(set(child_ids)) != len(child_ids):
-            raise ValueError("child component ids must be unique")
-        known_ids = {"root", *child_ids}
-        child_by_id = {child.id: child for child in self.childEntities}
-        for child in self.childEntities:
-            if child.parentId not in known_ids:
-                raise ValueError(f"unknown parent {child.parentId} for component {child.id}")
-            visited = {child.id}
-            parent_id = child.parentId
-            while parent_id in child_by_id:
-                if parent_id in visited:
-                    raise ValueError("component hierarchy contains a cycle")
-                visited.add(parent_id)
-                parent_id = child_by_id[parent_id].parentId
-
-        for block in self.blocks:
-            if block.entityId not in known_ids:
-                raise ValueError(f"voxel references unknown component {block.entityId}")
-        _validate_voxel_collection(self.blocks, lambda block: block.entityId)
-
-        script_ids = [script.id for script in self.scripts]
-        enabled_ids = [entry.id for entry in self.enabled]
-        if len(set(script_ids)) != len(script_ids) or any(script_id not in known_ids for script_id in script_ids):
-            raise ValueError("scripts must reference unique known components")
-        if len(set(enabled_ids)) != len(enabled_ids) or any(enabled_id not in known_ids for enabled_id in enabled_ids):
-            raise ValueError("enabled flags must reference unique known components")
+        if self.root.id != "root":
+            raise ValueError("entity root component id must be root")
+        known_ids: set[str] = set()
+        total_blocks = 0
         total_script_bytes = 0
-        for script in self.scripts:
-            script_bytes = len(script.code.encode("utf-8"))
-            if script_bytes > SPACE_MARKET_MAX_SCRIPT_BYTES:
-                raise ValueError("one component script exceeds 64 KiB")
-            total_script_bytes += script_bytes
+        total_seats = 0
+
+        def visit(component: EntityComponent, depth: int) -> None:
+            nonlocal total_blocks, total_script_bytes, total_seats
+            if depth > SPACE_MARKET_MAX_COMPONENT_DEPTH:
+                raise ValueError("component hierarchy exceeds maximum depth 16")
+            if component.id in known_ids:
+                raise ValueError("component ids must be unique across the entity")
+            if depth > 0 and component.id == "root":
+                raise ValueError("only the entity root may use component id root")
+            known_ids.add(component.id)
+            total_blocks += len(component.blocks)
+            total_seats += len(component.seats)
+            if component.script is not None:
+                total_script_bytes += len(component.script.encode("utf-8"))
+            for child in component.children:
+                visit(child, depth + 1)
+
+        visit(self.root, 0)
+        if len(known_ids) > SPACE_MARKET_MAX_COMPONENTS:
+            raise ValueError("entity exceeds 64 components")
+        if total_blocks < 1 or total_blocks > SPACE_MARKET_MAX_BLOCKS:
+            raise ValueError("entity must contain between 1 and 65536 voxels")
         if total_script_bytes > SPACE_MARKET_MAX_TOTAL_SCRIPT_BYTES:
             raise ValueError("entity scripts exceed 512 KiB in total")
+        if total_seats > SPACE_MARKET_MAX_SEATS:
+            raise ValueError("entity exceeds 256 seats")
 
         constraint_ids = [constraint.id for constraint in self.constraints]
         if len(set(constraint_ids)) != len(constraint_ids):
@@ -285,28 +273,6 @@ class EntityPayload(StrictResourceModel):
             ):
                 raise ValueError(f"constraint {constraint.id} references an invalid component")
 
-        if self.mass is not None:
-            self.mass = _finite_number(self.mass, "entity mass", 0.1, 1e12)
-        if self.restitution is not None:
-            self.restitution = _finite_number(self.restitution, "entity restitution", 0, 1)
-        if self.friction is not None:
-            self.friction = _finite_number(self.friction, "entity friction", 0, 1)
-        _validate_vector(self.bearingAxis, "bearing axis")
-        _validate_vector(self.pistonAxis, "piston axis")
-        _validate_vector(self.cockpitPosition, "cockpit position", SPACE_MARKET_MAX_COORDINATE)
-        if self.bearingRpm is not None:
-            self.bearingRpm = _finite_number(self.bearingRpm, "bearing rpm", -10_000, 10_000)
-        if self.pistonDistance is not None:
-            self.pistonDistance = _finite_number(self.pistonDistance, "piston distance", 0, SPACE_MARKET_MAX_COORDINATE)
-        if self.pistonSpeed is not None:
-            self.pistonSpeed = _finite_number(self.pistonSpeed, "piston speed", 0, 10_000)
-
-        self.blockCount = len(self.blocks)
-        self.nodeCount = len(known_ids)
-        self.blocks.sort(key=lambda block: (block.entityId, *_voxel_sort_key(block)))
-        self.childEntities.sort(key=lambda child: child.id)
-        self.scripts.sort(key=lambda script: script.id)
-        self.enabled.sort(key=lambda entry: entry.id)
         self.constraints.sort(key=lambda constraint: constraint.id)
         return self
 
@@ -329,7 +295,7 @@ class ColorSetPayload(StrictResourceModel):
         return self
 
 
-def _voxel_sort_key(block: MarketVoxel) -> tuple[int, int, int, int, int, int, int, str]:
+def _voxel_sort_key(block: MarketVoxel) -> tuple[int, int, int, int, int, int, int]:
     return (
         block.dx,
         block.dy,
@@ -338,7 +304,6 @@ def _voxel_sort_key(block: MarketVoxel) -> tuple[int, int, int, int, int, int, i
         -1 if block.my is None else block.my,
         -1 if block.mz is None else block.mz,
         block.color,
-        block.part or "",
     )
 
 
@@ -388,6 +353,24 @@ def validate_market_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any
 
 def market_content_digest(kind: str, canonical: dict[str, Any]) -> bytes:
     return inventory_content_digest(kind, canonical)
+
+
+def entity_resource_metrics(canonical: dict[str, Any]) -> tuple[int, int, int]:
+    """Return block, component and scripted-component counts for one entity."""
+    block_count = 0
+    node_count = 0
+    script_count = 0
+
+    def visit(component: dict[str, Any]) -> None:
+        nonlocal block_count, node_count, script_count
+        node_count += 1
+        block_count += len(component.get("blocks", []))
+        script_count += int(component.get("script") is not None)
+        for child in component.get("children", []):
+            visit(child)
+
+    visit(canonical["root"])
+    return block_count, node_count, script_count
 
 
 def _market_object_key(resource_id: str, digest: bytes) -> str:
@@ -584,6 +567,12 @@ async def publish_market_resource(
 
     encoded = encode_inventory_resource(kind, canonical)
     digest = market_content_digest(kind, canonical)
+    if kind == "entity":
+        block_count, node_count, script_count = entity_resource_metrics(canonical)
+    else:
+        block_count = len(canonical.get("blocks", []))
+        node_count = 0
+        script_count = 0
     db.query(models.User).filter(models.User.id == current_user.id).with_for_update().first()
     existing = db.query(models.SpaceMarketResource).filter(models.SpaceMarketResource.content_digest == digest).first()
     if existing:
@@ -617,9 +606,9 @@ async def publish_market_resource(
         content_digest=digest,
         object_key=object_key,
         size_bytes=len(encoded),
-        block_count=len(canonical.get("blocks", [])),
-        node_count=int(canonical.get("nodeCount", 0)),
-        script_count=len(canonical.get("scripts", [])),
+        block_count=block_count,
+        node_count=node_count,
+        script_count=script_count,
         downloads_count=0,
         likes_count=0,
     )

@@ -3,9 +3,8 @@
 Revision ID: a6b3d9f142ce
 Revises: f8c2a91d4e70
 
-Run ``python scripts/convert_space_market_to_protobuf.py`` immediately after this
-migration. The temporary v2/v3 constraint lets the converter update each CDN
-object and its database row atomically without taking the whole market offline.
+This pre-launch bridge revision is retained only to keep the local Alembic chain
+intact. Fresh databases contain no v2 market rows.
 """
 
 from typing import Sequence, Union

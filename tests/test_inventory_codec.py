@@ -1,5 +1,6 @@
 import pytest
 
+from space.contracts import inventory_pb2
 from space.inventory_codec import (
     InventoryCodecError,
     decode_inventory_resource,
@@ -8,7 +9,7 @@ from space.inventory_codec import (
 )
 
 
-CROSS_LANGUAGE_BLOCKSET_HEX = "080352190a0543726f737312100801100420462d34ab12003203746970"
+CROSS_LANGUAGE_BLOCKSET_HEX = "080352140a0543726f7373120b0801100420462d34ab1200"
 
 
 def test_inventory_protobuf_matches_the_frontend_deterministic_wire_fixture():
@@ -25,14 +26,41 @@ def test_inventory_protobuf_matches_the_frontend_deterministic_wire_fixture():
             "mz": 2,
             "block": 1,
             "color": 0x12AB34,
-            "part": "tip",
         }],
     }
     encoded = encode_inventory_resource("blockset", canonical)
     assert encoded.hex() == CROSS_LANGUAGE_BLOCKSET_HEX
     kind, decoded = decode_inventory_resource(bytes.fromhex(CROSS_LANGUAGE_BLOCKSET_HEX))
     assert kind == "blockset"
-    assert decoded == {**canonical, "blockCount": 1}
+    assert decoded == canonical
+
+
+def test_recursive_entity_round_trip_keeps_component_local_body_script_and_seats():
+    canonical = {
+        "type": "space-entity",
+        "version": 3,
+        "name": "Rover",
+        "root": {
+            "id": "root",
+            "body": {"type": "dynamic", "useGravity": False},
+            "blocks": [{"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 1}],
+            "seats": [{"position": [0, 1, 0]}],
+            "children": [{
+                "id": "wheel",
+                "pivot": [1, 0, 0],
+                "body": {"type": "kinematic", "collisionEnabled": False},
+                "blocks": [{"dx": 1, "dy": 0, "dz": 0, "block": 1, "color": 2}],
+                "script": "self.setLocalSpin([1,0,0], 60);",
+                "scriptDisabled": True,
+                "seats": [],
+                "children": [],
+            }],
+        },
+        "constraints": [],
+    }
+    kind, decoded = decode_inventory_resource(encode_inventory_resource("entity", canonical))
+    assert kind == "entity"
+    assert decoded == canonical
 
 
 def test_inventory_digest_ignores_display_name_but_not_content():
@@ -53,3 +81,19 @@ def test_inventory_decoder_rejects_non_v3_and_missing_content_messages():
         decode_inventory_resource(b"\x08\x02")
     with pytest.raises(InventoryCodecError, match="does not contain"):
         decode_inventory_resource(b"\x08\x03")
+
+
+def test_inventory_decoder_rejects_missing_recursive_entity_messages():
+    resource = inventory_pb2.InventoryResource(schema_version=3)
+    resource.entity.name = "Missing root"
+    with pytest.raises(InventoryCodecError, match="missing its root component"):
+        decode_inventory_resource(resource.SerializeToString())
+
+    resource.entity.root.id = "root"
+    with pytest.raises(InventoryCodecError, match="missing its body configuration"):
+        decode_inventory_resource(resource.SerializeToString())
+
+    resource.entity.root.body.SetInParent()
+    resource.entity.root.seats.add()
+    with pytest.raises(InventoryCodecError, match="seat without a position"):
+        decode_inventory_resource(resource.SerializeToString())
