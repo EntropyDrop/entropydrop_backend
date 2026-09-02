@@ -86,7 +86,7 @@ def _entity(name: str = "Walker"):
             "children": [{
                 "id": "arm",
                 "pivot": [1.5, 0.5, 0.5],
-                "localPosition": [1, 2, 3],
+                "localPosition": [0.5, 0, 0],
                 "localRotation": [0, 1, 0, 0],
                 "anchorRotation": [math.sqrt(0.5), 0, 0, math.sqrt(0.5)],
                 "body": {"type": "kinematic"},
@@ -142,7 +142,7 @@ def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client
     assert canonical["root"]["children"][0]["id"] == "arm"
     assert canonical["root"]["body"]["useGravity"] is True
     assert canonical["root"]["anchorRotation"] == [0, 0, math.sqrt(0.5), math.sqrt(0.5)]
-    assert canonical["root"]["children"][0]["localPosition"] == [1, 2, 3]
+    assert canonical["root"]["children"][0]["localPosition"] == [0.5, 0, 0]
     assert canonical["root"]["children"][0]["localRotation"] == [0, 1, 0, 0]
     assert canonical["root"]["children"][0]["anchorRotation"] == [math.sqrt(0.5), 0, 0, math.sqrt(0.5)]
     assert len(canonical["root"]["children"][0]["seats"]) == 2
@@ -218,6 +218,43 @@ def test_market_rejects_invalid_component_transforms(client, db):
     invalid_rotation = _entity("Invalid rotation")
     invalid_rotation["root"]["children"][0]["localRotation"] = [0, 0, 0, 0]
     assert _publish(client, "entity", invalid_rotation).status_code == 422
+
+    off_grid_rotation = _entity("Off-grid rotation")
+    off_grid_rotation["root"]["children"][0]["localRotation"] = [
+        0,
+        0,
+        math.sin(math.pi / 8),
+        math.cos(math.pi / 8),
+    ]
+    response = _publish(client, "entity", off_grid_rotation)
+    assert response.status_code == 422
+    assert "24 axis-aligned" in response.json()["detail"]["message"]
+
+    off_grid_anchor = _entity("Off-grid anchor")
+    off_grid_anchor["root"]["anchorRotation"] = [
+        0,
+        0,
+        math.sin(math.pi / 8),
+        math.cos(math.pi / 8),
+    ]
+    assert _publish(client, "entity", off_grid_anchor).status_code == 422
+
+
+def test_market_rejects_off_grid_and_overlapping_stopped_entity_pose(client, db):
+    user = _user(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    off_grid = _entity("Off-grid stopped pose")
+    off_grid["root"]["children"][0]["localPosition"] = [0.6, 0, 0]
+    response = _publish(client, "entity", off_grid)
+    assert response.status_code == 422
+    assert "0.2-unit construction grid" in response.json()["detail"]["message"]
+
+    overlapping = _entity("Overlapping stopped pose")
+    overlapping["root"]["children"][0]["localPosition"] = [-0.5, 0, 0]
+    response = _publish(client, "entity", overlapping)
+    assert response.status_code == 422
+    assert "overlapping voxels" in response.json()["detail"]["message"]
 
 
 def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(client, db, market_object_storage):

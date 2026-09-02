@@ -483,9 +483,10 @@ CREATE TABLE player_snapshots (
 );
 
 -- Stable identity is separated from runtime state. No birth point is stored:
--- when player_snapshots has no row, bootstrap chooses an ephemeral random safe
--- start and the client immediately checkpoints it. Skin is never duplicated
--- here: every entry reads the URL/model from the existing users row.
+-- when player_snapshots has no valid row, bootstrap samples an ephemeral X/Z
+-- position uniformly across the complete wrapped world at Y=32 m, and the
+-- admitted client immediately checkpoints it. Skin is never duplicated here:
+-- every entry reads the URL/model from the existing users row.
 CREATE TABLE world_player_profiles (
     world_id         UUID        NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
     user_id          VARCHAR(16) NOT NULL REFERENCES users(id) ON DELETE CASCADE,

@@ -49,6 +49,8 @@ SPACE_MARKET_MAX_SEATS = 256
 SPACE_MARKET_MAX_COMPONENT_DEPTH = 16
 SPACE_MARKET_MAX_BOUNDS = 64
 SPACE_MARKET_MAX_COORDINATE = SPACE_MARKET_MAX_BOUNDS * 2
+SPACE_MARKET_GRID_DIVISIONS = 5
+SPACE_MARKET_GRID_EPSILON = 1e-6
 SPACE_MARKET_RATE_LIMIT = "120/minute; 2000/hour"
 SPACE_MARKET_OBJECT_PREFIX = "space-market/resources"
 COMPONENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -57,6 +59,11 @@ HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 Number = StrictInt | StrictFloat
 Vector3 = tuple[Number, Number, Number]
 Quaternion = tuple[Number, Number, Number, Number]
+RotationMatrix = tuple[
+    tuple[int, int, int],
+    tuple[int, int, int],
+    tuple[int, int, int],
+]
 
 
 class StrictResourceModel(BaseModel):
@@ -83,13 +90,35 @@ def _validate_vector(value: Vector3 | None, label: str, max_abs: float = 256) ->
             raise ValueError(f"{label} components must be within ±{max_abs}")
 
 
-def _validate_quaternion(value: Quaternion | None, label: str) -> None:
+def _grid_rotation_matrix(value: Quaternion | None, label: str) -> RotationMatrix:
     if value is None:
-        return
+        return ((1, 0, 0), (0, 1, 0), (0, 0, 1))
     components = [_finite_number(component, label, -1, 1) for component in value]
     length_squared = sum(component * component for component in components)
     if not math.isclose(length_squared, 1, rel_tol=1e-6, abs_tol=1e-6):
         raise ValueError(f"{label} must be a normalized quaternion")
+    length = math.sqrt(length_squared)
+    x, y, z, w = (component / length for component in components)
+    matrix = (
+        (1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)),
+        (2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)),
+        (2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)),
+    )
+    snapped: list[tuple[int, int, int]] = []
+    for row in matrix:
+        snapped_row = tuple(round(component) for component in row)
+        if any(
+            component not in (-1, 0, 1)
+            or not math.isclose(original, component, rel_tol=0, abs_tol=SPACE_MARKET_GRID_EPSILON)
+            for original, component in zip(row, snapped_row)
+        ):
+            raise ValueError(f"{label} must be one of the 24 axis-aligned 90-degree rotations")
+        snapped.append(snapped_row)
+    return tuple(snapped)  # type: ignore[return-value]
+
+
+def _validate_quaternion(value: Quaternion | None, label: str) -> None:
+    _grid_rotation_matrix(value, label)
 
 
 def _valid_component_id(value: str, allow_root: bool = True) -> bool:
@@ -279,6 +308,7 @@ class EntityPayload(StrictResourceModel):
             raise ValueError("entity scripts exceed 512 KiB in total")
         if total_seats > SPACE_MARKET_MAX_SEATS:
             raise ValueError("entity exceeds 256 seats")
+        _validate_stopped_entity_grid(self.root)
 
         constraint_ids = [constraint.id for constraint in self.constraints]
         if len(set(constraint_ids)) != len(constraint_ids):
@@ -351,6 +381,119 @@ def _validate_voxel_collection(blocks: list[MarketVoxel], owner) -> None:
             raise ValueError("resource contains duplicate voxels")
         micro_cells.add(key)
         micro_parents.add(parent_key)
+
+
+def _matrix_multiply(left: RotationMatrix, right: RotationMatrix) -> RotationMatrix:
+    return tuple(
+        tuple(sum(left[row][inner] * right[inner][column] for inner in range(3)) for column in range(3))
+        for row in range(3)
+    )  # type: ignore[return-value]
+
+
+def _rotate_vector(matrix: RotationMatrix, vector: tuple[float, float, float]) -> tuple[float, float, float]:
+    return tuple(
+        sum(matrix[row][column] * vector[column] for column in range(3))
+        for row in range(3)
+    )  # type: ignore[return-value]
+
+
+def _add_vectors(left: tuple[float, float, float], right: tuple[float, float, float]) -> tuple[float, float, float]:
+    return tuple(left[index] + right[index] for index in range(3))  # type: ignore[return-value]
+
+
+def _voxel_bounds(block: MarketVoxel) -> tuple[tuple[float, float, float], float]:
+    micro = block.mx is not None
+    offsets = (block.mx, block.my, block.mz) if micro else (0, 0, 0)
+    minimum = tuple(
+        float(value) + float(offset or 0) / SPACE_MARKET_GRID_DIVISIONS
+        for value, offset in zip((block.dx, block.dy, block.dz), offsets)
+    )
+    return minimum, 1 / SPACE_MARKET_GRID_DIVISIONS if micro else 1.0  # type: ignore[return-value]
+
+
+def _validate_stopped_entity_grid(root: EntityComponent) -> None:
+    """Require the authored Stop pose to be a non-overlapping micro-grid assembly."""
+    components: list[EntityComponent] = []
+
+    def collect(component: EntityComponent) -> None:
+        components.append(component)
+        for child in component.children:
+            collect(child)
+
+    collect(root)
+    raw_bounds = [_voxel_bounds(block) for component in components for block in component.blocks]
+    minimum = tuple(min(bounds[0][axis] for bounds in raw_bounds) for axis in range(3))
+    maximum = tuple(max(bounds[0][axis] + bounds[1] for bounds in raw_bounds) for axis in range(3))
+    default_root_pivot = tuple((minimum[axis] + maximum[axis]) / 2 for axis in range(3))
+    root_pivot = tuple(float(value) for value in (root.pivot or default_root_pivot))
+    identity: RotationMatrix = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+    grid_boxes: list[tuple[int, int, int, int, int, int]] = []
+
+    def append_blocks(
+        component: EntityComponent,
+        pivot: tuple[float, float, float],
+        rotation: RotationMatrix,
+        translation: tuple[float, float, float],
+    ) -> None:
+        for block in component.blocks:
+            block_minimum, size = _voxel_bounds(block)
+            center = tuple(block_minimum[axis] + size / 2 for axis in range(3))
+            relative_center = tuple(center[axis] - pivot[axis] for axis in range(3))
+            stopped_center = _add_vectors(translation, _rotate_vector(rotation, relative_center))
+            fine_bounds = [
+                (stopped_center[axis] - size / 2) * SPACE_MARKET_GRID_DIVISIONS
+                for axis in range(3)
+            ] + [
+                (stopped_center[axis] + size / 2) * SPACE_MARKET_GRID_DIVISIONS
+                for axis in range(3)
+            ]
+            snapped = [round(value) for value in fine_bounds]
+            if any(
+                not math.isclose(value, grid_value, rel_tol=0, abs_tol=SPACE_MARKET_GRID_EPSILON)
+                for value, grid_value in zip(fine_bounds, snapped)
+            ):
+                raise ValueError("stopped entity voxels must align to the 0.2-unit construction grid")
+            grid_boxes.append((snapped[0], snapped[1], snapped[2], snapped[3], snapped[4], snapped[5]))
+
+    def visit(
+        component: EntityComponent,
+        parent_pivot: tuple[float, float, float],
+        parent_rotation: RotationMatrix,
+        parent_translation: tuple[float, float, float],
+    ) -> None:
+        pivot = tuple(float(value) for value in (component.pivot or default_root_pivot))
+        default_position = tuple(pivot[axis] - parent_pivot[axis] for axis in range(3))
+        local_position = tuple(float(value) for value in (component.localPosition or default_position))
+        local_rotation = _grid_rotation_matrix(component.localRotation, "component local rotation")
+        rotation = _matrix_multiply(parent_rotation, local_rotation)
+        translation = _add_vectors(parent_translation, _rotate_vector(parent_rotation, local_position))
+        append_blocks(component, pivot, rotation, translation)
+        for child in component.children:
+            visit(child, pivot, rotation, translation)
+
+    append_blocks(root, root_pivot, identity, root_pivot)
+    for child in root.children:
+        visit(child, root_pivot, identity, root_pivot)
+
+    buckets: dict[tuple[int, int, int], list[tuple[int, int, int, int, int, int]]] = {}
+    for box in grid_boxes:
+        min_x, min_y, min_z, max_x, max_y, max_z = box
+        keys = [
+            (x, y, z)
+            for x in range(min_x // SPACE_MARKET_GRID_DIVISIONS, (max_x - 1) // SPACE_MARKET_GRID_DIVISIONS + 1)
+            for y in range(min_y // SPACE_MARKET_GRID_DIVISIONS, (max_y - 1) // SPACE_MARKET_GRID_DIVISIONS + 1)
+            for z in range(min_z // SPACE_MARKET_GRID_DIVISIONS, (max_z - 1) // SPACE_MARKET_GRID_DIVISIONS + 1)
+        ]
+        for key in keys:
+            for other in buckets.get(key, []):
+                if (
+                    min_x < other[3] and max_x > other[0]
+                    and min_y < other[4] and max_y > other[1]
+                    and min_z < other[5] and max_z > other[2]
+                ):
+                    raise ValueError("stopped entity components contain overlapping voxels")
+        for key in keys:
+            buckets.setdefault(key, []).append(box)
 
 
 def validate_market_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:

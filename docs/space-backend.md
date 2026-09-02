@@ -265,11 +265,17 @@ memory just like a login connection, so the queue cannot become a denial-of-serv
 After reservation, every join reads `world_player_profiles` for the stable
 `player_entity_id`, but that table deliberately contains no birth coordinates. Bootstrap
 first validates `player_snapshots`; when no valid snapshot exists, the server samples a
-bounded random X/Z candidate and returns it only as this entry's ephemeral start. The
-browser immediately checkpoints that start, then saves wrapped position and yaw every two
-seconds and with a small keepalive request before page suspension. Later bootstraps use the
-latest per-user snapshot directly. A missing or invalid snapshot simply produces another
-safe random start; no permanent birth point exists in PostgreSQL.
+uniform X/Z candidate across the complete wrapped world (`x in [0, 16384)`,
+`z in [0, 2048)`) and returns it only as this entry's ephemeral start. Initial Y is 32 m,
+above the procedural terrain ceiling, and yaw is random. Bootstrap always returns a complete
+start pose: `resumed=true` identifies a durable snapshot and `resumed=false` identifies the
+ephemeral candidate, allowing the browser to load the correct initial terrain AOI before
+constructing the world. The browser immediately checkpoints a random start; the realtime
+relay then saves wrapped position and yaw every five seconds and on disconnect, with an
+additional keepalive request before page suspension.
+Later bootstraps use the latest valid per-user snapshot directly. A missing, corrupt, or
+future-version snapshot produces another world-wide random start; no permanent birth point
+exists in PostgreSQL.
 
 ### 6.3 Input Prediction and Reconciliation
 
@@ -580,15 +586,19 @@ Every voxel has the sole portable block id `1`. Voxel base coordinates (`dx/dy/d
 integer offsets (`mx/my/mz`) in `0..4`; omission of all three means a standard voxel. The
 API rejects duplicate occupancy, standard/micro overlap in one cell, bounds above 64 cells on an axis, unknown component
 references, duplicate ids, excessive hierarchy depth, non-finite physics values, oversized scripts,
-and resources above the block/component/constraint/byte budgets.
+and resources above the block/component/constraint/byte budgets. Authored `local_rotation`
+and `anchor_rotation` values are limited to the 24 axis-aligned cube orientations. The
+complete stopped component hierarchy must place every voxel on one shared 0.2-unit
+construction grid without volume overlap; runtime motion is discarded when Stop restores
+that authored pose.
 
 Before object storage, the API recomputes derived counts, normalizes colors and numbers,
 sorts order-insensitive arrays, and deterministically re-encodes Protobuf. SHA-256 is
 computed over deterministic Protobuf with the display name and derived counts omitted, so
 renaming or reordering cannot evade the global duplicate
-constraint. Deleted rows continue to reserve their digest. Every publication has the fixed
-SPDX license `AGPL-3.0-only`; each user may make at most ten successful publications per
-UTC day, including resources later deleted by an administrator.
+constraint. Every publication has the fixed SPDX license `AGPL-3.0-only`; each user may
+have at most ten publications created during the current UTC day. Permanent deletion
+removes the row, so its digest and daily quota slot are released.
 
 New publications upload canonical Protobuf as `application/x-protobuf` to
 `space-market/resources/{resource_id}/{digest}.pb` before the database row is committed.
@@ -1075,7 +1085,7 @@ implemented.
 
 | Requirement | Durable/source-of-truth coverage | Runtime/network coverage | Release proof |
 |---|---|---|---|
-| Random start without a saved state | No birth coordinates are stored; absence of `player_snapshots` triggers a safe random candidate | First client immediately checkpoints the ephemeral start; later joins use latest state | Empty/corrupt snapshot falls back safely; profile schema contains no spawn columns |
+| Random start without a saved state | No birth coordinates are stored; absence of a valid `player_snapshots` row triggers uniform X/Z sampling across the full wrapped world at Y=32 | Bootstrap returns the ephemeral pose so the client loads its actual AOI; the first client immediately checkpoints it and later joins use latest state | Boundary candidates at both torus seams, empty/corrupt snapshot fallback, and profile schema without spawn columns |
 | All standard and microblocks | Seed/generator plus packed chunk overlays/events reconstruct every cell | AOI snapshot then ordered deltas; standard/micro exclusion validated atomically | Conflicting same-tick edits converge; codec golden fixtures round-trip |
 | Distant torus for new entrants | Versioned immutable base artifact plus revisioned authored LOD tiles; no per-join PostgreSQL scan | HTTPS manifest/snapshot followed by reliable newer WebSocket tile deltas; deterministic base is the cache-miss fallback | Cold/warm join budgets pass; stale snapshot cannot replace newer edits; one dirty zone rebuilds only its tiles |
 | All world entity information | Immutable `build_assets` + `entity_snapshots` + indexed events + coverage manifest | Reliable entity presence; immutable HTTPS definition; 20 Hz runtime deltas | Checkpoint/replay and 1,000 shared definitions recover identically |

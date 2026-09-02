@@ -77,10 +77,13 @@ message Component {
   repeated Seat seats = 7;
   repeated Component children = 8;
   // Parent-relative authored transform. The root omits these fields.
+  // local_rotation is restricted to the 24 axis-aligned cube orientations so
+  // Stop restores every owned voxel to one shared 0.2-unit construction grid.
   optional Vector3 local_position = 9;
   optional Quaternion local_rotation = 10;
   // Orientation of the mounting frame in component-local coordinates.
-  // Identity means +Y points away from the surface and -Z points forward.
+  // Identity means +Y points away from the surface and -Z points forward; this
+  // is also restricted to the 24 axis-aligned cube orientations.
   optional Quaternion anchor_rotation = 11;
 }
 

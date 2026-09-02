@@ -63,10 +63,10 @@ class SpacePlayerResponse(BaseModel):
     player_entity_id: str
     skin_url: str
     skin_type: str
-    start_x_cm: int | None = None
-    start_y_cm: int | None = None
-    start_z_cm: int | None = None
-    start_yaw_q15: int | None = None
+    start_x_cm: int
+    start_y_cm: int
+    start_z_cm: int
+    start_yaw_q15: int
     resumed: bool
 
 
@@ -266,8 +266,8 @@ def _decode_player_snapshot(
             int(position.get("pitch_q15", 0)),
         )
     except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError, HTTPException):
-        # A bad or future snapshot must not prevent login. The immutable birth
-        # point remains the safe fallback.
+        # A bad or future snapshot must not prevent login. Bootstrap will issue
+        # a fresh ephemeral world-wide random start instead.
         return None
 
 
@@ -484,15 +484,13 @@ def _world_terrain_revision(db: Session, world: models.SpaceWorld) -> int:
 
 
 def _random_initial_position(world: models.SpaceWorld) -> dict[str, int]:
-    # Keep the initial position one zone away from the coordinate boundary. The
-    # authoritative world generator validates/refines safe ground when the
-    # multiplayer worker is introduced; 32 m starts above current terrain.
-    margin_cm = min(32 * 16 * 100, (world.width_chunks * 16 * 100) // 4)
+    # X/Z are uniform over the complete wrapped world, including positions near
+    # either seam. The authoritative worker can later refine the exact landing
+    # surface; 32 m starts above the current procedural terrain ceiling.
     width_cm = world.width_chunks * 16 * 100
     length_cm = world.length_chunks * 16 * 100
-    x = margin_cm + secrets.randbelow(max(1, width_cm - margin_cm * 2))
-    z_margin = min(margin_cm, length_cm // 4)
-    z = z_margin + secrets.randbelow(max(1, length_cm - z_margin * 2))
+    x = secrets.randbelow(max(1, width_cm))
+    z = secrets.randbelow(max(1, length_cm))
     yaw = secrets.randbelow(65535) - 32767
     return {"x_cm": x, "y_cm": 3200, "z_cm": z, "yaw_q15": yaw}
 
@@ -544,7 +542,7 @@ def bootstrap_space(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    """Gate Space entry and return the latest state or a one-time random start."""
+    """Return the latest saved pose or an ephemeral world-wide random start."""
     skin_url = (current_user.skin_url or "").strip()
     if not skin_url:
         raise HTTPException(
@@ -563,6 +561,7 @@ def bootstrap_space(
         models.SpacePlayerSnapshot.user_id == current_user.id,
     ).first()
     saved_position = _decode_player_snapshot(snapshot, world)
+    start_position = saved_position or _random_initial_position(world)
     skin_type = "slim" if (current_user.skin_type or "").lower() == "slim" else "strong"
 
     return {
@@ -584,10 +583,10 @@ def bootstrap_space(
             "player_entity_id": str(profile.player_entity_id),
             "skin_url": skin_url,
             "skin_type": skin_type,
-            "start_x_cm": saved_position["x_cm"] if saved_position else None,
-            "start_y_cm": saved_position["y_cm"] if saved_position else None,
-            "start_z_cm": saved_position["z_cm"] if saved_position else None,
-            "start_yaw_q15": saved_position["yaw_q15"] if saved_position else None,
+            "start_x_cm": start_position["x_cm"],
+            "start_y_cm": start_position["y_cm"],
+            "start_z_cm": start_position["z_cm"],
+            "start_yaw_q15": start_position["yaw_q15"],
             "resumed": saved_position is not None,
         },
     }
