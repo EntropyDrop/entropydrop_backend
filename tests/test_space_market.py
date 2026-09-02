@@ -355,25 +355,49 @@ def test_market_download_like_and_rankings(client, db, market_object_storage):
     assert likes["items"][0]["id"] == second["id"]
     assert likes["items"][0]["is_liked"] is True
     assert latest["items"][0]["id"] == second["id"]
+    assert all(item["can_delete"] is True for item in latest["items"])
 
     unliked = client.post(f"/space/api/v2/market/resources/{second['id']}/like")
     assert unliked.json() == {"is_liked": False, "likes_count": 0}
 
 
-def test_only_admin_can_soft_delete_market_resource(client, db, monkeypatch, market_object_storage):
-    user = _user(db, "ordinary")
-    admin = _user(db, "market-admin", "market-admin@example.com")
-    app.dependency_overrides[get_current_user] = lambda: user
+def test_market_can_filter_current_users_publications(client, db):
+    first_user = _user(db, "first-publisher")
+    second_user = _user(db, "second-publisher")
+    app.dependency_overrides[get_current_user] = lambda: first_user
+    first = _publish(client, "blockset", _blockset("First", 0x111111)).json()["resource"]
+    app.dependency_overrides[get_current_user] = lambda: second_user
+    second = _publish(client, "blockset", _blockset("Second", 0x222222)).json()["resource"]
+
+    mine = client.get("/space/api/v2/market/resources?kind=blockset&mine=true").json()
+    assert mine["total"] == 1
+    assert [item["id"] for item in mine["items"]] == [second["id"]]
+    assert mine["items"][0]["can_delete"] is True
+
+    community = client.get("/space/api/v2/market/resources?kind=blockset").json()
+    can_delete = {item["id"]: item["can_delete"] for item in community["items"]}
+    assert can_delete == {first["id"]: False, second["id"]: True}
+
+
+def test_author_can_permanently_delete_market_resource(client, db, market_object_storage):
+    author = _user(db, "author")
+    outsider = _user(db, "outsider")
+    app.dependency_overrides[get_current_user] = lambda: author
     resource = _publish(client, "colorset", _colorset()).json()["resource"]
+    assert resource["can_delete"] is True
     stored = db.query(SpaceMarketResource).one()
     object_key = stored.object_key
     assert object_key in market_object_storage["objects"]
 
+    app.dependency_overrides[get_current_user] = lambda: outsider
+    liked = client.post(f"/space/api/v2/market/resources/{resource['id']}/like")
+    assert liked.status_code == 200
+    assert db.query(SpaceMarketResourceLike).count() == 1
     denied = client.delete(f"/space/api/v2/market/resources/{resource['id']}")
     assert denied.status_code == 403
+    assert denied.json()["detail"]["code"] == "MARKET_DELETE_FORBIDDEN"
 
-    monkeypatch.setattr(auth.settings, "ADMIN_EMAILS", admin.email)
-    app.dependency_overrides[get_current_user] = lambda: admin
+    app.dependency_overrides[get_current_user] = lambda: author
     deleted = client.delete(f"/space/api/v2/market/resources/{resource['id']}")
     assert deleted.status_code == 200
     assert deleted.json()["deleted"] is True
@@ -381,20 +405,38 @@ def test_only_admin_can_soft_delete_market_resource(client, db, monkeypatch, mar
     assert deleted.json()["cdn_invalidation_requested"] is True
     assert object_key not in market_object_storage["objects"]
     assert market_object_storage["invalidations"] == [object_key]
-    assert db.query(SpaceMarketResource).one().deleted_at is not None
+    assert db.query(SpaceMarketResource).count() == 0
+    assert db.query(SpaceMarketResourceLike).count() == 0
     assert client.get(f"/space/api/v2/market/resources/{resource['id']}/download").status_code == 404
-    assert client.get("/space/api/v2/market/resources").json()["total"] == 0
+    market = client.get("/space/api/v2/market/resources").json()
+    assert market["total"] == 0
+    assert market["quota"] == {"daily_limit": 10, "published_today": 0, "remaining_today": 10}
 
-    # The row remains as an audit/tombstone while CDN content is gone. Its digest
-    # and today's quota usage remain reserved.
-    app.dependency_overrides[get_current_user] = lambda: user
-    duplicate = _publish(client, "colorset", _colorset("Renamed after deletion"))
-    assert duplicate.status_code == 409
+    # Removing the row releases both the canonical digest and the publication quota.
+    app.dependency_overrides[get_current_user] = lambda: author
+    republished = _publish(client, "colorset", _colorset("Renamed after deletion"))
+    assert republished.status_code == 201
     market = client.get("/space/api/v2/market/resources").json()
     assert market["quota"] == {"daily_limit": 10, "published_today": 1, "remaining_today": 9}
 
 
-def test_admin_delete_keeps_market_row_active_when_cdn_cleanup_fails(
+def test_admin_can_permanently_delete_another_publishers_resource(client, db, monkeypatch):
+    publisher = _user(db, "publisher")
+    admin = _user(db, "market-admin", "market-admin@example.com")
+    app.dependency_overrides[get_current_user] = lambda: publisher
+    resource = _publish(client, "colorset", _colorset()).json()["resource"]
+
+    monkeypatch.setattr(auth.settings, "ADMIN_EMAILS", admin.email)
+    app.dependency_overrides[get_current_user] = lambda: admin
+    listed = client.get("/space/api/v2/market/resources?kind=colorset").json()["items"]
+    assert listed[0]["can_delete"] is True
+
+    deleted = client.delete(f"/space/api/v2/market/resources/{resource['id']}")
+    assert deleted.status_code == 200
+    assert db.query(SpaceMarketResource).count() == 0
+
+
+def test_delete_keeps_market_row_when_cdn_cleanup_fails(
     client,
     db,
     monkeypatch,
@@ -420,5 +462,5 @@ def test_admin_delete_keeps_market_row_active_when_cdn_cleanup_fails(
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "MARKET_STORAGE_UNAVAILABLE"
     db.refresh(stored)
-    assert stored.deleted_at is None
+    assert db.query(SpaceMarketResource).count() == 1
     assert object_key in market_object_storage["objects"]

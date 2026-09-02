@@ -461,7 +461,16 @@ def _quota_response(db: Session, user_id: str) -> dict[str, int]:
     }
 
 
-def _resource_response(resource: models.SpaceMarketResource, publisher: models.User | None, is_liked: bool) -> dict[str, Any]:
+def _can_delete_market_resource(resource: models.SpaceMarketResource, user: models.User) -> bool:
+    return resource.publisher_user_id == user.id or bool(user.is_admin)
+
+
+def _resource_response(
+    resource: models.SpaceMarketResource,
+    publisher: models.User | None,
+    is_liked: bool,
+    current_user: models.User,
+) -> dict[str, Any]:
     return {
         "id": resource.id,
         "kind": resource.kind,
@@ -478,6 +487,7 @@ def _resource_response(resource: models.SpaceMarketResource, publisher: models.U
         "downloads_count": resource.downloads_count,
         "likes_count": resource.likes_count,
         "is_liked": is_liked,
+        "can_delete": _can_delete_market_resource(resource, current_user),
         "created_at": resource.created_at.isoformat(),
     }
 
@@ -505,14 +515,17 @@ def list_market_resources(
     request: Request,
     kind: Literal["blockset", "entity", "colorset"] | None = Query(default=None),
     sort: Literal["downloads", "likes", "latest"] = Query(default="latest"),
+    mine: bool = Query(default=False),
     limit: int = Query(default=24, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=10_000),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    filters = [models.SpaceMarketResource.deleted_at.is_(None)]
+    filters = []
     if kind:
         filters.append(models.SpaceMarketResource.kind == kind)
+    if mine:
+        filters.append(models.SpaceMarketResource.publisher_user_id == current_user.id)
     order = {
         "downloads": (desc(models.SpaceMarketResource.downloads_count), desc(models.SpaceMarketResource.created_at)),
         "likes": (desc(models.SpaceMarketResource.likes_count), desc(models.SpaceMarketResource.created_at)),
@@ -550,7 +563,10 @@ def list_market_resources(
             ).all()
         }
     return {
-        "items": [_resource_response(resource, publisher, resource.id in liked_ids) for resource, publisher in rows],
+        "items": [
+            _resource_response(resource, publisher, resource.id in liked_ids, current_user)
+            for resource, publisher in rows
+        ],
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -649,7 +665,10 @@ async def publish_market_resource(
         _cleanup_unreferenced_market_object(db, object_key)
         raise
     db.refresh(resource)
-    return {"resource": _resource_response(resource, current_user, False), "quota": _quota_response(db, current_user.id)}
+    return {
+        "resource": _resource_response(resource, current_user, False, current_user),
+        "quota": _quota_response(db, current_user.id),
+    }
 
 
 @router.get("/resources/{resource_id}/download")
@@ -662,7 +681,6 @@ def download_market_resource(
 ):
     resource = db.query(models.SpaceMarketResource).filter(
         models.SpaceMarketResource.id == resource_id,
-        models.SpaceMarketResource.deleted_at.is_(None),
     ).first()
     if resource is None:
         raise HTTPException(status_code=404, detail={"code": "MARKET_RESOURCE_NOT_FOUND"})
@@ -700,7 +718,6 @@ def toggle_market_resource_like(
 ):
     resource = db.query(models.SpaceMarketResource).filter(
         models.SpaceMarketResource.id == resource_id,
-        models.SpaceMarketResource.deleted_at.is_(None),
     ).with_for_update().first()
     if resource is None:
         raise HTTPException(status_code=404, detail={"code": "MARKET_RESOURCE_NOT_FOUND"})
@@ -722,55 +739,62 @@ def toggle_market_resource_like(
 
 @router.delete("/resources/{resource_id}")
 @limiter.limit(SPACE_MARKET_RATE_LIMIT)
-def admin_delete_market_resource(
+def delete_market_resource(
     request: Request,
     resource_id: str,
     db: Session = Depends(get_db),
-    current_admin: models.User = Depends(auth.get_current_admin),
+    current_user: models.User = Depends(auth.get_current_user),
 ):
     resource = db.query(models.SpaceMarketResource).filter(
         models.SpaceMarketResource.id == resource_id,
-        models.SpaceMarketResource.deleted_at.is_(None),
     ).with_for_update().first()
     if resource is None:
         raise HTTPException(status_code=404, detail={"code": "MARKET_RESOURCE_NOT_FOUND"})
+    if not _can_delete_market_resource(resource, current_user):
+        raise HTTPException(status_code=403, detail={
+            "code": "MARKET_DELETE_FORBIDDEN",
+            "message": "Only the publisher or an administrator may delete this market resource.",
+        })
 
     backup_content = None
     object_deleted = False
     invalidation_requested = False
-    if resource.object_key:
+    object_key = resource.object_key
+    if object_key:
         try:
-            backup_content = s3_utils.download_from_s3(resource.object_key, is_public=True)
+            backup_content = s3_utils.download_from_s3(object_key, is_public=True)
         except Exception as error:
             if not _is_missing_market_object(error):
                 logger.exception("Could not read market resource %s before deletion", resource.id)
                 raise _market_storage_error("read before deleting") from error
         try:
-            invalidation_requested = s3_utils.invalidate_cdn_object(resource.object_key)
-            s3_utils.delete_from_s3_strict(resource.object_key, is_public=True)
+            invalidation_requested = s3_utils.invalidate_cdn_object(object_key)
+            s3_utils.delete_from_s3_strict(object_key, is_public=True)
             object_deleted = True
         except Exception as error:
             logger.exception("Could not delete market resource object %s", resource.id)
             raise _market_storage_error("delete") from error
 
-    resource.deleted_at = datetime.datetime.now(datetime.timezone.utc)
-    resource.deleted_by_user_id = current_admin.id
+    db.query(models.SpaceMarketResourceLike).filter(
+        models.SpaceMarketResourceLike.resource_id == resource.id,
+    ).delete(synchronize_session=False)
+    db.delete(resource)
     try:
         db.commit()
     except Exception as error:
         db.rollback()
         if object_deleted and backup_content is not None:
             try:
-                _upload_market_object(backup_content, resource.object_key)
+                _upload_market_object(backup_content, object_key)
             except Exception:
-                logger.exception("Could not restore market resource %s after database failure", resource.id)
+                logger.exception("Could not restore market resource %s after database failure", resource_id)
         raise HTTPException(
             status_code=500,
             detail={"code": "MARKET_DELETE_FAILED", "message": "The market resource was not deleted."},
         ) from error
     return {
         "deleted": True,
-        "resource_id": resource.id,
+        "resource_id": resource_id,
         "cdn_object_deleted": object_deleted,
         "cdn_invalidation_requested": invalidation_requested,
     }

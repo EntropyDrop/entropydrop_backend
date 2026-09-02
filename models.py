@@ -218,7 +218,7 @@ class SpaceMarketResource(Base):
             name="ck_space_market_resource_kind",
         ),
         CheckConstraint(
-            "deleted_at IS NOT NULL OR schema_version = 3",
+            "schema_version = 3",
             name="ck_space_market_resource_schema_version",
         ),
         CheckConstraint("license = 'AGPL-3.0-only'", name="ck_space_market_resource_license"),
@@ -227,20 +227,20 @@ class SpaceMarketResource(Base):
             name="ck_space_market_resource_counts",
         ),
         CheckConstraint(
-            "deleted_at IS NOT NULL OR object_key IS NOT NULL",
+            "object_key IS NOT NULL",
             name="ck_space_market_resource_storage",
         ),
         Index(
             "ix_space_market_resources_downloads",
-            "deleted_at", "kind", "downloads_count", "created_at",
+            "kind", "downloads_count", "created_at",
         ),
         Index(
             "ix_space_market_resources_likes",
-            "deleted_at", "kind", "likes_count", "created_at",
+            "kind", "likes_count", "created_at",
         ),
         Index(
             "ix_space_market_resources_latest",
-            "deleted_at", "kind", "created_at",
+            "kind", "created_at",
         ),
         Index(
             "ix_space_market_resources_publisher_day",
@@ -259,7 +259,7 @@ class SpaceMarketResource(Base):
     name = Column(String(80), nullable=False)
     license = Column(String(32), nullable=False, default="AGPL-3.0-only", server_default="AGPL-3.0-only")
     content_digest = Column(LargeBinary(32), nullable=False)
-    object_key = Column(String(512), nullable=True)
+    object_key = Column(String(512), nullable=False)
     size_bytes = Column(Integer, nullable=False)
     block_count = Column(Integer, nullable=False, default=0, server_default="0")
     node_count = Column(Integer, nullable=False, default=0, server_default="0")
@@ -270,12 +270,6 @@ class SpaceMarketResource(Base):
         DateTime(timezone=True),
         default=lambda: datetime.datetime.now(datetime.timezone.utc),
         nullable=False,
-    )
-    deleted_at = Column(DateTime(timezone=True), nullable=True)
-    deleted_by_user_id = Column(
-        String(16),
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
     )
 
 

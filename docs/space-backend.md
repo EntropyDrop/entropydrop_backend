@@ -556,10 +556,11 @@ browser backpack entry --untrusted placement command--> authoritative world muta
   are browser-to-CDN requests, the bucket/distribution must allow `GET`/`HEAD` CORS from
   the deployed frontend origins (and localhost during development); application API CORS
   settings do not add headers to CDN responses.
-- Administrators retain a soft-deleted database tombstone for attribution, quota, and digest
-  deduplication, but deletion removes the S3 object and requests a CloudFront invalidation.
+- Publishers may permanently delete their own resources, and administrators may permanently
+  delete any resource. Deletion removes likes and the resource row, deletes the S3 object,
+  and requests a CloudFront invalidation; no deletion audit tombstone is retained.
   When a CDN domain is configured, `AWS_CLOUDFRONT_DISTRIBUTION_ID` is required so an
-  immutable cached copy cannot remain downloadable after a successful admin response. The
+  immutable cached copy cannot remain downloadable after a successful delete response. The
   backend AWS identity therefore needs `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`,
   and `cloudfront:CreateInvalidation` permissions for this flow.
 
@@ -806,11 +807,11 @@ POST   /space/api/v2/bootstrap                  Bearer/skin gate + latest state 
 PUT    /space/api/v2/worlds/{id}/players/me/position  Save latest per-user reconnect position
 GET    /space/api/v2/worlds/{id}/terrain-edits  Paginated durable authored chunk overlays
 POST   /space/api/v2/worlds/{id}/terrain-edits/batches  Idempotent batch of 1-256 mutations
-GET    /space/api/v2/market/resources           List/rank metadata and original CDN content_url; no download count
+GET    /space/api/v2/market/resources           List/rank metadata + CDN URL; mine=true filters to current publisher
 POST   /space/api/v2/market/resources           Validate and publish a canonical AGPL-3.0-only resource
 GET    /space/api/v2/market/resources/{id}/download  Download canonical content and increment count
 POST   /space/api/v2/market/resources/{id}/like Toggle the authenticated user's like
-DELETE /space/api/v2/market/resources/{id}      Administrator-only soft delete
+DELETE /space/api/v2/market/resources/{id}      Publisher-owned or administrator hard delete
 POST   /space/api/v2/worlds/{id}/join-ticket    Issue a short-lived real-time ticket
 GET    /space/api/v2/worlds/{id}                Read metadata and membership permissions
 GET    /space/api/v2/worlds/{id}/members        List members with permission
@@ -1034,7 +1035,7 @@ The system is not real-time multiplayer until it passes at least these scenarios
 - Market publication accepts only canonical Protobuf v3 resources, rejects renamed/reordered
   duplicates, enforces ten successful publications per UTC day, and fixes the license to
   `AGPL-3.0-only`; direct-CDN previews do not increment downloads, while explicit
-  download/like rankings and administrator soft-delete converge.
+  download/like rankings, publisher filtering, and authorized hard deletion converge.
 - Entity placement creates a new `entity_id` without copying velocity or `self.state`;
   block-set placement edits terrain only.
 - An enabled sleeping entity wakes exactly once when overlapping AOIs arrive concurrently,
@@ -1081,7 +1082,7 @@ implemented.
 | Enabled entity auto-run in loaded chunks | Durable desired run state, health, lifecycle/ownership epochs | AOI wake references and exhaustive wake/sleep state machine | Concurrent observers wake once; durable sleep, retry, quarantine and handoff tested |
 | Visible player state/orientation/skin/pose | Latest `player_snapshots`, stable player id, and existing `users.skin_url`/`skin_type` | Reliable presence carries URL/model; epoch-gated 20 Hz motion deltas never carry PNG bytes | Missing skin blocks entry; latest checkpoint restores, AOI enter/leave and reconnect reset converge |
 | Browser-only backpack | No inventory tables; `space.backpack.v3.pb` Protobuf in IndexedDB/base64 localStorage fallback plus `.edpb` import/export | Untrusted local placement is revalidated; only accepted world result persists | Reload stays local, clearing storage loses it, server has no backpack endpoint/message |
-| Explicit resource market | Immutable canonical Protobuf v3 content, global SHA-256 uniqueness, publisher/quota metadata, likes and soft deletion | Authenticated REST publish/list/download/like/admin-delete; no slot synchronization | Protobuf wire fixtures, strict-schema validation, duplicate/order/name equivalence, 10/day, counters/rankings and authorization tests |
+| Explicit resource market | Immutable canonical Protobuf v3 content, global SHA-256 uniqueness, publisher/quota metadata, likes and permanent deletion | Authenticated REST publish/list/download/like/delete with a current-publisher filter; no slot synchronization | Protobuf wire fixtures, strict-schema validation, duplicate/order/name equivalence, 10/day, counters/rankings and authorization tests |
 | Maximum 32 online with queue | Fixed session slots, FIFO queue leases and user advisory lock | Queue status/heartbeat, reservation, active and reconnect-grace states | 32 simultaneous admits, 33rd queues, promotion/reconnect never oversubscribes |
 | Real-time WebSocket behavior | No frame history in PostgreSQL | WSS binary protobuf, reliable presence/events, coalesced state, bounded fragmentation/backpressure | Slow client and stale-interest tests cannot delay tick or install obsolete data |
 | Reconnect/idempotency/conflicts | Resume hash, operation id unique index, revisions, event/checkpoint watermarks | Input replay, presence reset, `InterestReset`, compare-and-swap commands | Crash points and 10,000 retries produce one durable result |
