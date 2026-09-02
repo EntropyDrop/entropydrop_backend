@@ -552,7 +552,7 @@ def bootstrap_space(
             detail={
                 "code": "SKIN_REQUIRED",
                 "message": "You must set a character skin before entering Space.",
-                "action_url": "/skin/edit",
+                "action_url": "/skin/collection",
             },
         )
 

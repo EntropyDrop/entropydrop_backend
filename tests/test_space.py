@@ -78,7 +78,7 @@ def test_space_bootstrap_blocks_user_without_skin(client, db):
     assert response.json()["detail"] == {
         "code": "SKIN_REQUIRED",
         "message": "You must set a character skin before entering Space.",
-        "action_url": "/skin/edit",
+        "action_url": "/skin/collection",
     }
     assert db.query(SpaceWorldPlayerProfile).count() == 0
 
