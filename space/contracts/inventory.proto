@@ -40,6 +40,13 @@ message Vector3 {
   double z = 3;
 }
 
+message Quaternion {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double w = 4;
+}
+
 enum BodyType {
   BODY_TYPE_DYNAMIC = 0;
   BODY_TYPE_KINEMATIC = 1;
@@ -69,6 +76,12 @@ message Component {
   bool script_disabled = 6;
   repeated Seat seats = 7;
   repeated Component children = 8;
+  // Parent-relative authored transform. The root omits these fields.
+  optional Vector3 local_position = 9;
+  optional Quaternion local_rotation = 10;
+  // Orientation of the mounting frame in component-local coordinates.
+  // Identity means +Y points away from the surface and -Z points forward.
+  optional Quaternion anchor_rotation = 11;
 }
 
 enum ConstraintType {

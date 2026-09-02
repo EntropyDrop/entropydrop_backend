@@ -43,6 +43,22 @@ def _vector(value) -> list[float]:
     return [float(value.x), float(value.y), float(value.z)]
 
 
+def _set_quaternion(
+    target,
+    value: list[float] | tuple[float, float, float, float] | None,
+) -> None:
+    if value is None:
+        return
+    target.x = float(value[0])
+    target.y = float(value[1])
+    target.z = float(value[2])
+    target.w = float(value[3])
+
+
+def _quaternion(value) -> list[float]:
+    return [float(value.x), float(value.y), float(value.z), float(value.w)]
+
+
 def _encode_voxel(target, block: dict[str, Any]) -> None:
     target.dx = int(block["dx"])
     target.dy = int(block["dy"])
@@ -153,6 +169,12 @@ def _encode_component(message, component: dict[str, Any]) -> None:
         _set_vector(message.seats.add().position, seat["position"])
     for child in component.get("children", []):
         _encode_component(message.children.add(), child)
+    if component.get("localPosition") is not None:
+        _set_vector(message.local_position, component["localPosition"])
+    if component.get("localRotation") is not None:
+        _set_quaternion(message.local_rotation, component["localRotation"])
+    if component.get("anchorRotation") is not None:
+        _set_quaternion(message.anchor_rotation, component["anchorRotation"])
 
 
 def _decode_component(message) -> dict[str, Any]:
@@ -174,6 +196,12 @@ def _decode_component(message) -> dict[str, Any]:
         result["script"] = message.script
     if message.script_disabled:
         result["scriptDisabled"] = True
+    if message.HasField("local_position"):
+        result["localPosition"] = _vector(message.local_position)
+    if message.HasField("local_rotation"):
+        result["localRotation"] = _quaternion(message.local_rotation)
+    if message.HasField("anchor_rotation"):
+        result["anchorRotation"] = _quaternion(message.anchor_rotation)
     return result
 
 

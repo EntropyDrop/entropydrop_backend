@@ -56,6 +56,7 @@ HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 Number = StrictInt | StrictFloat
 Vector3 = tuple[Number, Number, Number]
+Quaternion = tuple[Number, Number, Number, Number]
 
 
 class StrictResourceModel(BaseModel):
@@ -80,6 +81,15 @@ def _validate_vector(value: Vector3 | None, label: str, max_abs: float = 256) ->
         number = _finite_number(component, label)
         if abs(number) > max_abs:
             raise ValueError(f"{label} components must be within ±{max_abs}")
+
+
+def _validate_quaternion(value: Quaternion | None, label: str) -> None:
+    if value is None:
+        return
+    components = [_finite_number(component, label, -1, 1) for component in value]
+    length_squared = sum(component * component for component in components)
+    if not math.isclose(length_squared, 1, rel_tol=1e-6, abs_tol=1e-6):
+        raise ValueError(f"{label} must be a normalized quaternion")
 
 
 def _valid_component_id(value: str, allow_root: bool = True) -> bool:
@@ -155,6 +165,9 @@ class ComponentSeat(StrictResourceModel):
 class EntityComponent(StrictResourceModel):
     id: StrictStr = Field(min_length=1, max_length=64)
     pivot: Vector3 | None = None
+    localPosition: Vector3 | None = None
+    localRotation: Quaternion | None = None
+    anchorRotation: Quaternion | None = None
     body: ComponentBody
     blocks: list[MarketVoxel] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_BLOCKS)
     script: StrictStr | None = None
@@ -167,6 +180,9 @@ class EntityComponent(StrictResourceModel):
         if not _valid_component_id(self.id):
             raise ValueError("component id is not portable")
         _validate_vector(self.pivot, "component pivot", SPACE_MARKET_MAX_COORDINATE)
+        _validate_vector(self.localPosition, "component local position", SPACE_MARKET_MAX_COORDINATE)
+        _validate_quaternion(self.localRotation, "component local rotation")
+        _validate_quaternion(self.anchorRotation, "component anchor rotation")
         if self.script is not None and len(self.script.encode("utf-8")) > SPACE_MARKET_MAX_SCRIPT_BYTES:
             raise ValueError("one component script exceeds 64 KiB")
         if self.blocks:
@@ -231,6 +247,8 @@ class EntityPayload(StrictResourceModel):
 
         if self.root.id != "root":
             raise ValueError("entity root component id must be root")
+        if self.root.localPosition is not None or self.root.localRotation is not None:
+            raise ValueError("entity root may not have a parent-relative transform")
         known_ids: set[str] = set()
         total_blocks = 0
         total_script_bytes = 0

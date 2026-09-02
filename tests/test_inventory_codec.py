@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 from space.contracts import inventory_pb2
@@ -42,12 +44,16 @@ def test_recursive_entity_round_trip_keeps_component_local_body_script_and_seats
         "name": "Rover",
         "root": {
             "id": "root",
+            "anchorRotation": [0, 0, math.sqrt(0.5), math.sqrt(0.5)],
             "body": {"type": "dynamic", "useGravity": False},
             "blocks": [{"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 1}],
             "seats": [{"position": [0, 1, 0]}],
             "children": [{
                 "id": "wheel",
                 "pivot": [1, 0, 0],
+                "localPosition": [1, 2, 3],
+                "localRotation": [0, 1, 0, 0],
+                "anchorRotation": [math.sqrt(0.5), 0, 0, math.sqrt(0.5)],
                 "body": {"type": "kinematic", "collisionEnabled": False},
                 "blocks": [{"dx": 1, "dy": 0, "dz": 0, "block": 1, "color": 2}],
                 "script": "self.setLocalSpin([1,0,0], 60);",
@@ -61,6 +67,40 @@ def test_recursive_entity_round_trip_keeps_component_local_body_script_and_seats
     kind, decoded = decode_inventory_resource(encode_inventory_resource("entity", canonical))
     assert kind == "entity"
     assert decoded == canonical
+
+
+def test_inventory_digest_includes_component_transforms():
+    canonical = {
+        "type": "space-entity",
+        "version": 3,
+        "name": "Arm",
+        "root": {
+            "id": "root",
+            "body": {"type": "dynamic"},
+            "blocks": [{"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 1}],
+            "seats": [],
+            "children": [{
+                "id": "arm",
+                "localPosition": [1, 0, 0],
+                "localRotation": [0, 0, 0, 1],
+                "anchorRotation": [0, 0, 0, 1],
+                "body": {"type": "kinematic"},
+                "blocks": [],
+                "seats": [],
+                "children": [],
+            }],
+        },
+        "constraints": [],
+    }
+    moved = {
+        **canonical,
+        "root": {
+            **canonical["root"],
+            "children": [{**canonical["root"]["children"][0], "localPosition": [2, 0, 0]}],
+        },
+    }
+
+    assert inventory_content_digest("entity", canonical) != inventory_content_digest("entity", moved)
 
 
 def test_inventory_digest_ignores_display_name_but_not_content():

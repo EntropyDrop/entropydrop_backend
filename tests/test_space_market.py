@@ -1,3 +1,5 @@
+import math
+
 import pytest
 
 import auth
@@ -75,6 +77,7 @@ def _entity(name: str = "Walker"):
         "name": name,
         "root": {
             "id": "root",
+            "anchorRotation": [0, 0, math.sqrt(0.5), math.sqrt(0.5)],
             "body": {"type": "dynamic", "useGravity": True},
             "blocks": [
                 {"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 0xF2A93B},
@@ -83,6 +86,9 @@ def _entity(name: str = "Walker"):
             "children": [{
                 "id": "arm",
                 "pivot": [1.5, 0.5, 0.5],
+                "localPosition": [1, 2, 3],
+                "localRotation": [0, 1, 0, 0],
+                "anchorRotation": [math.sqrt(0.5), 0, 0, math.sqrt(0.5)],
                 "body": {"type": "kinematic"},
                 "blocks": [
                     {"dx": 1, "dy": 0, "dz": 0, "block": 1, "color": 0x48DBFB},
@@ -135,6 +141,10 @@ def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client
     assert kind == "entity"
     assert canonical["root"]["children"][0]["id"] == "arm"
     assert canonical["root"]["body"]["useGravity"] is True
+    assert canonical["root"]["anchorRotation"] == [0, 0, math.sqrt(0.5), math.sqrt(0.5)]
+    assert canonical["root"]["children"][0]["localPosition"] == [1, 2, 3]
+    assert canonical["root"]["children"][0]["localRotation"] == [0, 1, 0, 0]
+    assert canonical["root"]["children"][0]["anchorRotation"] == [math.sqrt(0.5), 0, 0, math.sqrt(0.5)]
     assert len(canonical["root"]["children"][0]["seats"]) == 2
 
     # Listing exposes the original CDN object for preview without touching the
@@ -191,6 +201,23 @@ def test_market_validates_entity_hierarchy(client, db):
     assert response.json()["detail"]["code"] == "INVALID_MARKET_RESOURCE"
 
     assert db.query(SpaceMarketResource).count() == 0
+
+
+def test_market_rejects_invalid_component_transforms(client, db):
+    user = _user(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    root_transform = _entity("Root transform")
+    root_transform["root"]["localPosition"] = [1, 0, 0]
+    assert _publish(client, "entity", root_transform).status_code == 422
+
+    invalid_position = _entity("Invalid position")
+    invalid_position["root"]["children"][0]["localPosition"] = [129, 0, 0]
+    assert _publish(client, "entity", invalid_position).status_code == 422
+
+    invalid_rotation = _entity("Invalid rotation")
+    invalid_rotation["root"]["children"][0]["localRotation"] = [0, 0, 0, 0]
+    assert _publish(client, "entity", invalid_rotation).status_code == 422
 
 
 def test_market_uses_one_explicit_root_and_preserves_child_collision_flags(client, db, market_object_storage):
