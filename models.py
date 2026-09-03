@@ -139,6 +139,27 @@ class SpaceWorldEventStream(Base):
     )
 
 
+class SpaceEntityCreateToken(Base):
+    """Revocable, hashed credential whose only authority is creating entities."""
+    __tablename__ = "space_entity_create_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_space_entity_create_token_hash"),
+        Index("ix_space_entity_create_tokens_owner", "world_id", "user_id", "created_at"),
+    )
+
+    id = Column(String(16), primary_key=True, default=generate_base58_id)
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(String(16), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(80), nullable=False)
+    token_hash = Column(LargeBinary(32), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class SpacePlayerSnapshot(Base):
     """Latest durable reconnect state for one player in one Space world."""
     __tablename__ = "player_snapshots"
@@ -149,6 +170,85 @@ class SpacePlayerSnapshot(Base):
     last_event_id = Column(BigInteger, nullable=False, default=0)
     state_version = Column(SmallInteger, nullable=False, default=1)
     state = Column(LargeBinary, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+
+
+class SpaceWorldEntity(Base):
+    """Durable placement/control metadata for an entity executed by Space browsers."""
+    __tablename__ = "space_world_entities"
+    __table_args__ = (
+        UniqueConstraint(
+            "world_id", "owner_user_id", "create_operation_id",
+            name="uq_space_world_entity_create_operation",
+        ),
+        CheckConstraint(
+            "desired_run_state IN ('running', 'stopped')",
+            name="ck_space_world_entity_run_state",
+        ),
+        CheckConstraint(
+            "source_kind IN ('market', 'browser')",
+            name="ck_space_world_entity_source_kind",
+        ),
+        CheckConstraint(
+            "yaw_quarter_turns >= 0 AND yaw_quarter_turns <= 3",
+            name="ck_space_world_entity_yaw",
+        ),
+        CheckConstraint("revision >= 1", name="ck_space_world_entity_revision"),
+        CheckConstraint("execution_epoch >= 0", name="ck_space_world_entity_execution_epoch"),
+        CheckConstraint("size_bytes > 0", name="ck_space_world_entity_size"),
+        CheckConstraint("snapshot_size_bytes >= 0", name="ck_space_world_entity_snapshot_size"),
+        Index("ix_space_world_entities_world_position", "world_id", "position_x_cm", "position_z_cm"),
+        Index("ix_space_world_entities_owner", "world_id", "owner_user_id", "created_at"),
+    )
+
+    world_id = Column(
+        Uuid(as_uuid=False),
+        ForeignKey("worlds.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    id = Column(Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_user_id = Column(
+        String(16),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    # Deliberately not a foreign key: market resources may be permanently
+    # deleted while already-created world entities retain their copied bytes.
+    # Browser-authored entities have no market source and keep this null.
+    source_kind = Column(String(16), nullable=False, default="market", server_default="market")
+    source_resource_id = Column(String(16), nullable=True)
+    name = Column(String(80), nullable=False)
+    schema_version = Column(SmallInteger, nullable=False, default=3, server_default="3")
+    content_digest = Column(LargeBinary(32), nullable=False)
+    definition = Column(LargeBinary, nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    snapshot = Column(LargeBinary, nullable=True)
+    snapshot_digest = Column(LargeBinary(32), nullable=True)
+    snapshot_size_bytes = Column(Integer, nullable=False, default=0, server_default="0")
+    position_x_cm = Column(Integer, nullable=False)
+    position_y_cm = Column(Integer, nullable=False)
+    position_z_cm = Column(Integer, nullable=False)
+    yaw_quarter_turns = Column(SmallInteger, nullable=False, default=0, server_default="0")
+    desired_run_state = Column(String(16), nullable=False, default="running", server_default="running")
+    revision = Column(BigInteger, nullable=False, default=1, server_default="1")
+    create_operation_id = Column(Uuid(as_uuid=False), nullable=False)
+    create_request_digest = Column(LargeBinary(32), nullable=False)
+    last_control_operation_id = Column(Uuid(as_uuid=False), nullable=True)
+    last_checkpoint_operation_id = Column(Uuid(as_uuid=False), nullable=True)
+    last_checkpoint_request_digest = Column(LargeBinary(32), nullable=True)
+    execution_instance_id = Column(Uuid(as_uuid=False), nullable=True)
+    execution_lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    execution_epoch = Column(BigInteger, nullable=False, default=0, server_default="0")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
     updated_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.datetime.now(datetime.timezone.utc),

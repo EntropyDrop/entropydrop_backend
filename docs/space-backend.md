@@ -51,6 +51,15 @@ The release target is one large persistent world with at most 32 occupied player
 many worlds scale horizontally across gateways/workers. Load tests determine whether the
 target ships; theoretical concurrency is not a promise.
 
+> Transitional implementation note (2026-09-03): online world entities now use
+> `space_world_entities` as their only durable source. External creation copies a canonical
+> market definition; browser creation/checkpoint stores a canonical definition plus a bounded
+> runtime snapshot. The browser removes and never reads/writes its legacy per-world entity
+> storage online; offline mode keeps browser persistence. The API does not run physics. An
+> eight-second owner-browser execution lease prevents duplicate execution, while non-owner
+> browsers keep a stopped collision proxy. This remains narrower than the authoritative
+> worker target below. See [Space external entity-create API](space-entity-create-api.md).
+
 ## 2. Performance Targets
 
 These engineering targets exclude public-network RTT between the user and the region:
@@ -486,6 +495,13 @@ newer client wall-clock time never wins automatically.
 | `player_snapshots` | Immediate/periodic/offline | Latest runtime position and yaw; no backpack data |
 | `world_checkpoints` | Background | Safe event-pruning watermark |
 
+The current transitional deployment additionally has `space_entity_create_tokens`
+(hashed, revocable `entity:create` credentials) and `space_world_entities` (copied
+definition, optional browser runtime snapshot, AOI transform, owner run intent and browser
+execution lease). Online browsers persist no separate world-entity copy; browser-authored
+definitions/snapshots are revision-checked here, while offline entities remain local.
+These two tables are not the final worker snapshot model.
+
 There are deliberately no `player_inventories` or `player_inventory_slots` tables.
 `player_snapshots.state` also excludes backpack data. `build_assets` is world recovery
 data, not a cloud copy of browser backpack entries.
@@ -822,6 +838,18 @@ POST   /space/api/v2/market/resources           Validate and publish a canonical
 GET    /space/api/v2/market/resources/{id}/download  Download canonical content and increment count
 POST   /space/api/v2/market/resources/{id}/like Toggle the authenticated user's like
 DELETE /space/api/v2/market/resources/{id}      Publisher-owned or administrator hard delete
+POST   /space/api/v2/worlds/{id}/entity-create-tokens  Mint a hashed, create-only external credential
+GET    /space/api/v2/worlds/{id}/entity-create-tokens  List the current user's credential metadata
+DELETE /space/api/v2/worlds/{id}/entity-create-tokens/{token}  Revoke one credential
+POST   /space/api/v2/worlds/{id}/entities       Idempotently create an entity at an exact transform
+POST   /space/api/v2/worlds/{id}/entities/browser  Persist a browser-authored definition and snapshot
+GET    /space/api/v2/worlds/{id}/entities       List nearby instances across wrapped X/Z seams
+GET    /space/api/v2/worlds/{id}/entities/{entity}/definition  Fetch the copied Protobuf definition
+GET    /space/api/v2/worlds/{id}/entities/{entity}/snapshot  Fetch and verify the runtime snapshot
+PUT    /space/api/v2/worlds/{id}/entities/{entity}/checkpoint  Owner/admin revisioned browser checkpoint
+DELETE /space/api/v2/worlds/{id}/entities/{entity}  Owner/admin permanent world-entity deletion
+PUT    /space/api/v2/worlds/{id}/entities/execution-leases  Claim/renew owner-browser execution
+PUT    /space/api/v2/worlds/{id}/entities/{entity}/run-state  Owner/admin durable Start/Stop intent
 POST   /space/api/v2/worlds/{id}/join-ticket    Issue a short-lived real-time ticket
 GET    /space/api/v2/worlds/{id}                Read metadata and membership permissions
 GET    /space/api/v2/worlds/{id}/members        List members with permission
@@ -1065,7 +1093,9 @@ The system is not real-time multiplayer until it passes at least these scenarios
 
 ## 18. Explicitly Rejected Designs
 
-- Clients do not PUT final world state.
+- In the final worker architecture, clients do not PUT authoritative final world state.
+  The transitional browser-execution slice accepts bounded owner snapshots for recovery,
+  validates their definition, and still treats the backend record as the durable source.
 - `updated_at` is not a synchronization cursor.
 - PostgreSQL does not store per-frame player or entity transforms.
 - Backpack/inventory data is not stored in PostgreSQL or synchronized over WebSocket.
