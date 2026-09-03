@@ -112,6 +112,7 @@ app.state.limiter = limiter
 
 DEFAULT_REQUEST_BODY_LIMIT_BYTES = 512 * 1024
 SPACE_MARKET_REQUEST_BODY_LIMIT_BYTES = 9 * 1024 * 1024
+SPACE_ENTITY_REQUEST_BODY_LIMIT_BYTES = 17 * 1024 * 1024
 
 
 def _is_space_market_publish(request: Request) -> bool:
@@ -121,13 +122,35 @@ def _is_space_market_publish(request: Request) -> bool:
     )
 
 
-def _request_too_large_response(is_market_publish: bool) -> JSONResponse:
-    if is_market_publish:
+def _is_space_entity_definition_write(request: Request) -> bool:
+    path = request.url.path.rstrip("/")
+    return (
+        path.startswith("/space/api/v2/worlds/")
+        and (
+            (
+                request.method == "POST"
+                and (path.endswith("/entities") or path.endswith("/entities/browser"))
+            )
+            or (request.method == "PUT" and path.endswith("/checkpoint"))
+        )
+    )
+
+
+def _request_too_large_response(request_kind: str) -> JSONResponse:
+    if request_kind == "market":
         return JSONResponse(
             status_code=413,
             content={"detail": {
                 "code": "MARKET_RESOURCE_TOO_LARGE",
                 "message": "Market resources may not exceed 8 MiB after canonicalization.",
+            }},
+        )
+    if request_kind == "entity":
+        return JSONResponse(
+            status_code=413,
+            content={"detail": {
+                "code": "ENTITY_DEFINITION_TOO_LARGE",
+                "message": "The entity definition or checkpoint exceeds the request limit.",
             }},
         )
     return JSONResponse(
@@ -144,12 +167,14 @@ def log_unhandled_exception(exc):
 @app.middleware("http")
 async def limit_upload_size(request: Request, call_next):
     is_market_publish = _is_space_market_publish(request)
+    is_entity_write = _is_space_entity_definition_write(request)
     if request.method in ["POST", "PUT", "PATCH"]:
-        limit = (
-            SPACE_MARKET_REQUEST_BODY_LIMIT_BYTES
-            if is_market_publish
-            else DEFAULT_REQUEST_BODY_LIMIT_BYTES
-        )
+        request_kind = "market" if is_market_publish else "entity" if is_entity_write else "default"
+        limit = {
+            "market": SPACE_MARKET_REQUEST_BODY_LIMIT_BYTES,
+            "entity": SPACE_ENTITY_REQUEST_BODY_LIMIT_BYTES,
+            "default": DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+        }[request_kind]
         content_length = request.headers.get("content-length")
         if content_length:
             try:
@@ -159,7 +184,7 @@ async def limit_upload_size(request: Request, call_next):
             if declared_length < 0:
                 return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header"})
             if declared_length > limit:
-                return _request_too_large_response(is_market_publish)
+                return _request_too_large_response(request_kind)
 
         received = 0
         buffered_messages = []
@@ -171,7 +196,7 @@ async def limit_upload_size(request: Request, call_next):
                 break
             received += len(message.get("body", b""))
             if received > limit:
-                return _request_too_large_response(is_market_publish)
+                return _request_too_large_response(request_kind)
             buffered_messages.append(message)
             if not message.get("more_body", False):
                 break
@@ -252,7 +277,7 @@ app.include_router(forum.router, prefix="/skin")
 app.include_router(credit.router, prefix="/skin")
 app.include_router(space.router)
 app.include_router(space_entities.router)
-app.include_router(space_entities.token_router)
+app.include_router(space_entities.api_key_router)
 app.include_router(space_market.router)
 app.include_router(space_realtime.api_router)
 app.include_router(space_realtime.realtime_router)

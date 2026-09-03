@@ -1,9 +1,9 @@
 import datetime
 import base64
 import binascii
+from dataclasses import dataclass
 import hashlib
 import json
-import logging
 import math
 import secrets
 import uuid
@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session
 
 import auth
 import models
-import s3_utils
 from database import get_db
 from rate_limit import limiter
 from routers.space import (
@@ -27,18 +26,16 @@ from routers.space import (
     SPACE_CHUNK_SIZE,
     _require_world_membership,
 )
-from routers.space_market import validate_market_payload
+from routers.space_market import validate_inventory_resource_payload
 from space.inventory_codec import (
     InventoryCodecError,
     decode_inventory_resource,
     encode_inventory_resource,
-    inventory_content_digest,
 )
 
 
 router = APIRouter(prefix="/space/api/v2/worlds/{world_id}/entities", tags=["space-entities"])
-token_router = APIRouter(prefix="/space/api/v2/worlds/{world_id}/entity-create-tokens", tags=["space-entities"])
-logger = logging.getLogger(__name__)
+api_key_router = APIRouter(prefix="/space/api/v2/api-keys", tags=["space-api-keys"])
 entity_security = HTTPBearer(auto_error=False)
 
 SPACE_ENTITY_RATE_LIMIT = "120/minute; 2000/hour"
@@ -50,8 +47,11 @@ SPACE_ENTITY_MAX_DEFINITION_BASE64_CHARS = ((SPACE_ENTITY_MAX_DEFINITION_BYTES +
 SPACE_ENTITY_MAX_AOI_RADIUS_CM = 64 * SPACE_CHUNK_SIZE * 100
 SPACE_ENTITY_MAX_AOI_RESULTS = 256
 SPACE_ENTITY_MAX_AOI_CANDIDATES = 4096
-SPACE_ENTITY_MAX_CREATE_TOKENS = 20
-SPACE_ENTITY_CREATE_TOKEN_PREFIX = "edsp_"
+SPACE_API_KEY_MAX_PER_USER = 20
+SPACE_API_KEY_PREFIX = "edapi_"
+SPACE_API_KEY_CREATE_SCOPE = "space:entity:create"
+SPACE_API_KEY_RUN_SCOPE = "space:entity:run"
+SPACE_API_KEY_SCOPES = (SPACE_API_KEY_CREATE_SCOPE, SPACE_API_KEY_RUN_SCOPE)
 SPACE_ENTITY_EXECUTION_LEASE_SECONDS = 8
 SPACE_ENTITY_SNAPSHOT_MAX_DEPTH = 20
 SPACE_ENTITY_SNAPSHOT_MAX_VALUES = 100_000
@@ -72,10 +72,13 @@ class EntityPosition(StrictEntityModel):
 
 class CreateWorldEntityRequest(StrictEntityModel):
     operation_id: uuid.UUID
-    resource_id: str = Field(min_length=1, max_length=16)
+    definition_base64: StrictStr = Field(
+        min_length=1,
+        max_length=SPACE_ENTITY_MAX_DEFINITION_BASE64_CHARS,
+    )
     position: EntityPosition
     yaw_quarter_turns: StrictInt = Field(default=0, ge=0, le=3)
-    desired_run_state: Literal["running", "stopped"] = "running"
+    desired_run_state: Literal["running", "stopped"] = "stopped"
 
 
 class CreateBrowserWorldEntityRequest(StrictEntityModel):
@@ -108,8 +111,13 @@ class SetWorldEntityRunStateRequest(StrictEntityModel):
     expected_revision: StrictInt | None = Field(default=None, ge=1)
 
 
-class CreateEntityTokenRequest(StrictEntityModel):
+class CreateSpaceApiKeyRequest(StrictEntityModel):
     name: StrictStr = Field(min_length=1, max_length=80)
+    scopes: list[Literal["space:entity:create", "space:entity:run"]] = Field(
+        default_factory=lambda: [SPACE_API_KEY_CREATE_SCOPE],
+        min_length=1,
+        max_length=len(SPACE_API_KEY_SCOPES),
+    )
 
 
 class ClaimEntityExecutionLeasesRequest(StrictEntityModel):
@@ -117,17 +125,23 @@ class ClaimEntityExecutionLeasesRequest(StrictEntityModel):
     entity_ids: list[uuid.UUID] = Field(min_length=1, max_length=SPACE_ENTITY_MAX_AOI_RESULTS)
 
 
-def _request_digest(payload: CreateWorldEntityRequest) -> bytes:
+@dataclass(frozen=True)
+class EntityCreator:
+    user: models.User
+    api_key_scopes: frozenset[str] | None = None
+
+
+def _request_digest(payload: CreateWorldEntityRequest, definition_digest: bytes) -> bytes:
     canonical = {
+        "definition_digest": definition_digest.hex(),
         "desired_run_state": payload.desired_run_state,
         "position": payload.position.model_dump(),
-        "resource_id": payload.resource_id,
         "yaw_quarter_turns": payload.yaw_quarter_turns,
     }
     return hashlib.sha256(json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode()).digest()
 
 
-def _decode_browser_definition(encoded: str) -> tuple[bytes, bytes, dict]:
+def _decode_entity_definition(encoded: str) -> tuple[bytes, bytes, dict]:
     try:
         definition = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as error:
@@ -141,7 +155,7 @@ def _decode_browser_definition(encoded: str) -> tuple[bytes, bytes, dict]:
         kind, decoded = decode_inventory_resource(definition)
         if kind != "entity":
             raise ValueError("uploaded resource is not an entity")
-        canonical = validate_market_payload(kind, decoded)
+        canonical = validate_inventory_resource_payload(kind, decoded)
         definition = encode_inventory_resource("entity", canonical)
     except (InventoryCodecError, ValueError) as error:
         raise HTTPException(status_code=422, detail={"code": "ENTITY_DEFINITION_INVALID"}) from error
@@ -268,39 +282,50 @@ def _browser_request_digest(
     return hashlib.sha256(json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode()).digest()
 
 
-def _entity_token_response(token: models.SpaceEntityCreateToken) -> dict:
+def _api_key_response(api_key: models.SpaceApiKey) -> dict:
     return {
-        "id": token.id,
-        "world_id": str(token.world_id),
-        "name": token.name,
-        "scope": "entity:create",
-        "created_at": token.created_at.isoformat(),
-        "last_used_at": token.last_used_at.isoformat() if token.last_used_at else None,
+        "id": api_key.id,
+        "name": api_key.name,
+        "key_prefix": api_key.key_prefix,
+        "scopes": list(api_key.scopes or []),
+        "created_at": api_key.created_at.isoformat(),
+        "last_used_at": api_key.last_used_at.isoformat() if api_key.last_used_at else None,
     }
 
 
 def _entity_creator(
-    world_id: str,
     credentials: HTTPAuthorizationCredentials | None = Security(entity_security),
     db: Session = Depends(get_db),
-) -> models.User:
+) -> EntityCreator:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=401, detail={"code": "ENTITY_CREATE_AUTH_REQUIRED"})
     credential = credentials.credentials
-    if not credential.startswith(SPACE_ENTITY_CREATE_TOKEN_PREFIX):
-        return auth.get_current_user(credentials=credentials, db=db)
+    if not credential.startswith(SPACE_API_KEY_PREFIX):
+        return EntityCreator(user=auth.get_current_user(credentials=credentials, db=db))
+    key_id = credential[len(SPACE_API_KEY_PREFIX):].split("_", 1)[0]
+    if len(key_id) != 16:
+        raise HTTPException(status_code=401, detail={"code": "SPACE_API_KEY_INVALID"})
     token_hash = hashlib.sha256(credential.encode()).digest()
-    token = db.query(models.SpaceEntityCreateToken).filter(
-        models.SpaceEntityCreateToken.token_hash == token_hash,
-        models.SpaceEntityCreateToken.world_id == world_id,
+    api_key = db.query(models.SpaceApiKey).filter(
+        models.SpaceApiKey.id == key_id,
+        models.SpaceApiKey.token_hash == token_hash,
     ).first()
-    if token is None:
-        raise HTTPException(status_code=401, detail={"code": "ENTITY_CREATE_TOKEN_INVALID"})
-    user = db.query(models.User).filter(models.User.id == token.user_id).first()
+    if api_key is None:
+        raise HTTPException(status_code=401, detail={"code": "SPACE_API_KEY_INVALID"})
+    user = db.query(models.User).filter(models.User.id == api_key.user_id).first()
     if user is None:
-        raise HTTPException(status_code=401, detail={"code": "ENTITY_CREATE_TOKEN_INVALID"})
-    token.last_used_at = datetime.datetime.now(datetime.timezone.utc)
-    return user
+        raise HTTPException(status_code=401, detail={"code": "SPACE_API_KEY_INVALID"})
+    scopes = frozenset(
+        scope for scope in (api_key.scopes if isinstance(api_key.scopes, list) else [])
+        if isinstance(scope, str)
+    )
+    if SPACE_API_KEY_CREATE_SCOPE not in scopes:
+        raise HTTPException(status_code=403, detail={
+            "code": "SPACE_API_KEY_SCOPE_REQUIRED",
+            "required_scope": SPACE_API_KEY_CREATE_SCOPE,
+        })
+    api_key.last_used_at = datetime.datetime.now(datetime.timezone.utc)
+    return EntityCreator(user=user, api_key_scopes=scopes)
 
 
 def _world_dimensions_cm(world: models.SpaceWorld) -> tuple[int, int]:
@@ -334,8 +359,6 @@ def _entity_response(entity: models.SpaceWorldEntity, current_user: models.User)
         "id": str(entity.id),
         "world_id": str(entity.world_id),
         "owner_user_id": entity.owner_user_id,
-        "source_kind": entity.source_kind,
-        "source_resource_id": entity.source_resource_id,
         "name": entity.name,
         "schema_version": entity.schema_version,
         "definition_digest": bytes(entity.content_digest).hex(),
@@ -360,7 +383,7 @@ def _entity_response(entity: models.SpaceWorldEntity, current_user: models.User)
         "desired_run_state": entity.desired_run_state,
         "revision": entity.revision,
         "can_control": can_control,
-        "can_edit": entity.source_kind == "browser" and can_control,
+        "can_edit": can_control,
         "created_at": entity.created_at.isoformat(),
         "updated_at": entity.updated_at.isoformat(),
     }
@@ -387,105 +410,79 @@ def _wrapped_delta(value: int, center: int, extent: int) -> int:
     return (value - center + extent // 2) % extent - extent // 2
 
 
-def _load_canonical_entity(resource: models.SpaceMarketResource) -> tuple[bytes, bytes]:
-    try:
-        stored = s3_utils.download_from_s3(resource.object_key, is_public=True)
-    except Exception as error:
-        logger.exception("Could not load market entity %s for world placement", resource.id)
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "ENTITY_DEFINITION_UNAVAILABLE",
-                "message": "The market entity definition is temporarily unavailable.",
-            },
-        ) from error
-    if not stored or len(stored) > SPACE_ENTITY_MAX_DEFINITION_BYTES:
-        raise HTTPException(status_code=500, detail={"code": "MARKET_ENTITY_CORRUPT"})
-    try:
-        kind, decoded = decode_inventory_resource(stored)
-        if kind != "entity":
-            raise ValueError("market resource kind does not match its object")
-        canonical = validate_market_payload(kind, decoded)
-    except (InventoryCodecError, ValueError) as error:
-        logger.exception("Market entity %s is not a valid canonical entity", resource.id)
-        raise HTTPException(status_code=500, detail={"code": "MARKET_ENTITY_CORRUPT"}) from error
-    if inventory_content_digest("entity", canonical) != bytes(resource.content_digest):
-        raise HTTPException(status_code=500, detail={"code": "MARKET_ENTITY_CORRUPT"})
-    encoded = encode_inventory_resource("entity", canonical)
-    return encoded, hashlib.sha256(encoded).digest()
-
-
-@token_router.post("", status_code=201)
+@api_key_router.post("", status_code=201)
 @limiter.limit(SPACE_ENTITY_RATE_LIMIT)
-def create_entity_create_token(
+def create_space_api_key(
     request: Request,
-    world_id: str,
-    payload: CreateEntityTokenRequest,
+    payload: CreateSpaceApiKeyRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    world = _require_world_membership(db, world_id, current_user)
     name = payload.name.strip()
     if not name:
-        raise HTTPException(status_code=422, detail={"code": "ENTITY_CREATE_TOKEN_NAME_REQUIRED"})
-    count = db.query(models.SpaceEntityCreateToken).filter(
-        models.SpaceEntityCreateToken.world_id == world.id,
-        models.SpaceEntityCreateToken.user_id == current_user.id,
-    ).count()
-    if count >= SPACE_ENTITY_MAX_CREATE_TOKENS:
-        raise HTTPException(status_code=429, detail={
-            "code": "ENTITY_CREATE_TOKEN_LIMIT_REACHED",
-            "limit": SPACE_ENTITY_MAX_CREATE_TOKENS,
+        raise HTTPException(status_code=422, detail={"code": "SPACE_API_KEY_NAME_REQUIRED"})
+    scopes = [scope for scope in SPACE_API_KEY_SCOPES if scope in set(payload.scopes)]
+    if SPACE_API_KEY_CREATE_SCOPE not in scopes:
+        raise HTTPException(status_code=422, detail={
+            "code": "SPACE_API_KEY_CREATE_SCOPE_REQUIRED",
+            "required_scope": SPACE_API_KEY_CREATE_SCOPE,
         })
-    plaintext = f"{SPACE_ENTITY_CREATE_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
-    token = models.SpaceEntityCreateToken(
-        world_id=world.id,
+    db.query(models.User).filter(models.User.id == current_user.id).with_for_update().first()
+    count = db.query(models.SpaceApiKey).filter(
+        models.SpaceApiKey.user_id == current_user.id,
+    ).count()
+    if count >= SPACE_API_KEY_MAX_PER_USER:
+        raise HTTPException(status_code=429, detail={
+            "code": "SPACE_API_KEY_LIMIT_REACHED",
+            "limit": SPACE_API_KEY_MAX_PER_USER,
+        })
+    key_id = models.generate_base58_id()
+    key_prefix = f"{SPACE_API_KEY_PREFIX}{key_id}_"
+    plaintext = f"{key_prefix}{secrets.token_urlsafe(32)}"
+    api_key = models.SpaceApiKey(
+        id=key_id,
         user_id=current_user.id,
         name=name,
+        key_prefix=key_prefix,
         token_hash=hashlib.sha256(plaintext.encode()).digest(),
+        scopes=scopes,
     )
-    db.add(token)
+    db.add(api_key)
     db.commit()
-    db.refresh(token)
-    return {**_entity_token_response(token), "token": plaintext}
+    db.refresh(api_key)
+    return {**_api_key_response(api_key), "api_key": plaintext}
 
 
-@token_router.get("")
+@api_key_router.get("")
 @limiter.limit(SPACE_ENTITY_RATE_LIMIT)
-def list_entity_create_tokens(
+def list_space_api_keys(
     request: Request,
-    world_id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    world = _require_world_membership(db, world_id, current_user)
-    tokens = db.query(models.SpaceEntityCreateToken).filter(
-        models.SpaceEntityCreateToken.world_id == world.id,
-        models.SpaceEntityCreateToken.user_id == current_user.id,
-    ).order_by(models.SpaceEntityCreateToken.created_at.desc()).all()
-    return {"items": [_entity_token_response(token) for token in tokens]}
+    api_keys = db.query(models.SpaceApiKey).filter(
+        models.SpaceApiKey.user_id == current_user.id,
+    ).order_by(models.SpaceApiKey.created_at.desc()).all()
+    return {"items": [_api_key_response(api_key) for api_key in api_keys]}
 
 
-@token_router.delete("/{token_id}")
+@api_key_router.delete("/{api_key_id}")
 @limiter.limit(SPACE_ENTITY_RATE_LIMIT)
-def revoke_entity_create_token(
+def revoke_space_api_key(
     request: Request,
-    world_id: str,
-    token_id: str,
+    api_key_id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    world = _require_world_membership(db, world_id, current_user)
-    token = db.query(models.SpaceEntityCreateToken).filter(
-        models.SpaceEntityCreateToken.id == token_id,
-        models.SpaceEntityCreateToken.world_id == world.id,
-        models.SpaceEntityCreateToken.user_id == current_user.id,
+    api_key = db.query(models.SpaceApiKey).filter(
+        models.SpaceApiKey.id == api_key_id,
+        models.SpaceApiKey.user_id == current_user.id,
     ).first()
-    if token is None:
-        raise HTTPException(status_code=404, detail={"code": "ENTITY_CREATE_TOKEN_NOT_FOUND"})
-    db.delete(token)
+    if api_key is None:
+        raise HTTPException(status_code=404, detail={"code": "SPACE_API_KEY_NOT_FOUND"})
+    db.delete(api_key)
     db.commit()
-    return {"revoked": True, "token_id": token_id}
+    return {"revoked": True, "api_key_id": api_key_id}
 
 
 @router.post("", status_code=201)
@@ -495,12 +492,23 @@ def create_world_entity(
     world_id: str,
     payload: CreateWorldEntityRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(_entity_creator),
+    creator: EntityCreator = Depends(_entity_creator),
 ):
+    current_user = creator.user
     world = _require_world_membership(db, world_id, current_user)
     _validate_position(world, payload.position)
+    if (
+        creator.api_key_scopes is not None
+        and payload.desired_run_state == "running"
+        and SPACE_API_KEY_RUN_SCOPE not in creator.api_key_scopes
+    ):
+        raise HTTPException(status_code=403, detail={
+            "code": "SPACE_API_KEY_SCOPE_REQUIRED",
+            "required_scope": SPACE_API_KEY_RUN_SCOPE,
+        })
+    definition, definition_digest, canonical = _decode_entity_definition(payload.definition_base64)
     operation_id = str(payload.operation_id)
-    request_digest = _request_digest(payload)
+    request_digest = _request_digest(payload, definition_digest)
     existing = db.query(models.SpaceWorldEntity).filter(
         models.SpaceWorldEntity.world_id == world.id,
         models.SpaceWorldEntity.owner_user_id == current_user.id,
@@ -509,25 +517,11 @@ def create_world_entity(
     if existing is not None:
         if bytes(existing.create_request_digest) != request_digest:
             raise HTTPException(status_code=409, detail={"code": "ENTITY_OPERATION_ID_REUSED"})
+        db.commit()
         return _entity_response(existing, current_user)
 
-    resource = db.query(models.SpaceMarketResource).filter(
-        models.SpaceMarketResource.id == payload.resource_id,
-    ).first()
-    if resource is None:
-        raise HTTPException(status_code=404, detail={"code": "MARKET_RESOURCE_NOT_FOUND"})
-    if resource.kind != "entity":
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "code": "ENTITY_RESOURCE_REQUIRED",
-                "message": "Only a published entity resource can be placed in the world.",
-            },
-        )
-
-    # Serialize quota checks for one creator. The definition is copied before
-    # insertion so a later hard-delete of the market row/object cannot break
-    # an entity already present in the world.
+    # Serialize quota checks for one account so concurrent agents cannot exceed
+    # the per-world ownership cap.
     db.query(models.User).filter(models.User.id == current_user.id).with_for_update().first()
     owned_count = db.query(models.SpaceWorldEntity).filter(
         models.SpaceWorldEntity.world_id == world.id,
@@ -539,14 +533,11 @@ def create_world_entity(
             "limit": SPACE_ENTITY_MAX_PER_OWNER,
         })
 
-    definition, definition_digest = _load_canonical_entity(resource)
     entity = models.SpaceWorldEntity(
         world_id=world.id,
         owner_user_id=current_user.id,
-        source_kind="market",
-        source_resource_id=resource.id,
-        name=resource.name,
-        schema_version=resource.schema_version,
+        name=str(canonical.get("name") or "Entity")[:80],
+        schema_version=3,
         content_digest=definition_digest,
         definition=definition,
         size_bytes=len(definition),
@@ -588,7 +579,7 @@ def create_browser_world_entity(
     """Persist an entity authored in an authenticated Space browser."""
     world = _require_world_membership(db, world_id, current_user)
     _validate_position(world, payload.position)
-    definition, definition_digest, canonical = _decode_browser_definition(payload.definition_base64)
+    definition, definition_digest, canonical = _decode_entity_definition(payload.definition_base64)
     snapshot, snapshot_digest = _encode_snapshot(payload.snapshot, world, payload.position)
     operation_id = str(payload.operation_id)
     request_digest = _browser_request_digest(
@@ -621,8 +612,6 @@ def create_browser_world_entity(
     entity = models.SpaceWorldEntity(
         world_id=world.id,
         owner_user_id=current_user.id,
-        source_kind="browser",
-        source_resource_id=None,
         name=str(canonical.get("name") or "Entity")[:80],
         schema_version=3,
         content_digest=definition_digest,
@@ -787,14 +776,11 @@ def checkpoint_browser_world_entity(
         raise HTTPException(status_code=404, detail={"code": "WORLD_ENTITY_NOT_FOUND"})
     if entity.owner_user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail={"code": "ENTITY_EDIT_FORBIDDEN"})
-    if entity.source_kind != "browser":
-        raise HTTPException(status_code=409, detail={"code": "MARKET_ENTITY_IMMUTABLE"})
-
     definition = None
     definition_digest = None
     canonical = None
     if payload.definition_base64 is not None:
-        definition, definition_digest, canonical = _decode_browser_definition(payload.definition_base64)
+        definition, definition_digest, canonical = _decode_entity_definition(payload.definition_base64)
     snapshot, snapshot_digest = _encode_snapshot(payload.snapshot, world, payload.position)
     request_digest = _browser_request_digest(
         definition_digest=definition_digest,

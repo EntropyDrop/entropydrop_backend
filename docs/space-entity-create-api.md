@@ -1,95 +1,95 @@
-# Space external entity-create API
+# Space external entity API
 
-This is the deliberately narrow API for an external agent. Its credential has
-exactly one capability: create an entity from an already-published Space market
-entity at a specified world transform. It cannot read the world, move or edit an
-entity, change terrain, use the market, or Start/Stop an entity.
+External agents use a long-lived, account-level Space API key to submit an entity
+definition directly to any world the account can access. Market publication is not part
+of entity creation.
 
-## Runtime and ownership model
+## Security and ownership
 
-- The API process never executes entity code or physics. It validates and copies
-  the immutable Protobuf definition, records the placement and returns an entity ID.
-- Nearby browsers discover records through the authenticated AOI endpoint. A short
-  execution lease ensures that at most one of the owner's browser sessions advances
-  one entity at a time. Other players render the entity in its stopped construction
-  pose with collision/query shapes still enabled.
-- The durable `desired_run_state` belongs to the entity owner. Only that owner or an
-  administrator may change it with the internal Wrench control endpoint. An ordinary
-  player therefore cannot stop another player's entity.
-- A market-created instance is read-only to browser tools: changes must be made to the
-  source resource and published as a new entity. A browser-authored instance is editable
-  only by its owner or an administrator and is checkpointed back to this API. The entity's
-  own `self.*` script actions remain available to the browser holding its execution lease.
-- `self.stop()` remains an entity-local action. It stops physics and scripts, clears
-  runtime state/motion and restores the stopped grid pose without granting the browser
-  any owner authority.
-- This transitional browser-execution slice does not yet relay live transforms from
-  the lease holder to observers. Non-owner browsers display the stopped pose. The
-  future authoritative worker design in `space-backend.md` replaces this limitation.
+- A normal EntropyDrop login creates, lists, and revokes API keys.
+- A key is shown once. It begins with `edapi_`; PostgreSQL stores only its SHA-256 hash.
+- Every key includes `space:entity:create`. `space:entity:run` is optional and is required
+  when a create request asks for `desired_run_state: "running"`.
+- The API key resolves to its owning user. World membership, per-user entity quota, request
+  rate limits, coordinate limits, definition size, Protobuf structure, schema version,
+  scripts, component counts, and voxel limits are all checked by the backend.
+- Created entities belong to the key owner. There is no market/browser source type; an
+  owner or administrator can edit, checkpoint, control, or delete any entity they own.
+- API keys are not login tokens. They cannot list the world, read definitions or snapshots,
+  change existing entities, edit terrain, or call the market API.
 
-## 1. Create a scoped credential
+## 1. Create an API key
 
-Token management uses the player's normal EntropyDrop Bearer login and requires world
-membership. The plaintext is returned only once; PostgreSQL stores only SHA-256.
+The in-game Settings panel exposes the same API. A user may keep at most 20 active keys.
 
 ```http
-POST /space/api/v2/worlds/{world_id}/entity-create-tokens
+POST /space/api/v2/api-keys
 Authorization: Bearer <player-login-token>
 Content-Type: application/json
 
-{"name":"my-build-agent"}
+{
+  "name": "my-build-agent",
+  "scopes": ["space:entity:create", "space:entity:run"]
+}
 ```
 
-The response contains `scope: "entity:create"` and a secret beginning with `edsp_`.
-Use the listing endpoint to inspect token metadata and hard-delete a token to revoke it:
+The response returns metadata plus `api_key` once:
+
+```json
+{
+  "id": "AbCdEfGhJkMnPqRs",
+  "name": "my-build-agent",
+  "key_prefix": "edapi_AbCdEfGhJkMnPqRs_",
+  "scopes": ["space:entity:create", "space:entity:run"],
+  "created_at": "2026-09-03T00:00:00+00:00",
+  "last_used_at": null,
+  "api_key": "edapi_AbCdEfGhJkMnPqRs_<one-time-secret>"
+}
+```
+
+List metadata or hard-revoke a key with normal login authentication:
 
 ```text
-GET    /space/api/v2/worlds/{world_id}/entity-create-tokens
-DELETE /space/api/v2/worlds/{world_id}/entity-create-tokens/{token_id}
+GET    /space/api/v2/api-keys
+DELETE /space/api/v2/api-keys/{api_key_id}
 ```
 
-A user may keep at most 20 active create tokens in one world. Never put the full player
-login token in an agent configuration.
+## 2. Create an entity directly
 
-## 2. Create an entity
-
-The resource must currently exist in the market and have `kind=entity`. Coordinates are
-integer centimetres. X and Z use the canonical wrapped-world range rather than negative
-aliases; Y is bounded by the Space position contract. `yaw_quarter_turns` is 0, 1, 2 or
-3 and rotates about world Y in exact 90-degree steps, preserving the stopped construction
-grid. The position is the entity's construction origin, not its centre of mass.
+`definition_base64` is a base64-encoded canonical `InventoryResource` Protobuf v3 whose
+kind is `entity`. Coordinates are integer centimetres. X and Z must be inside the world's
+canonical wrapped coordinate range; Y uses the Space vertical bounds. `yaw_quarter_turns`
+is 0 through 3. The position is the entity construction origin.
 
 ```http
 POST /space/api/v2/worlds/{world_id}/entities
-Authorization: Bearer edsp_<secret>
+Authorization: Bearer edapi_<key-id>_<secret>
 Content-Type: application/json
 
 {
   "operation_id": "a9b3593c-e029-4a9f-a021-d9534709db9e",
-  "resource_id": "MarketEntityId",
+  "definition_base64": "CAMaLi4u",
   "position": {"x_cm": 12050, "y_cm": 3400, "z_cm": 8290},
   "yaw_quarter_turns": 1,
-  "desired_run_state": "running"
+  "desired_run_state": "stopped"
 }
 ```
 
-`operation_id` is required idempotency. Retrying the identical body returns the same
-entity. Reusing the ID for a different request returns `409 ENTITY_OPERATION_ID_REUSED`.
-Each user may own at most 256 durable world entities of either source kind per world.
+`operation_id` is the idempotency key. Retrying the same canonical definition, transform,
+and run state returns the same entity. Reusing it for a different request returns
+`409 ENTITY_OPERATION_ID_REUSED`. The default run state is `stopped`; requesting `running`
+without `space:entity:run` returns `403 SPACE_API_KEY_SCOPE_REQUIRED`.
 
-Creation downloads the market object, decodes and canonicalizes Protobuf v3 again,
-validates its semantic digest, then stores a private byte-for-byte copy and an exact-byte
-SHA-256. Consequently, permanently deleting the market publication does not break an
-entity that has already been created in the world.
+The backend base64-decodes the definition, requires the entity resource kind, validates
+and canonicalizes every field, re-encodes it, and stores the canonical bytes plus an exact
+SHA-256. Definitions are capped at 8 MiB. Each user may own at most 256 entities per world.
 
-## 3. Browser-only endpoints and online persistence
+## Browser synchronization
 
-The following endpoints require a normal player login token. An `edsp_` credential is
-rejected, so an external create-only agent cannot use them.
+The following endpoints require a normal player login token, never a Space API key:
 
 ```text
 GET /space/api/v2/worlds/{world_id}/entities
-    ?center_x_cm=...&center_z_cm=...&radius_cm=...&limit=...
 GET /space/api/v2/worlds/{world_id}/entities/{entity_id}/definition
 GET /space/api/v2/worlds/{world_id}/entities/{entity_id}/snapshot
 POST /space/api/v2/worlds/{world_id}/entities/browser
@@ -99,17 +99,8 @@ PUT /space/api/v2/worlds/{world_id}/entities/execution-leases
 PUT /space/api/v2/worlds/{world_id}/entities/{entity_id}/run-state
 ```
 
-AOI distance uses the toroidal X/Z seams. Definitions are capped at 8 MiB, returned as
-`application/x-protobuf`, and protected by size plus exact SHA-256 validation in the
-browser. Run-state updates use `expected_revision`; stale writers receive
-`409 ENTITY_REVISION_CONFLICT`. Execution leases last eight seconds and can be renewed
-only by the owner.
-
-In online mode these records are the sole durable source for world entities. The browser
-does not load or save `entropydrop_space_entities.*`; it removes the current world's legacy
-value on entry. Browser creation sends a validated Protobuf definition plus a JSON runtime
-snapshot (maximum 4 MiB). Checkpoints use `expected_revision`, update the AOI position and
-optionally replace the definition when its digest changes. Definitions and snapshots have
-independent exact-byte SHA-256 values. Deletion is owner/admin-only and permanently removes
-the row, definition and snapshot without an audit copy. Offline mode uses browser storage
-and does not use any of these endpoints.
+Nearby browsers discover an API-created entity through the same AOI list as a browser-created
+entity. Until authoritative server execution ships, one owner browser obtains the existing
+eight-second execution lease; observers render its stopped collision pose. Once the owner
+browser checkpoints the entity, its bounded runtime snapshot is stored beside the definition.
+Online mode does not use browser local storage for durable world entities.

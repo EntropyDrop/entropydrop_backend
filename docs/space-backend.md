@@ -52,10 +52,12 @@ many worlds scale horizontally across gateways/workers. Load tests determine whe
 target ships; theoretical concurrency is not a promise.
 
 > Transitional implementation note (2026-09-03): online world entities now use
-> `space_world_entities` as their only durable source. External creation copies a canonical
-> market definition; browser creation/checkpoint stores a canonical definition plus a bounded
-> runtime snapshot. The browser removes and never reads/writes its legacy per-world entity
-> storage online; offline mode keeps browser persistence. The API does not run physics. An
+> `space_world_entities` as their only durable source. Account-level, long-lived Space API
+> keys let external agents submit inline entity definitions to any world the owner can access;
+> the backend canonicalizes and validates the same Protobuf v3 contract used by browsers.
+> All created entities share one editable ownership model, with no market/browser source
+> discriminator. The browser removes and never reads/writes its legacy per-world entity storage
+> online; offline mode keeps browser persistence. The API does not run physics. An
 > eight-second owner-browser execution lease prevents duplicate execution, while non-owner
 > browsers keep a stopped collision proxy. This remains narrower than the authoritative
 > worker target below. See [Space external entity-create API](space-entity-create-api.md).
@@ -495,10 +497,10 @@ newer client wall-clock time never wins automatically.
 | `player_snapshots` | Immediate/periodic/offline | Latest runtime position and yaw; no backpack data |
 | `world_checkpoints` | Background | Safe event-pruning watermark |
 
-The current transitional deployment additionally has `space_entity_create_tokens`
-(hashed, revocable `entity:create` credentials) and `space_world_entities` (copied
+The current transitional deployment additionally has `space_api_keys` (hashed, revocable,
+account-level credentials with explicit scopes) and `space_world_entities` (canonical
 definition, optional browser runtime snapshot, AOI transform, owner run intent and browser
-execution lease). Online browsers persist no separate world-entity copy; browser-authored
+execution lease). Online browsers persist no separate world-entity copy; all owned entity
 definitions/snapshots are revision-checked here, while offline entities remain local.
 These two tables are not the final worker snapshot model.
 
@@ -838,13 +840,13 @@ POST   /space/api/v2/market/resources           Validate and publish a canonical
 GET    /space/api/v2/market/resources/{id}/download  Download canonical content and increment count
 POST   /space/api/v2/market/resources/{id}/like Toggle the authenticated user's like
 DELETE /space/api/v2/market/resources/{id}      Publisher-owned or administrator hard delete
-POST   /space/api/v2/worlds/{id}/entity-create-tokens  Mint a hashed, create-only external credential
-GET    /space/api/v2/worlds/{id}/entity-create-tokens  List the current user's credential metadata
-DELETE /space/api/v2/worlds/{id}/entity-create-tokens/{token}  Revoke one credential
-POST   /space/api/v2/worlds/{id}/entities       Idempotently create an entity at an exact transform
+POST   /space/api/v2/api-keys                   Mint a hashed, long-lived account API key
+GET    /space/api/v2/api-keys                   List the current user's API key metadata
+DELETE /space/api/v2/api-keys/{key}             Revoke one API key
+POST   /space/api/v2/worlds/{id}/entities       Validate inline Protobuf and idempotently create an entity
 POST   /space/api/v2/worlds/{id}/entities/browser  Persist a browser-authored definition and snapshot
 GET    /space/api/v2/worlds/{id}/entities       List nearby instances across wrapped X/Z seams
-GET    /space/api/v2/worlds/{id}/entities/{entity}/definition  Fetch the copied Protobuf definition
+GET    /space/api/v2/worlds/{id}/entities/{entity}/definition  Fetch the canonical Protobuf definition
 GET    /space/api/v2/worlds/{id}/entities/{entity}/snapshot  Fetch and verify the runtime snapshot
 PUT    /space/api/v2/worlds/{id}/entities/{entity}/checkpoint  Owner/admin revisioned browser checkpoint
 DELETE /space/api/v2/worlds/{id}/entities/{entity}  Owner/admin permanent world-entity deletion

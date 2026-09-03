@@ -139,19 +139,20 @@ class SpaceWorldEventStream(Base):
     )
 
 
-class SpaceEntityCreateToken(Base):
-    """Revocable, hashed credential whose only authority is creating entities."""
-    __tablename__ = "space_entity_create_tokens"
+class SpaceApiKey(Base):
+    """Long-lived, revocable account credential for the public Space API."""
+    __tablename__ = "space_api_keys"
     __table_args__ = (
-        UniqueConstraint("token_hash", name="uq_space_entity_create_token_hash"),
-        Index("ix_space_entity_create_tokens_owner", "world_id", "user_id", "created_at"),
+        UniqueConstraint("token_hash", name="uq_space_api_key_token_hash"),
+        Index("ix_space_api_keys_owner", "user_id", "created_at"),
     )
 
     id = Column(String(16), primary_key=True, default=generate_base58_id)
-    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), nullable=False)
     user_id = Column(String(16), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     name = Column(String(80), nullable=False)
+    key_prefix = Column(String(40), nullable=False)
     token_hash = Column(LargeBinary(32), nullable=False)
+    scopes = Column(JSON, nullable=False)
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.datetime.now(datetime.timezone.utc),
@@ -191,10 +192,6 @@ class SpaceWorldEntity(Base):
             name="ck_space_world_entity_run_state",
         ),
         CheckConstraint(
-            "source_kind IN ('market', 'browser')",
-            name="ck_space_world_entity_source_kind",
-        ),
-        CheckConstraint(
             "yaw_quarter_turns >= 0 AND yaw_quarter_turns <= 3",
             name="ck_space_world_entity_yaw",
         ),
@@ -217,11 +214,6 @@ class SpaceWorldEntity(Base):
         ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    # Deliberately not a foreign key: market resources may be permanently
-    # deleted while already-created world entities retain their copied bytes.
-    # Browser-authored entities have no market source and keep this null.
-    source_kind = Column(String(16), nullable=False, default="market", server_default="market")
-    source_resource_id = Column(String(16), nullable=True)
     name = Column(String(80), nullable=False)
     schema_version = Column(SmallInteger, nullable=False, default=3, server_default="3")
     content_digest = Column(LargeBinary(32), nullable=False)

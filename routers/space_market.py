@@ -496,7 +496,7 @@ def _validate_stopped_entity_grid(root: EntityComponent) -> None:
             buckets.setdefault(key, []).append(box)
 
 
-def validate_market_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+def validate_inventory_resource_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     model_type = {
         "blockset": BlockSetPayload,
         "entity": EntityPayload,
@@ -738,7 +738,7 @@ async def publish_market_resource(
         })
     try:
         kind, decoded = decode_inventory_resource(encoded_request)
-        canonical = validate_market_payload(kind, decoded)
+        canonical = validate_inventory_resource_payload(kind, decoded)
     except (InventoryCodecError, ValidationError, ValueError) as error:
         raise _validation_error_response(error) from error
 
