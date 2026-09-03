@@ -194,7 +194,7 @@ CREATE TABLE world_event_streams (
 -- -----------------------------------------------------------------------------
 -- 3. Packed chunk snapshots
 --
--- A payload contains the complete player-authored overlay for one 16x128x16
+-- A payload contains the complete player-authored overlay for one 16x256x16
 -- chunk: tri-state standard voxels (inherit/air/solid), palette-compressed
 -- colors and sparse 5x5x5 micro groups. It is encoded and compressed by the
 -- application; no individual voxel rows exist in PostgreSQL.
@@ -224,6 +224,30 @@ CREATE INDEX chunk_snapshots_resume_idx
 
 CREATE INDEX ix_chunk_snapshots_world_revision
     ON chunk_snapshots (world_id, revision);
+
+-- Compact far-field surface summaries. Each row covers one 32x32-chunk zone
+-- and stores an 8x8 height/color lattice per chunk. The background worker
+-- rebuilds only dirty zones; clients fetch immutable hash-addressed revisions.
+CREATE TABLE space_surface_zone_snapshots (
+    world_id                 UUID        NOT NULL REFERENCES worlds(id) ON DELETE CASCADE,
+    zone_x                   SMALLINT    NOT NULL CHECK (zone_x >= 0),
+    zone_z                   SMALLINT    NOT NULL CHECK (zone_z >= 0),
+    revision                 BIGINT      NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    source_terrain_revision  BIGINT      NOT NULL DEFAULT 0 CHECK (source_terrain_revision >= 0),
+    terrain_generator_version INTEGER    NOT NULL CHECK (terrain_generator_version >= 1),
+    schema_version           SMALLINT    NOT NULL DEFAULT 2 CHECK (schema_version >= 2),
+    samples_per_chunk_axis   SMALLINT    NOT NULL DEFAULT 8 CHECK (samples_per_chunk_axis = 8),
+    codec                    SMALLINT    NOT NULL DEFAULT 1 CHECK (codec = 1),
+    uncompressed_size        INTEGER     NOT NULL CHECK (uncompressed_size > 0),
+    content_hash             BYTEA       NOT NULL CHECK (octet_length(content_hash) = 32),
+    payload                  BYTEA       NOT NULL,
+    dirty                    BOOLEAN     NOT NULL DEFAULT FALSE,
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (world_id, zone_x, zone_z)
+);
+
+CREATE INDEX ix_space_surface_zones_world_revision
+    ON space_surface_zone_snapshots (world_id, revision);
 
 -- Transitional REST bridge idempotency receipts. The authoritative WebSocket
 -- worker later deduplicates with world_events.client_op_id instead, but keeping
@@ -561,6 +585,9 @@ BEFORE UPDATE ON world_event_streams FOR EACH ROW EXECUTE FUNCTION set_updated_a
 
 CREATE TRIGGER chunk_snapshots_set_updated_at
 BEFORE UPDATE ON chunk_snapshots FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER space_surface_zone_snapshots_set_updated_at
+BEFORE UPDATE ON space_surface_zone_snapshots FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TRIGGER entity_snapshots_set_updated_at
 BEFORE UPDATE ON entity_snapshots FOR EACH ROW EXECUTE FUNCTION set_updated_at();

@@ -193,9 +193,45 @@ def test_api_key_scope_and_entity_validation_are_enforced(client, db):
     assert invalid.status_code == 422
     assert invalid.json()["detail"]["code"] == "ENTITY_DEFINITION_INVALID"
 
+    above_build_height = client.post(
+        f"/space/api/v2/worlds/{world_id}/entities",
+        json={
+            **body,
+            "operation_id": str(uuid.uuid4()),
+            "position": {"x_cm": 100, "y_cm": 25600, "z_cm": 100},
+            "desired_run_state": "stopped",
+        },
+        headers=headers,
+    )
+    assert above_build_height.status_code == 422
+    assert above_build_height.json()["detail"]["code"] == "ENTITY_POSITION_OUT_OF_BOUNDS"
+
+    crossing_definition = _entity("Crossing Ceiling")
+    crossing_definition["root"]["blocks"][0]["dy"] = 1
+    crossing_build_height = client.post(
+        f"/space/api/v2/worlds/{world_id}/entities",
+        json={
+            **body,
+            "operation_id": str(uuid.uuid4()),
+            "definition_base64": base64.b64encode(
+                encode_inventory_resource("entity", crossing_definition)
+            ).decode(),
+            "position": {"x_cm": 100, "y_cm": 25500, "z_cm": 100},
+            "desired_run_state": "stopped",
+        },
+        headers=headers,
+    )
+    assert crossing_build_height.status_code == 422
+    assert crossing_build_height.json()["detail"]["code"] == "ENTITY_POSITION_OUT_OF_BOUNDS"
+
     created = client.post(
         f"/space/api/v2/worlds/{world_id}/entities",
-        json={**body, "operation_id": str(uuid.uuid4()), "desired_run_state": "stopped"},
+        json={
+            **body,
+            "operation_id": str(uuid.uuid4()),
+            "position": {"x_cm": 100, "y_cm": 25500, "z_cm": 100},
+            "desired_run_state": "stopped",
+        },
         headers=headers,
     )
     assert created.status_code == 201, created.text

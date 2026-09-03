@@ -275,6 +275,34 @@ class SpaceChunkSnapshot(Base):
     )
 
 
+class SpaceSurfaceZoneSnapshot(Base):
+    """Compressed 8x8-per-chunk far-surface summary for one world zone."""
+    __tablename__ = "space_surface_zone_snapshots"
+    __table_args__ = (
+        Index("ix_space_surface_zones_world_revision", "world_id", "revision"),
+    )
+
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
+    zone_x = Column(SmallInteger, primary_key=True)
+    zone_z = Column(SmallInteger, primary_key=True)
+    revision = Column(BigInteger, nullable=False, default=1)
+    source_terrain_revision = Column(BigInteger, nullable=False, default=0)
+    terrain_generator_version = Column(Integer, nullable=False)
+    schema_version = Column(SmallInteger, nullable=False, default=2)
+    samples_per_chunk_axis = Column(SmallInteger, nullable=False, default=8)
+    codec = Column(SmallInteger, nullable=False, default=1)
+    uncompressed_size = Column(Integer, nullable=False)
+    content_hash = Column(LargeBinary(32), nullable=False)
+    payload = Column(LargeBinary, nullable=False)
+    dirty = Column(Boolean, nullable=False, default=False, server_default="false")
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+
+
 class SpaceTerrainMutationBatch(Base):
     """Idempotency receipt for one accepted client terrain mutation batch."""
     __tablename__ = "space_terrain_mutation_batches"

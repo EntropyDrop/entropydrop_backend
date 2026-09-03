@@ -411,7 +411,9 @@ def _voxel_bounds(block: MarketVoxel) -> tuple[tuple[float, float, float], float
     return minimum, 1 / SPACE_MARKET_GRID_DIVISIONS if micro else 1.0  # type: ignore[return-value]
 
 
-def _validate_stopped_entity_grid(root: EntityComponent) -> None:
+def _validate_stopped_entity_grid(
+    root: EntityComponent,
+) -> list[tuple[int, int, int, int, int, int]]:
     """Require the authored Stop pose to be a non-overlapping micro-grid assembly."""
     components: list[EntityComponent] = []
 
@@ -494,6 +496,17 @@ def _validate_stopped_entity_grid(root: EntityComponent) -> None:
                     raise ValueError("stopped entity components contain overlapping voxels")
         for key in keys:
             buckets.setdefault(key, []).append(box)
+    return grid_boxes
+
+
+def entity_stopped_y_bounds(canonical: dict[str, Any]) -> tuple[float, float]:
+    """Return the validated entity's stopped-pose Y bounds relative to its construction origin."""
+    entity = EntityPayload.model_validate(canonical)
+    grid_boxes = _validate_stopped_entity_grid(entity.root)
+    return (
+        min(box[1] for box in grid_boxes) / SPACE_MARKET_GRID_DIVISIONS,
+        max(box[4] for box in grid_boxes) / SPACE_MARKET_GRID_DIVISIONS,
+    )
 
 
 def validate_inventory_resource_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:

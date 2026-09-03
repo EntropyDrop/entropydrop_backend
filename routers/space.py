@@ -9,7 +9,7 @@ import uuid
 from typing import Literal
 
 import zstandard as zstd
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 import auth
 import models
+import space_surface
 from config import settings
 from database import get_db
 from rate_limit import limiter
@@ -31,7 +32,7 @@ SPACE_HIGH_FREQ_RATE_LIMIT = "1200/minute; 20000/hour; 80000/day"
 SPACE_POSITION_RATE_LIMIT = "1200/minute; 20000/hour"
 
 SPACE_CHUNK_SIZE = 16
-SPACE_WORLD_HEIGHT = 128
+SPACE_WORLD_HEIGHT = 256
 SPACE_MICRO_DIVISIONS = 5
 MAX_TERRAIN_MUTATIONS_PER_BATCH = 256
 MAX_CHUNK_SNAPSHOT_BYTES = 4 * 1024 * 1024
@@ -54,6 +55,7 @@ class SpaceWorldResponse(BaseModel):
     seed: int
     terrain_generator_version: int
     terrain_revision: int
+    surface_snapshot_url: str
 
 
 class SpacePlayerResponse(BaseModel):
@@ -575,6 +577,7 @@ def bootstrap_space(
             "seed": world.seed,
             "terrain_generator_version": world.terrain_generator_version,
             "terrain_revision": _world_terrain_revision(db, world),
+            "surface_snapshot_url": f"/space/api/v2/worlds/{world.id}/surface-zones",
         },
         "player": {
             "user_id": current_user.id,
@@ -920,6 +923,112 @@ def list_terrain_edits(
     return {"world_id": str(world.id), "chunks": chunks, "next_cursor": next_cursor}
 
 
+@router.get("/worlds/{world_id}/surface-zones")
+@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
+def list_surface_zones(
+    request: Request,
+    world_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Return immutable URLs for every ready, revisioned far-surface zone."""
+    world = _require_world_membership(db, str(world_id), current_user)
+    rows = db.query(models.SpaceSurfaceZoneSnapshot).filter(
+        models.SpaceSurfaceZoneSnapshot.world_id == world.id,
+        models.SpaceSurfaceZoneSnapshot.dirty.is_(False),
+        models.SpaceSurfaceZoneSnapshot.terrain_generator_version == world.terrain_generator_version,
+        models.SpaceSurfaceZoneSnapshot.schema_version == space_surface.SURFACE_SCHEMA_VERSION,
+        models.SpaceSurfaceZoneSnapshot.samples_per_chunk_axis
+        == space_surface.SURFACE_SAMPLES_PER_CHUNK_AXIS,
+    ).order_by(
+        models.SpaceSurfaceZoneSnapshot.zone_x,
+        models.SpaceSurfaceZoneSnapshot.zone_z,
+    ).all()
+    expected = (
+        int(world.width_chunks) // int(world.zone_size_chunks)
+        * (int(world.length_chunks) // int(world.zone_size_chunks))
+    )
+    if len(rows) < expected and db.get_bind().dialect.name == "postgresql":
+        # Production normally has the Redis-singleton background process. This
+        # makes API-only local deployments and temporarily missing workers
+        # self-heal without delaying the manifest response.
+        space_surface.ensure_surface_generation_started()
+    zones = []
+    for row in rows:
+        digest = bytes(row.content_hash).hex()
+        zones.append({
+            "zone_x": int(row.zone_x),
+            "zone_z": int(row.zone_z),
+            "revision": int(row.revision),
+            "source_terrain_revision": int(row.source_terrain_revision),
+            "digest": digest,
+            "byte_length": int(row.uncompressed_size),
+            "url": (
+                f"/space/api/v2/worlds/{world.id}/surface-zones/"
+                f"{row.zone_x}/{row.zone_z}?digest={digest}"
+            ),
+        })
+    return {
+        "schema_version": space_surface.SURFACE_SCHEMA_VERSION,
+        "samples_per_chunk_axis": space_surface.SURFACE_SAMPLES_PER_CHUNK_AXIS,
+        "zone_size_chunks": int(world.zone_size_chunks),
+        "width_chunks": int(world.width_chunks),
+        "length_chunks": int(world.length_chunks),
+        "complete": len(zones) == expected,
+        "zones": zones,
+    }
+
+
+@router.get("/worlds/{world_id}/surface-zones/{zone_x}/{zone_z}")
+@limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
+def get_surface_zone(
+    request: Request,
+    world_id: uuid.UUID,
+    zone_x: int,
+    zone_z: int,
+    digest: str | None = Query(default=None, min_length=64, max_length=64),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Return one validated raw EDSZ payload; HTTP compression handles transfer size."""
+    world = _require_world_membership(db, str(world_id), current_user)
+    max_zone_x = int(world.width_chunks) // int(world.zone_size_chunks)
+    max_zone_z = int(world.length_chunks) // int(world.zone_size_chunks)
+    if not (0 <= zone_x < max_zone_x and 0 <= zone_z < max_zone_z):
+        raise HTTPException(status_code=404, detail={"code": "SURFACE_ZONE_NOT_FOUND"})
+    row = db.query(models.SpaceSurfaceZoneSnapshot).filter(
+        models.SpaceSurfaceZoneSnapshot.world_id == world.id,
+        models.SpaceSurfaceZoneSnapshot.zone_x == zone_x,
+        models.SpaceSurfaceZoneSnapshot.zone_z == zone_z,
+        models.SpaceSurfaceZoneSnapshot.dirty.is_(False),
+        models.SpaceSurfaceZoneSnapshot.terrain_generator_version == world.terrain_generator_version,
+        models.SpaceSurfaceZoneSnapshot.schema_version == space_surface.SURFACE_SCHEMA_VERSION,
+        models.SpaceSurfaceZoneSnapshot.samples_per_chunk_axis
+        == space_surface.SURFACE_SAMPLES_PER_CHUNK_AXIS,
+    ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "SURFACE_ZONE_NOT_READY"})
+    actual_digest = bytes(row.content_hash).hex()
+    if digest is not None and not secrets.compare_digest(digest.lower(), actual_digest):
+        raise HTTPException(status_code=409, detail={"code": "SURFACE_ZONE_REVISION_CHANGED"})
+    try:
+        payload = space_surface.decode_surface_zone_row(row)
+    except (ValueError, zstd.ZstdError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "CORRUPT_SURFACE_ZONE_SNAPSHOT"},
+        ) from exc
+    return Response(
+        content=payload,
+        media_type="application/vnd.entropydrop.surface-zone",
+        headers={
+            "ETag": f'"{actual_digest}"',
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.post("/worlds/{world_id}/terrain-edits/batches")
 @limiter.limit(SPACE_HIGH_FREQ_RATE_LIMIT)
 def apply_terrain_mutation_batch(
@@ -1057,6 +1166,24 @@ def apply_terrain_mutation_batch(
         row.content_hash = content_hash
         row.payload = encoded
         revisions.append({"chunk_x": chunk[0], "chunk_z": chunk[1], "revision": row.revision})
+
+    touched_zones = {
+        (chunk_x // int(world.zone_size_chunks), chunk_z // int(world.zone_size_chunks))
+        for chunk_x, chunk_z in touched_chunks
+    }
+    if touched_zones:
+        surface_rows = db.query(models.SpaceSurfaceZoneSnapshot).filter(
+            models.SpaceSurfaceZoneSnapshot.world_id == world.id,
+            or_(*[
+                and_(
+                    models.SpaceSurfaceZoneSnapshot.zone_x == zone_x,
+                    models.SpaceSurfaceZoneSnapshot.zone_z == zone_z,
+                )
+                for zone_x, zone_z in touched_zones
+            ]),
+        ).with_for_update().all()
+        for surface_row in surface_rows:
+            surface_row.dirty = True
 
     stored_result = {
         "applied": len(batch_request.mutations),

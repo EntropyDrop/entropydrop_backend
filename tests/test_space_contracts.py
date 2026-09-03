@@ -24,6 +24,7 @@ def test_space_contract_extends_existing_users_without_second_identity_or_skin_s
 def test_space_contract_covers_persistence_queue_and_browser_only_backpack():
     for table in (
         "chunk_snapshots",
+        "space_surface_zone_snapshots",
         "world_events",
         "entity_snapshots",
         "entity_chunk_coverage",

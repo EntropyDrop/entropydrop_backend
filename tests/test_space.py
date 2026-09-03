@@ -1,4 +1,5 @@
 import datetime
+import struct
 import time
 import uuid
 
@@ -18,8 +19,10 @@ from models import (
     SpaceTerrainMutationBatch,
     SpaceWorld,
     SpaceWorldPlayerProfile,
+    SpaceSurfaceZoneSnapshot,
     User,
 )
+import space_surface
 
 
 def _user(db, user_id: str, skin_url: str | None):
@@ -105,6 +108,9 @@ def test_space_bootstrap_returns_ephemeral_world_wide_random_start_without_persi
     assert first_data["max_online_players"] == 32
     assert first_data["queue_enabled"] is True
     assert first_data["world"]["terrain_generator_version"] == 1
+    assert first_data["world"]["surface_snapshot_url"].endswith(
+        f'/worlds/{first_data["world"]["id"]}/surface-zones'
+    )
     assert first_data["player"]["user_id"] == user.id
     assert first_data["player"]["is_admin"] is False
     assert first_data["player"]["skin_url"] == skin_url
@@ -529,6 +535,101 @@ def test_space_terrain_edits_are_durable_and_visible_to_another_browser_user(cli
         [101, 50, 100, 0, 0xF2A93B],
     ]
     assert chunks[0]["micro"] == [[506, 251, 503, 0xABCDEF, "tip"]]
+
+
+def test_space_terrain_height_is_256_metres(client, db):
+    user = _user(db, "space-height-01", "https://cdn.entropydrop.com/skins/height.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+
+    top = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [
+                {"kind": "set_standard", "x": 1, "y": 255, "z": 1, "block": 1, "color": 1},
+                {"kind": "set_micro", "mx": 10, "my": 1279, "mz": 10, "color": 2},
+            ],
+        },
+    )
+    assert top.status_code == 200, top.text
+
+    for mutation in (
+        {"kind": "set_standard", "x": 1, "y": 256, "z": 1, "block": 1, "color": 1},
+        {"kind": "set_micro", "mx": 5, "my": 1280, "mz": 5, "color": 2},
+    ):
+        rejected = client.post(
+            f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+            json={"batch_id": str(uuid.uuid4()), "mutations": [mutation]},
+        )
+        assert rejected.status_code == 422
+        assert rejected.json()["detail"]["code"] == "TERRAIN_POSITION_OUT_OF_BOUNDS"
+
+
+def test_space_surface_zone_snapshot_matches_browser_generator_and_serves_immutable_bytes(client, db):
+    user = _user(db, "space-surface-1", "https://cdn.entropydrop.com/skins/surface.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    bootstrap = client.post("/space/api/v2/bootstrap").json()
+    world = db.query(SpaceWorld).filter_by(id=bootstrap["world"]["id"]).one()
+
+    generator = space_surface.TerrainSurfaceGenerator(world.seed, 16384, 2048)
+    assert [generator.sample_height(x, z) for x, z in (
+        (0, 0), (8192, 1024), (16382, 2046), (1234, 567)
+    )] == [17, 16, 18, 15]
+
+    row = space_surface.generate_surface_zone(db, world, 0, 0)
+    assert row is not None
+    assert row.uncompressed_size == 32 + 32 * 32 * 8 * 8 * 5
+    manifest = client.get(bootstrap["world"]["surface_snapshot_url"])
+    assert manifest.status_code == 200
+    body = manifest.json()
+    assert body["samples_per_chunk_axis"] == 8
+    assert body["complete"] is False
+    assert [(zone["zone_x"], zone["zone_z"]) for zone in body["zones"]] == [(0, 0)]
+
+    downloaded = client.get(body["zones"][0]["url"])
+    assert downloaded.status_code == 200
+    assert downloaded.content[:4] == b"EDSZ"
+    assert len(downloaded.content) == row.uncompressed_size
+    assert downloaded.headers["etag"] == f'"{row.content_hash.hex()}"'
+    assert "immutable" in downloaded.headers["cache-control"]
+
+
+def test_terrain_edits_mark_their_surface_zone_snapshot_dirty(client, db):
+    user = _user(db, "space-surface-2", "https://cdn.entropydrop.com/skins/surface-dirty.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    bootstrap = client.post("/space/api/v2/bootstrap").json()
+    world = db.query(SpaceWorld).filter_by(id=bootstrap["world"]["id"]).one()
+    space_surface.generate_surface_zone(db, world, 0, 0)
+
+    applied = client.post(
+        f'/space/api/v2/worlds/{world.id}/terrain-edits/batches',
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [
+                {"kind": "set_standard", "x": 3, "y": 255, "z": 3, "block": 1, "color": 0x123456},
+            ],
+        },
+    )
+    assert applied.status_code == 200
+    row = db.query(SpaceSurfaceZoneSnapshot).filter_by(
+        world_id=world.id, zone_x=0, zone_z=0
+    ).one()
+    assert row.dirty is True
+    assert client.get(bootstrap["world"]["surface_snapshot_url"]).json()["zones"] == []
+
+    rebuilt = space_surface.generate_surface_zone(db, world, 0, 0)
+    assert rebuilt is not None
+    assert rebuilt.dirty is False
+    raw = space_surface.decode_surface_zone_row(rebuilt)
+    record_index = 1 * space_surface.SURFACE_SAMPLES_PER_CHUNK_AXIS + 1
+    assert struct.unpack_from(
+        "<HBBB",
+        raw,
+        space_surface.SURFACE_HEADER_BYTES + record_index * space_surface.SURFACE_RECORD_BYTES,
+    ) == (
+        1280, 0x12, 0x34, 0x56
+    )
 
 
 def test_space_terrain_batch_rejects_more_than_256_mutations(client, db):

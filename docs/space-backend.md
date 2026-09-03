@@ -2,6 +2,7 @@
 
 > Status: shared-user bootstrap, durable latest-player snapshots, paginated authored chunk
 > AOI-paged Zstd chunk overlays, bounded epoch-1 idempotent terrain mutation batches,
+> 128 asynchronously rebuilt far-surface zone snapshots,
 > and a transitional realtime player relay
 > are implemented. The relay uses one-use tickets, binary MessagePack, 20 Hz changed-pose
 > input, 10 Hz AOI snapshots, Redis cross-instance fanout, and five-second PostgreSQL
@@ -367,7 +368,7 @@ flow; a changed immutable URL is announced by reliable player presence.
 V2 removes per-cell rows from `voxel_edits` and `micro_cells`. A chunk stores one
 compressed overlay:
 
-1. The `16x128x16=32768` standard cells use two-bit states:
+1. The `16x256x16=65536` standard cells use two-bit states:
    - `00`: inherit procedural terrain;
    - `01`: explicit AIR tombstone;
    - `10`: player-authored solid color block;
@@ -401,46 +402,45 @@ objects in hot loops. Edits mark chunks dirty; background threads compress and h
 
 ### 7.1 Distant Toroidal LOD Bootstrap Cache
 
-The first playable slice now ships a build-time immutable base artifact for the default
-world: a `512x64` height lattice plus a `1024x256` RGBA albedo texture whose base level is
-exactly 1 MiB (1,048,576 bytes). Vite gives the binary a content-hashed URL, so normal
-browser/CDN HTTP caching shares it across entrants. Bootstrap returns the authoritative
-seed and `terrain_generator_version`; the client validates both plus the cache schema,
-dimensions and expanded byte count before installing it. Any mismatch, corruption or
-fetch failure falls back to the same deterministic local generation. The previous
-uncached path measured roughly 180 ms on a representative development machine.
+The implemented far field is a shared **versioned surface snapshot**, never a per-join
+scan or browser-generated low-poly torus. The `1024x128`-chunk world is divided into its
+existing 128 `32x32`-chunk zones. Each zone stores an `8x8` height/color lattice per chunk,
+or 65,536 finest-level records. A record is five bytes: `uint16` height in fifth-block units plus RGB.
+The fixed 32-byte `EDSZ` header binds the payload to its zone, world seed, terrain-generator
+version, source terrain revision, schema, and dimensions.
 
-This implemented base cache does not represent authored changes outside the player's
-AOI. Before persistent multiplayer world edits ship, add revisioned authored LOD tiles
-over the immutable base; never regenerate or query the full torus for each joining
-player.
+- The singleton background worker builds missing zones and rebuilds dirty zones from the
+  deterministic terrain generator plus committed authored chunk overlays. Terrain edits
+  mark only their affected zones dirty. If the singleton is temporarily absent, an
+  incomplete manifest also starts a database-locked daemon backfill in the API process;
+  this keeps API-only local development usable without allowing duplicate zone writers.
+- PostgreSQL currently stores the Zstd-compressed source payload, SHA-256 and revision in
+  `space_surface_zone_snapshots`. The authenticated download expands it to the bounded raw
+  `EDSZ` form and serves a digest-addressed URL with ETag and immutable private caching.
+  Moving payload bytes to object storage/CDN later does not change the manifest or codec.
+- Bootstrap supplies the manifest URL. Browsers poll it while initial generation is still
+  progressing, verify every payload's length, SHA-256, seed, generator version and zone
+  identity, and install new revisions progressively.
+- The renderer derives a quadtree mip pyramid from the finest records and emits one
+  instanced far-surface layer. Outside the detailed AOI it uses 2m samples through 400m,
+  4m through 600m, 8m through 800m, 16m through 1000m, 32m through 1600m, and
+  64m beyond that. Only actual height discontinuities through 4000m
+  receive merged vertical connection faces; farther tiers render tops only. It does not
+  create one mesh per zone and does not generate a synthetic donut. The shader bends the
+  flat sample quads onto the torus. A 128 KiB per-chunk GPU readiness mask discards far
+  samples only after each detailed 16m chunk mesh is attached, and restores the far sample
+  before that mesh is evicted, preventing holes or z-fighting during progressive streaming.
+  Browsers may locally tune the five increasing LOD thresholds, final visibility limit,
+  per-tier enable switches, and connection radius within client-enforced instance-budget
+  limits; this changes only rendering and never snapshot or terrain authority. Disabled
+  tiers fall through to the next enabled coarser tier. Defaults keep all tiers enabled,
+  cover the full world, use 400/600/800/1000/1600m transitions, and connect through 4000m.
+- A dirty snapshot is never listed. Until its replacement commits, detailed AOI terrain is
+  authoritative and the corresponding far zone is absent rather than stale.
 
-The complete multiplayer form is a shared **versioned distant-LOD snapshot**, not an
-on-demand PostgreSQL scan for each joining player:
-
-- The immutable base key is `(world_id, seed, terrain_generator_version,
-  lod_schema_version)`. The client must use the seed returned by bootstrap; a local
-  default seed is never authoritative.
-- Store compressed/quantized height and albedo artifacts in object storage/CDN with a
-  content hash, immutable URL, long-lived HTTP caching and bounded expanded size.
-  PostgreSQL stores only metadata/pointers when needed, not the texture or vertex blob.
-- Maintain authored distant summaries as dirty LOD tiles aligned with zones. Each tile
-  carries its own revision, height maxima, dominant authored color and edit mask.
-  Workers rebuild dirty tiles asynchronously from committed chunk events/snapshots.
-- Bootstrap returns a manifest revision and immutable artifact URLs. The client installs
-  the snapshot, then applies reliable WebSocket tile deltas newer than that revision;
-  stale snapshots may never overwrite newer deltas.
-- The browser may retain validated artifacts in its normal HTTP cache or IndexedDB,
-  keyed by content hash. A cache miss falls back to deterministic base generation while
-  current authored far-field data loads at the lowest scheduler priority.
-- Generator or LOD codec changes create a new immutable base key. World edits invalidate
-  only affected tiles, never the whole torus.
-
-For the 32-player release limit, this cache is primarily a join-latency and correctness
-optimization, not a concurrency requirement. Do not implement a service that regenerates
-the full torus per join. Ship the shared snapshot when authoritative world edits and the
-WebSocket delta stream exist, or earlier only if measured p95 main-thread initialization
-exceeds the client startup budget.
+The base format deliberately summarizes only the visible top surface. Full collision,
+standard-block, and microblock state continues to come from procedural generation plus
+`chunk_snapshots`; surface snapshots are render acceleration, not terrain authority.
 
 ## 8. Commands, Consistency, and Conflicts
 
@@ -486,6 +486,7 @@ newer client wall-clock time never wins automatically.
 | `zone_leases` | Every second | Single-writer lease and fencing |
 | `world_event_streams` | Event transaction | Per-world commit-order guard for structural events |
 | `chunk_snapshots` | Background | Compressed overlay and revision per chunk |
+| `space_surface_zone_snapshots` | Background | Zstd-compressed, hash-addressed far-surface summary per 32x32-chunk zone |
 | `world_events` | Tick batch | Ordered durable structural events and idempotency |
 | `world_event_chunks` | Tick batch | Event-to-chunk index for AOI catch-up |
 | `world_event_entities` | Tick batch | Event-to-entity index for entity recovery |
@@ -835,6 +836,8 @@ POST   /space/api/v2/bootstrap                  Bearer/skin gate + latest state 
 PUT    /space/api/v2/worlds/{id}/players/me/position  Save latest per-user reconnect position
 GET    /space/api/v2/worlds/{id}/terrain-edits  Paginated durable authored chunk overlays
 POST   /space/api/v2/worlds/{id}/terrain-edits/batches  Idempotent batch of 1-256 mutations
+GET    /space/api/v2/worlds/{id}/surface-zones  List ready far-surface zone revisions
+GET    /space/api/v2/worlds/{id}/surface-zones/{zx}/{zz}  Fetch one validated EDSZ payload
 GET    /space/api/v2/market/resources           List/rank metadata + CDN URL; mine=true filters to current publisher
 POST   /space/api/v2/market/resources           Validate and publish a canonical AGPL-3.0-only resource
 GET    /space/api/v2/market/resources/{id}/download  Download canonical content and increment count

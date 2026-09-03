@@ -24,9 +24,10 @@ from routers.space import (
     MAX_PLAYER_Y_CM,
     MIN_PLAYER_Y_CM,
     SPACE_CHUNK_SIZE,
+    SPACE_WORLD_HEIGHT,
     _require_world_membership,
 )
-from routers.space_market import validate_inventory_resource_payload
+from routers.space_market import entity_stopped_y_bounds, validate_inventory_resource_payload
 from space.inventory_codec import (
     InventoryCodecError,
     decode_inventory_resource,
@@ -341,7 +342,12 @@ def _utc(value: datetime.datetime | None) -> datetime.datetime | None:
     return value.replace(tzinfo=datetime.timezone.utc)
 
 
-def _validate_position(world: models.SpaceWorld, position: EntityPosition) -> None:
+def _validate_position(
+    world: models.SpaceWorld,
+    position: EntityPosition,
+    *,
+    require_buildable_height: bool = False,
+) -> None:
     width_cm, length_cm = _world_dimensions_cm(world)
     if not (0 <= position.x_cm < width_cm and 0 <= position.z_cm < length_cm):
         raise HTTPException(
@@ -349,6 +355,27 @@ def _validate_position(world: models.SpaceWorld, position: EntityPosition) -> No
             detail={
                 "code": "ENTITY_POSITION_OUT_OF_BOUNDS",
                 "message": "Entity X/Z coordinates must be inside the wrapped world coordinate range.",
+            },
+        )
+    if require_buildable_height and not (0 <= position.y_cm < SPACE_WORLD_HEIGHT * 100):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ENTITY_POSITION_OUT_OF_BOUNDS",
+                "message": f"New entities must be placed within build height [0,{SPACE_WORLD_HEIGHT}).",
+            },
+        )
+
+
+def _validate_entity_build_height(position: EntityPosition, canonical: dict[str, Any]) -> None:
+    minimum_y, maximum_y = entity_stopped_y_bounds(canonical)
+    origin_y = position.y_cm / 100
+    if origin_y + minimum_y < 0 or origin_y + maximum_y > SPACE_WORLD_HEIGHT:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "ENTITY_POSITION_OUT_OF_BOUNDS",
+                "message": f"The entity must fit within build height [0,{SPACE_WORLD_HEIGHT}).",
             },
         )
 
@@ -496,7 +523,7 @@ def create_world_entity(
 ):
     current_user = creator.user
     world = _require_world_membership(db, world_id, current_user)
-    _validate_position(world, payload.position)
+    _validate_position(world, payload.position, require_buildable_height=True)
     if (
         creator.api_key_scopes is not None
         and payload.desired_run_state == "running"
@@ -507,6 +534,7 @@ def create_world_entity(
             "required_scope": SPACE_API_KEY_RUN_SCOPE,
         })
     definition, definition_digest, canonical = _decode_entity_definition(payload.definition_base64)
+    _validate_entity_build_height(payload.position, canonical)
     operation_id = str(payload.operation_id)
     request_digest = _request_digest(payload, definition_digest)
     existing = db.query(models.SpaceWorldEntity).filter(
@@ -578,7 +606,7 @@ def create_browser_world_entity(
 ):
     """Persist an entity authored in an authenticated Space browser."""
     world = _require_world_membership(db, world_id, current_user)
-    _validate_position(world, payload.position)
+    _validate_position(world, payload.position, require_buildable_height=True)
     definition, definition_digest, canonical = _decode_entity_definition(payload.definition_base64)
     snapshot, snapshot_digest = _encode_snapshot(payload.snapshot, world, payload.position)
     operation_id = str(payload.operation_id)
