@@ -78,7 +78,7 @@ class SpacePlayerResponse(BaseModel):
     username: str | None
     is_admin: bool
     player_entity_id: str
-    skin_url: str
+    skin_url: str | None
     skin_type: str
     start_x_cm: int
     start_y_cm: int
@@ -699,16 +699,6 @@ def bootstrap_space(
 ):
     """Return the latest saved pose or an ephemeral world-wide random start."""
     skin_url = (current_user.skin_url or "").strip()
-    if not skin_url:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "SKIN_REQUIRED",
-                "message": "You must set a character skin before entering Space.",
-                "action_url": "/skin/collection",
-            },
-        )
-
     world = _get_or_create_default_world(db)
     profile = _get_or_create_player_profile(db, world, current_user)
     snapshot = db.query(models.SpacePlayerSnapshot).filter(
@@ -717,7 +707,11 @@ def bootstrap_space(
     ).first()
     saved_position = _decode_player_snapshot(snapshot, world)
     start_position = saved_position or _random_initial_position(world)
-    skin_type = "slim" if (current_user.skin_type or "").lower() == "slim" else "strong"
+    skin_type = (
+        "slim"
+        if skin_url and (current_user.skin_type or "").lower() == "slim"
+        else "strong"
+    )
 
     return {
         "protocol_version": 2,
@@ -737,7 +731,7 @@ def bootstrap_space(
             "username": current_user.username,
             "is_admin": current_user.is_admin,
             "player_entity_id": str(profile.player_entity_id),
-            "skin_url": skin_url,
+            "skin_url": skin_url or None,
             "skin_type": skin_type,
             "start_x_cm": start_position["x_cm"],
             "start_y_cm": start_position["y_cm"],

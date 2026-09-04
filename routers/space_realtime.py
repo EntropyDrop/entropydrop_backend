@@ -400,15 +400,17 @@ def _authenticate_realtime_ticket(ticket: str) -> RealtimeIdentity:
         if user is None or world is None or profile is None:
             raise HTTPException(status_code=403, detail={"code": "WORLD_MEMBERSHIP_REQUIRED"})
         skin_url = (user.skin_url or "").strip()
-        if not skin_url:
-            raise HTTPException(status_code=403, detail={"code": "SKIN_REQUIRED"})
         return RealtimeIdentity(
             world_id=str(world.id),
             user_id=user.id,
             username=user.username or f"Player-{user.id[:6]}",
             player_entity_id=str(profile.player_entity_id),
             skin_url=skin_url,
-            skin_type="slim" if (user.skin_type or "").lower() == "slim" else "strong",
+            skin_type=(
+                "slim"
+                if skin_url and (user.skin_type or "").lower() == "slim"
+                else "strong"
+            ),
             world_width_cm=world.width_chunks * space_api.SPACE_CHUNK_SIZE * 100,
             world_length_cm=world.length_chunks * space_api.SPACE_CHUNK_SIZE * 100,
         )

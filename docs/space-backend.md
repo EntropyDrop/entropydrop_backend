@@ -325,12 +325,15 @@ therefore owns independent player/entity presence epochs:
   plus content hash. Skin PNGs are fetched directly from the immutable URL already
   authorized and stored by the main site. Neither competes with 20 Hz state frames.
 
-The REST bootstrap refuses entry with `SKIN_REQUIRED` when
-`users.skin_url` is null or empty. The browser downloads and decodes that
-64x64 PNG before constructing the game scene or opening WSS. There is no bundled
-default, Space skin upload, appearance table, appearance command, or client-supplied
-skin URL. Changing character skin happens only through the existing `/skin/edit`
-flow; a changed immutable URL is announced by reliable player presence.
+The REST bootstrap returns a nullable `skin_url`. The browser downloads and
+decodes a configured 64x64 PNG before constructing the game scene; when the URL
+is missing or unavailable it uses the bundled offline-mode skin and shows a
+non-blocking reminder to configure one. Realtime accepts the same missing-skin
+state, and observers apply their bundled default instead of rejecting the player.
+Space still has no separate skin upload, appearance table, appearance command,
+or client-supplied skin URL. Changing character skin happens only through the
+existing Character flow; a changed immutable URL is announced by reliable
+player presence.
 
 ### 6.5 Area of Interest
 
@@ -859,7 +862,7 @@ service. The remaining endpoints belong to the gateway/worker delivery phases.
 
 ```text
 GET    /space/api/v2/status                     Public aggregate presence from snapshots active in the last 30 seconds
-POST   /space/api/v2/bootstrap                  Bearer/skin gate + latest state or ephemeral random start
+POST   /space/api/v2/bootstrap                  Bearer gate + latest state or ephemeral random start
 PUT    /space/api/v2/worlds/{id}/players/me/position  Save latest per-user reconnect position
 GET    /space/api/v2/worlds/{id}/terrain-edits  Paginated durable authored chunk overlays
 POST   /space/api/v2/worlds/{id}/terrain-edits/batches  Idempotent, metered batch of 1-256 mutations

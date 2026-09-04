@@ -112,19 +112,16 @@ def test_space_bootstrap_requires_shared_login(client):
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
 
 
-def test_space_bootstrap_blocks_user_without_skin(client, db):
+def test_space_bootstrap_allows_user_without_skin(client, db):
     user = _user(db, "space-no-skin", None)
     app.dependency_overrides[get_current_user] = lambda: user
 
     response = client.post("/space/api/v2/bootstrap")
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == {
-        "code": "SKIN_REQUIRED",
-        "message": "You must set a character skin before entering Space.",
-        "action_url": "/skin/collection",
-    }
-    assert db.query(SpaceWorldPlayerProfile).count() == 0
+    assert response.status_code == 200
+    assert response.json()["player"]["skin_url"] is None
+    assert response.json()["player"]["skin_type"] == "strong"
+    assert db.query(SpaceWorldPlayerProfile).count() == 1
 
 
 def test_space_bootstrap_returns_ephemeral_world_wide_random_start_without_persisting_it(
@@ -253,7 +250,7 @@ def test_space_admission_queues_fifo_supports_cancel_and_promotes(client, db, mo
 
 
 def test_space_realtime_ticket_and_binary_pose_stream(client, db, monkeypatch):
-    alice = _user(db, "space-ws-alice", "https://cdn.entropydrop.com/skins/alice.png")
+    alice = _user(db, "space-ws-alice", None)
     bob = _user(db, "space-ws-bob", "https://cdn.entropydrop.com/skins/bob.png")
 
     app.dependency_overrides[get_current_user] = lambda: alice
@@ -332,6 +329,7 @@ def test_space_realtime_ticket_and_binary_pose_stream(client, db, monkeypatch):
             assert alice_view[bob.id]["is_self"] is False
             assert bob_view[bob.id]["is_self"] is True
             assert alice_view[alice.id]["x_cm"] == 123456
+            assert alice_view[alice.id]["skin_url"] == ""
 
             bob_socket.send_bytes(msgpack.packb({"type": "leave"}, use_bin_type=True))
             with pytest.raises(WebSocketDisconnect):
