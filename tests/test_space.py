@@ -17,6 +17,7 @@ from models import (
     SpaceChunkSnapshot,
     SpacePlayerSnapshot,
     SpaceTerrainMutationBatch,
+    SpaceUsageBucket,
     SpaceWorld,
     SpaceWorldPlayerProfile,
     SpaceSurfaceZoneSnapshot,
@@ -49,6 +50,46 @@ def test_space_ping_is_exempt_from_rate_limit(client):
     for _ in range(70):
         response = client.get("/space/api/v2/ping")
         assert response.status_code == 200
+
+
+def test_space_public_status_reports_only_recent_aggregate_presence(client, db):
+    empty = client.get("/space/api/v2/status")
+    assert empty.status_code == 200
+    assert empty.json()["online_players"] == 0
+    assert empty.json()["max_online_players"] == 32
+    assert empty.json()["presence_window_seconds"] == 30
+    assert empty.headers["cache-control"] == "public, max-age=5, stale-while-revalidate=10"
+    assert "players" not in empty.json()
+
+    user = _user(db, "space-status-001", "https://cdn.entropydrop.com/skins/status.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    saved = client.put(
+        f"/space/api/v2/worlds/{world_id}/players/me/position",
+        json={"x_cm": 100, "y_cm": 3200, "z_cm": 100, "yaw_q15": 0},
+    )
+    assert saved.status_code == 200
+    app.dependency_overrides.pop(get_current_user)
+
+    active = client.get("/space/api/v2/status")
+    assert active.status_code == 200
+    assert active.json()["world_id"] == world_id
+    assert active.json()["online_players"] == 1
+    assert "user_id" not in active.text
+
+    snapshot = db.query(SpacePlayerSnapshot).filter_by(
+        world_id=world_id,
+        user_id=user.id,
+    ).one()
+    snapshot.updated_at = (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(seconds=space_router.SPACE_ONLINE_PRESENCE_SECONDS + 1)
+    )
+    db.commit()
+
+    stale = client.get("/space/api/v2/status")
+    assert stale.status_code == 200
+    assert stale.json()["online_players"] == 0
 
 
 def test_space_realtime_rate_limit_policy_matches_long_lived_sessions():
@@ -649,6 +690,151 @@ def test_space_terrain_batch_rejects_more_than_256_mutations(client, db):
     assert response.status_code == 422
     assert db.query(SpaceChunkSnapshot).count() == 0
     assert db.query(SpaceTerrainMutationBatch).count() == 0
+
+
+def test_space_terrain_quota_counts_effective_changes_once(client, db, monkeypatch):
+    user = _user(db, "space-quota-001", "https://cdn.entropydrop.com/skins/quota.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    monkeypatch.setattr(space_router, "SPACE_TERRAIN_HOURLY_LIMIT", 2)
+    monkeypatch.setattr(space_router, "SPACE_TERRAIN_DAILY_LIMIT", 2)
+
+    def apply(batch_id: str, color: int):
+        return client.post(
+            f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+            json={
+                "batch_id": batch_id,
+                "mutations": [{
+                    "kind": "set_standard",
+                    "x": 1,
+                    "y": 80,
+                    "z": 1,
+                    "block": 1,
+                    "color": color,
+                }],
+            },
+        )
+
+    first_batch_id = str(uuid.uuid4())
+    first = apply(first_batch_id, 1)
+    duplicate = apply(first_batch_id, 1)
+    no_op = apply(str(uuid.uuid4()), 1)
+    second = apply(str(uuid.uuid4()), 2)
+    blocked = apply(str(uuid.uuid4()), 3)
+
+    assert first.status_code == 200
+    assert first.json()["effective_changes"] == 1
+    assert first.json()["quota"]["used_today"] == 1
+    assert duplicate.json() == first.json()
+    assert no_op.status_code == 200
+    assert no_op.json()["effective_changes"] == 0
+    assert no_op.json()["quota"]["used_today"] == 1
+    assert second.status_code == 200
+    assert second.json()["quota"] == {
+        "daily_limit": 2,
+        "used_today": 2,
+        "remaining_today": 0,
+        "reset_at": second.json()["quota"]["reset_at"],
+    }
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "TERRAIN_EDIT_QUOTA_REACHED"
+    assert blocked.json()["detail"]["used"] == 2
+    assert blocked.headers["retry-after"]
+    loaded = client.get(f"/space/api/v2/worlds/{world_id}/terrain-edits").json()
+    assert loaded["chunks"][0]["standard"] == [[1, 80, 1, 1, 2]]
+    assert db.query(SpaceTerrainMutationBatch).count() == 3
+    assert {
+        row.scope_id
+        for row in db.query(SpaceUsageBucket).filter_by(metric="terrain_effective_changes").all()
+    } == {"terrain"}
+
+
+def test_space_terrain_effective_quota_includes_implicit_micro_clears(client, db):
+    user = _user(db, "space-quota-002", "https://cdn.entropydrop.com/skins/quota-2.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    added = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [
+                {"kind": "set_micro", "mx": 5, "my": 400, "mz": 5, "color": 1},
+                {"kind": "set_micro", "mx": 6, "my": 400, "mz": 5, "color": 2},
+            ],
+        },
+    )
+    replaced = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [
+                {"kind": "set_standard", "x": 1, "y": 80, "z": 1, "block": 1, "color": 3},
+            ],
+        },
+    )
+
+    assert added.status_code == 200
+    assert added.json()["effective_changes"] == 2
+    assert replaced.status_code == 200
+    assert replaced.json()["effective_changes"] == 3
+    assert replaced.json()["quota"]["used_today"] == 5
+
+
+def test_space_terrain_batch_enforces_spatial_footprint(client, db, monkeypatch):
+    user = _user(db, "space-scope-001", "https://cdn.entropydrop.com/skins/scope.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    monkeypatch.setattr(space_router, "SPACE_TERRAIN_MAX_CHUNKS_PER_BATCH", 1)
+
+    response = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [
+                {"kind": "set_standard", "x": 1, "y": 80, "z": 1, "block": 1, "color": 1},
+                {"kind": "set_standard", "x": 17, "y": 80, "z": 1, "block": 1, "color": 2},
+            ],
+        },
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == {
+        "code": "TERRAIN_BATCH_TOO_MANY_CHUNKS",
+        "message": "A terrain batch touches too many chunks.",
+        "limit": 1,
+        "actual": 2,
+    }
+    assert db.query(SpaceChunkSnapshot).count() == 0
+
+
+def test_space_terrain_edits_must_stay_near_authoritative_pose(client, db):
+    user = _user(db, "space-scope-002", "https://cdn.entropydrop.com/skins/scope-2.png")
+    app.dependency_overrides[get_current_user] = lambda: user
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    position = client.put(
+        f"/space/api/v2/worlds/{world_id}/players/me/position",
+        json={"x_cm": 100, "y_cm": 3200, "z_cm": 100, "yaw_q15": 0},
+    )
+    assert position.status_code == 200
+
+    response = client.post(
+        f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
+        json={
+            "batch_id": str(uuid.uuid4()),
+            "mutations": [{
+                "kind": "set_standard",
+                "x": (space_router.SPACE_TERRAIN_EDIT_RADIUS_CHUNKS + 2) * 16,
+                "y": 80,
+                "z": 1,
+                "block": 1,
+                "color": 1,
+            }],
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "TERRAIN_EDIT_OUT_OF_RANGE"
+    assert db.query(SpaceChunkSnapshot).count() == 0
 
 
 def test_space_terrain_snapshot_pages_use_a_stable_chunk_cursor(client, db):

@@ -12,12 +12,13 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import auth
 import models
+from config import settings
 from database import get_db
 from rate_limit import limiter
 from routers.space import (
@@ -33,6 +34,7 @@ from space.inventory_codec import (
     decode_inventory_resource,
     encode_inventory_resource,
 )
+from space_quota import QuotaWindow, UTC_DAY_SECONDS, reserve as reserve_quota
 
 
 router = APIRouter(prefix="/space/api/v2/worlds/{world_id}/entities", tags=["space-entities"])
@@ -59,6 +61,12 @@ SPACE_ENTITY_SNAPSHOT_MAX_VALUES = 100_000
 SPACE_ENTITY_SNAPSHOT_MAX_CONTAINER_ITEMS = 8_192
 SPACE_ENTITY_SNAPSHOT_MAX_STRING_CHARS = 65_536
 SPACE_ENTITY_SNAPSHOT_FORBIDDEN_KEYS = {"__proto__"}
+SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER = settings.SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER
+SPACE_ENTITY_MAX_RUNNING_PER_OWNER = settings.SPACE_ENTITY_MAX_RUNNING_PER_OWNER
+SPACE_ENTITY_MAX_RUNNING_PER_WORLD = settings.SPACE_ENTITY_MAX_RUNNING_PER_WORLD
+SPACE_ENTITY_MAX_RUNNING_PER_CHUNK = settings.SPACE_ENTITY_MAX_RUNNING_PER_CHUNK
+SPACE_ENTITY_CHECKPOINT_MINUTE_BYTES = settings.SPACE_ENTITY_CHECKPOINT_MINUTE_BYTES
+SPACE_ENTITY_CHECKPOINT_DAILY_BYTES = settings.SPACE_ENTITY_CHECKPOINT_DAILY_BYTES
 
 
 class StrictEntityModel(BaseModel):
@@ -380,6 +388,108 @@ def _validate_entity_build_height(position: EntityPosition, canonical: dict[str,
         )
 
 
+def _lock_entity_quota_scope(db: Session, world: models.SpaceWorld, user: models.User) -> None:
+    db.query(models.User).filter(models.User.id == user.id).with_for_update().first()
+    db.query(models.SpaceWorld).filter(models.SpaceWorld.id == world.id).with_for_update().first()
+
+
+def _owned_entity_storage_bytes(db: Session, world_id: str, user_id: str) -> int:
+    return int(db.query(func.coalesce(func.sum(
+        models.SpaceWorldEntity.size_bytes + models.SpaceWorldEntity.snapshot_size_bytes
+    ), 0)).filter(
+        models.SpaceWorldEntity.world_id == world_id,
+        models.SpaceWorldEntity.owner_user_id == user_id,
+    ).scalar() or 0)
+
+
+def _enforce_entity_storage_quota(
+    db: Session,
+    world: models.SpaceWorld,
+    user: models.User,
+    *,
+    incoming_bytes: int,
+    replaced_bytes: int = 0,
+) -> None:
+    if user.is_admin:
+        return
+    used = _owned_entity_storage_bytes(db, str(world.id), user.id)
+    projected = used - max(0, int(replaced_bytes)) + max(0, int(incoming_bytes))
+    if projected > SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER:
+        raise HTTPException(status_code=429, detail={
+            "code": "WORLD_ENTITY_STORAGE_QUOTA_REACHED",
+            "message": "The account's world-entity storage allowance has been reached.",
+            "limit_bytes": SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER,
+            "used_bytes": used,
+            "requested_bytes": max(0, int(incoming_bytes) - int(replaced_bytes)),
+            "remaining_bytes": max(0, SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER - used),
+        })
+
+
+def _running_entity_query(
+    db: Session,
+    world_id: str,
+    *,
+    exclude_entity_id: str | None = None,
+):
+    query = db.query(models.SpaceWorldEntity).filter(
+        models.SpaceWorldEntity.world_id == world_id,
+        models.SpaceWorldEntity.desired_run_state == "running",
+    )
+    if exclude_entity_id is not None:
+        query = query.filter(models.SpaceWorldEntity.id != exclude_entity_id)
+    return query
+
+
+def _enforce_running_entity_quota(
+    db: Session,
+    world: models.SpaceWorld,
+    user: models.User,
+    position: EntityPosition,
+    *,
+    exclude_entity_id: str | None = None,
+) -> None:
+    if user.is_admin:
+        return
+    running = _running_entity_query(
+        db,
+        str(world.id),
+        exclude_entity_id=exclude_entity_id,
+    )
+    owner_count = running.filter(
+        models.SpaceWorldEntity.owner_user_id == user.id,
+    ).count()
+    if owner_count >= SPACE_ENTITY_MAX_RUNNING_PER_OWNER:
+        raise HTTPException(status_code=429, detail={
+            "code": "WORLD_ENTITY_RUNNING_OWNER_QUOTA_REACHED",
+            "message": "Too many entities are already running for this account.",
+            "limit": SPACE_ENTITY_MAX_RUNNING_PER_OWNER,
+        })
+    world_count = running.count()
+    if world_count >= SPACE_ENTITY_MAX_RUNNING_PER_WORLD:
+        raise HTTPException(status_code=429, detail={
+            "code": "WORLD_ENTITY_RUNNING_WORLD_QUOTA_REACHED",
+            "message": "The world has reached its running-entity capacity.",
+            "limit": SPACE_ENTITY_MAX_RUNNING_PER_WORLD,
+        })
+    chunk_size_cm = SPACE_CHUNK_SIZE * 100
+    chunk_x = position.x_cm // chunk_size_cm
+    chunk_z = position.z_cm // chunk_size_cm
+    chunk_count = running.filter(
+        models.SpaceWorldEntity.position_x_cm >= chunk_x * chunk_size_cm,
+        models.SpaceWorldEntity.position_x_cm < (chunk_x + 1) * chunk_size_cm,
+        models.SpaceWorldEntity.position_z_cm >= chunk_z * chunk_size_cm,
+        models.SpaceWorldEntity.position_z_cm < (chunk_z + 1) * chunk_size_cm,
+    ).count()
+    if chunk_count >= SPACE_ENTITY_MAX_RUNNING_PER_CHUNK:
+        raise HTTPException(status_code=429, detail={
+            "code": "WORLD_ENTITY_RUNNING_CHUNK_QUOTA_REACHED",
+            "message": "This chunk has reached its running-entity capacity.",
+            "limit": SPACE_ENTITY_MAX_RUNNING_PER_CHUNK,
+            "chunk_x": chunk_x,
+            "chunk_z": chunk_z,
+        })
+
+
 def _entity_response(entity: models.SpaceWorldEntity, current_user: models.User) -> dict:
     can_control = entity.owner_user_id == current_user.id or bool(current_user.is_admin)
     return {
@@ -550,7 +660,7 @@ def create_world_entity(
 
     # Serialize quota checks for one account so concurrent agents cannot exceed
     # the per-world ownership cap.
-    db.query(models.User).filter(models.User.id == current_user.id).with_for_update().first()
+    _lock_entity_quota_scope(db, world, current_user)
     owned_count = db.query(models.SpaceWorldEntity).filter(
         models.SpaceWorldEntity.world_id == world.id,
         models.SpaceWorldEntity.owner_user_id == current_user.id,
@@ -560,6 +670,14 @@ def create_world_entity(
             "code": "WORLD_ENTITY_QUOTA_REACHED",
             "limit": SPACE_ENTITY_MAX_PER_OWNER,
         })
+    _enforce_entity_storage_quota(
+        db,
+        world,
+        current_user,
+        incoming_bytes=len(definition),
+    )
+    if payload.desired_run_state == "running":
+        _enforce_running_entity_quota(db, world, current_user, payload.position)
 
     entity = models.SpaceWorldEntity(
         world_id=world.id,
@@ -626,7 +744,7 @@ def create_browser_world_entity(
             raise HTTPException(status_code=409, detail={"code": "ENTITY_OPERATION_ID_REUSED"})
         return _entity_response(existing, current_user)
 
-    db.query(models.User).filter(models.User.id == current_user.id).with_for_update().first()
+    _lock_entity_quota_scope(db, world, current_user)
     owned_count = db.query(models.SpaceWorldEntity).filter(
         models.SpaceWorldEntity.world_id == world.id,
         models.SpaceWorldEntity.owner_user_id == current_user.id,
@@ -636,6 +754,14 @@ def create_browser_world_entity(
             "code": "WORLD_ENTITY_QUOTA_REACHED",
             "limit": SPACE_ENTITY_MAX_PER_OWNER,
         })
+    _enforce_entity_storage_quota(
+        db,
+        world,
+        current_user,
+        incoming_bytes=len(definition) + len(snapshot),
+    )
+    if payload.desired_run_state == "running":
+        _enforce_running_entity_quota(db, world, current_user, payload.position)
 
     entity = models.SpaceWorldEntity(
         world_id=world.id,
@@ -827,6 +953,38 @@ def checkpoint_browser_world_entity(
             "current": _entity_response(entity, current_user),
         })
 
+    _lock_entity_quota_scope(db, world, current_user)
+    _enforce_entity_storage_quota(
+        db,
+        world,
+        current_user,
+        incoming_bytes=(len(definition) if definition is not None else int(entity.size_bytes)) + len(snapshot),
+        replaced_bytes=int(entity.size_bytes) + int(entity.snapshot_size_bytes or 0),
+    )
+    if payload.desired_run_state == "running":
+        _enforce_running_entity_quota(
+            db,
+            world,
+            current_user,
+            payload.position,
+            exclude_entity_id=str(entity.id),
+        )
+    checkpoint_bytes = len(snapshot) + (len(definition) if definition is not None else 0)
+    if not current_user.is_admin:
+        reserve_quota(
+            db,
+            principal_id=current_user.id,
+            scope_id=str(world.id),
+            metric="entity_checkpoint_bytes",
+            amount=checkpoint_bytes,
+            windows=(
+                QuotaWindow(60, SPACE_ENTITY_CHECKPOINT_MINUTE_BYTES, "minute"),
+                QuotaWindow(UTC_DAY_SECONDS, SPACE_ENTITY_CHECKPOINT_DAILY_BYTES, "utc_day"),
+            ),
+            code="WORLD_ENTITY_CHECKPOINT_QUOTA_REACHED",
+            message="The entity checkpoint write allowance has been reached.",
+        )
+
     if definition is not None and definition_digest is not None:
         entity.definition = definition
         entity.content_digest = definition_digest
@@ -958,6 +1116,19 @@ def set_world_entity_run_state(
             "code": "ENTITY_REVISION_CONFLICT",
             "current": _entity_response(entity, current_user),
         })
+    if entity.desired_run_state != "running" and payload.desired_run_state == "running":
+        _lock_entity_quota_scope(db, world, current_user)
+        _enforce_running_entity_quota(
+            db,
+            world,
+            current_user,
+            EntityPosition(
+                x_cm=entity.position_x_cm,
+                y_cm=entity.position_y_cm,
+                z_cm=entity.position_z_cm,
+            ),
+            exclude_entity_id=str(entity.id),
+        )
     if entity.desired_run_state != payload.desired_run_state:
         entity.desired_run_state = payload.desired_run_state
         entity.revision += 1

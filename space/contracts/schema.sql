@@ -267,6 +267,23 @@ CREATE TABLE space_terrain_mutation_batches (
 CREATE INDEX ix_space_terrain_batches_retention
     ON space_terrain_mutation_batches (dedupe_epoch, client_created_at);
 
+-- Transactional counters for player-, market-, and world-scoped write budgets.
+-- The operation and all of its bucket increments commit or roll back together.
+CREATE TABLE space_usage_buckets (
+    principal_id  VARCHAR(64) NOT NULL,
+    scope_id      VARCHAR(64) NOT NULL,
+    metric        VARCHAR(48) NOT NULL,
+    window_seconds INTEGER    NOT NULL CHECK (window_seconds > 0),
+    bucket_start  TIMESTAMPTZ NOT NULL,
+    used          BIGINT      NOT NULL DEFAULT 0 CHECK (used >= 0),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (principal_id, scope_id, metric, window_seconds, bucket_start)
+);
+
+CREATE INDEX ix_space_usage_buckets_retention
+    ON space_usage_buckets (metric, window_seconds, bucket_start);
+
 -- -----------------------------------------------------------------------------
 -- 4. Ordered durable mutation log
 --
@@ -588,6 +605,9 @@ BEFORE UPDATE ON chunk_snapshots FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TRIGGER space_surface_zone_snapshots_set_updated_at
 BEFORE UPDATE ON space_surface_zone_snapshots FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER space_usage_buckets_set_updated_at
+BEFORE UPDATE ON space_usage_buckets FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 CREATE TRIGGER entity_snapshots_set_updated_at
 BEFORE UPDATE ON entity_snapshots FOR EACH ROW EXECUTE FUNCTION set_updated_at();

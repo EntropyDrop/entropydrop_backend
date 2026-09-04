@@ -50,6 +50,27 @@ class Settings(BaseSettings):
     SPACE_REALTIME_PERSIST_SECONDS: int = 5
     SPACE_REALTIME_AOI_RADIUS_CHUNKS: int = 16
     SPACE_REALTIME_REDIS_FANOUT_ENABLED: bool = True
+    # Durable Space quotas. Short windows protect the shared write path while
+    # the UTC-day budget is the player-facing allowance.
+    SPACE_TERRAIN_BURST_LIMIT: int = 5_000
+    SPACE_TERRAIN_HOURLY_LIMIT: int = 80_000
+    SPACE_TERRAIN_DAILY_LIMIT: int = 100_000
+    SPACE_TERRAIN_WORLD_SECOND_LIMIT: int = 5_000
+    SPACE_TERRAIN_MAX_CHUNKS_PER_BATCH: int = 16
+    SPACE_TERRAIN_MAX_ZONES_PER_BATCH: int = 4
+    SPACE_TERRAIN_EDIT_RADIUS_CHUNKS: int = 8
+    SPACE_TERRAIN_POSITION_GRACE_SECONDS: int = 30
+    SPACE_TERRAIN_MAX_EVENT_BYTES: int = 16 * 1024 * 1024
+    SPACE_TERRAIN_MAX_RESPONSE_BYTES: int = 16 * 1024 * 1024
+    SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER: int = 128 * 1024 * 1024
+    SPACE_ENTITY_MAX_RUNNING_PER_OWNER: int = 8
+    SPACE_ENTITY_MAX_RUNNING_PER_WORLD: int = 64
+    SPACE_ENTITY_MAX_RUNNING_PER_CHUNK: int = 16
+    SPACE_ENTITY_CHECKPOINT_MINUTE_BYTES: int = 16 * 1024 * 1024
+    SPACE_ENTITY_CHECKPOINT_DAILY_BYTES: int = 512 * 1024 * 1024
+    SPACE_MARKET_MAX_RESOURCES_PER_OWNER: int = 100
+    SPACE_MARKET_MAX_TOTAL_BYTES_PER_OWNER: int = 256 * 1024 * 1024
+    SPACE_MARKET_DAILY_UPLOAD_BYTES: int = 64 * 1024 * 1024
     # Epoch-1 terrain batches carry a stable client timestamp. Their dedupe
     # receipts can be removed after this window; older epoch-0 receipts remain
     # indefinitely for compatibility with already-persisted browser outboxes.
@@ -151,6 +172,30 @@ def validate_runtime_settings() -> None:
 
     if not settings.REDIS_URL:
         errors.append("REDIS_URL must be configured")
+
+    positive_space_limits = {
+        "SPACE_TERRAIN_BURST_LIMIT": settings.SPACE_TERRAIN_BURST_LIMIT,
+        "SPACE_TERRAIN_HOURLY_LIMIT": settings.SPACE_TERRAIN_HOURLY_LIMIT,
+        "SPACE_TERRAIN_DAILY_LIMIT": settings.SPACE_TERRAIN_DAILY_LIMIT,
+        "SPACE_TERRAIN_WORLD_SECOND_LIMIT": settings.SPACE_TERRAIN_WORLD_SECOND_LIMIT,
+        "SPACE_TERRAIN_MAX_CHUNKS_PER_BATCH": settings.SPACE_TERRAIN_MAX_CHUNKS_PER_BATCH,
+        "SPACE_TERRAIN_MAX_ZONES_PER_BATCH": settings.SPACE_TERRAIN_MAX_ZONES_PER_BATCH,
+        "SPACE_TERRAIN_EDIT_RADIUS_CHUNKS": settings.SPACE_TERRAIN_EDIT_RADIUS_CHUNKS,
+        "SPACE_TERRAIN_MAX_EVENT_BYTES": settings.SPACE_TERRAIN_MAX_EVENT_BYTES,
+        "SPACE_TERRAIN_MAX_RESPONSE_BYTES": settings.SPACE_TERRAIN_MAX_RESPONSE_BYTES,
+        "SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER": settings.SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER,
+        "SPACE_ENTITY_MAX_RUNNING_PER_OWNER": settings.SPACE_ENTITY_MAX_RUNNING_PER_OWNER,
+        "SPACE_ENTITY_MAX_RUNNING_PER_WORLD": settings.SPACE_ENTITY_MAX_RUNNING_PER_WORLD,
+        "SPACE_ENTITY_MAX_RUNNING_PER_CHUNK": settings.SPACE_ENTITY_MAX_RUNNING_PER_CHUNK,
+        "SPACE_ENTITY_CHECKPOINT_MINUTE_BYTES": settings.SPACE_ENTITY_CHECKPOINT_MINUTE_BYTES,
+        "SPACE_ENTITY_CHECKPOINT_DAILY_BYTES": settings.SPACE_ENTITY_CHECKPOINT_DAILY_BYTES,
+        "SPACE_MARKET_MAX_RESOURCES_PER_OWNER": settings.SPACE_MARKET_MAX_RESOURCES_PER_OWNER,
+        "SPACE_MARKET_MAX_TOTAL_BYTES_PER_OWNER": settings.SPACE_MARKET_MAX_TOTAL_BYTES_PER_OWNER,
+        "SPACE_MARKET_DAILY_UPLOAD_BYTES": settings.SPACE_MARKET_DAILY_UPLOAD_BYTES,
+    }
+    for name, value in positive_space_limits.items():
+        if value <= 0:
+            errors.append(f"{name} must be greater than 0")
 
     if not settings.GOOGLE_CLIENT_ID:
         errors.append("GOOGLE_CLIENT_ID must be configured")

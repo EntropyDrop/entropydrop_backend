@@ -11,7 +11,7 @@ from typing import Literal
 import zstandard as zstd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,12 +21,14 @@ import space_surface
 from config import settings
 from database import get_db
 from rate_limit import limiter
+from space_quota import QuotaWindow, UTC_DAY_SECONDS, reserve as reserve_quota, usage as quota_usage
 
 
 router = APIRouter(prefix="/space/api/v2", tags=["space"])
 
 # 20x ordinary API rate limits (ordinary is 60/min, 1000/hr, 4000/day)
 SPACE_HIGH_FREQ_RATE_LIMIT = "1200/minute; 20000/hour; 80000/day"
+SPACE_PUBLIC_STATUS_RATE_LIMIT = "120/minute; 2000/hour"
 # Reconnect checkpoints may run for an entire long-lived play session. Keep
 # burst/hour protection, but do not turn normal continuous play into a daily 429.
 SPACE_POSITION_RATE_LIMIT = "1200/minute; 20000/hour"
@@ -38,6 +40,19 @@ MAX_TERRAIN_MUTATIONS_PER_BATCH = 256
 MAX_CHUNK_SNAPSHOT_BYTES = 4 * 1024 * 1024
 MAX_SNAPSHOT_PAGE_SIZE = 256
 MAX_TERRAIN_AOI_RADIUS_CHUNKS = 64
+SPACE_TERRAIN_BURST_WINDOW_SECONDS = 10
+SPACE_TERRAIN_BURST_LIMIT = settings.SPACE_TERRAIN_BURST_LIMIT
+SPACE_TERRAIN_HOURLY_LIMIT = settings.SPACE_TERRAIN_HOURLY_LIMIT
+SPACE_TERRAIN_DAILY_LIMIT = settings.SPACE_TERRAIN_DAILY_LIMIT
+SPACE_TERRAIN_WORLD_SECOND_LIMIT = settings.SPACE_TERRAIN_WORLD_SECOND_LIMIT
+SPACE_TERRAIN_MAX_CHUNKS_PER_BATCH = settings.SPACE_TERRAIN_MAX_CHUNKS_PER_BATCH
+SPACE_TERRAIN_MAX_ZONES_PER_BATCH = settings.SPACE_TERRAIN_MAX_ZONES_PER_BATCH
+SPACE_TERRAIN_EDIT_RADIUS_CHUNKS = settings.SPACE_TERRAIN_EDIT_RADIUS_CHUNKS
+SPACE_TERRAIN_POSITION_GRACE_SECONDS = settings.SPACE_TERRAIN_POSITION_GRACE_SECONDS
+SPACE_TERRAIN_MAX_EVENT_BYTES = settings.SPACE_TERRAIN_MAX_EVENT_BYTES
+SPACE_TERRAIN_MAX_RESPONSE_BYTES = settings.SPACE_TERRAIN_MAX_RESPONSE_BYTES
+SPACE_TERRAIN_USAGE_SCOPE = "terrain"
+SPACE_ONLINE_PRESENCE_SECONDS = 30
 MIN_PLAYER_Y_CM = -100_000
 MAX_PLAYER_Y_CM = 1_000_000
 SPACE_CHUNK_CODEC_RAW = 0
@@ -79,6 +94,14 @@ class SpaceBootstrapResponse(BaseModel):
     websocket_url: str
     world: SpaceWorldResponse
     player: SpacePlayerResponse
+
+
+class SpacePublicStatusResponse(BaseModel):
+    world_id: str
+    online_players: int
+    max_online_players: int
+    presence_window_seconds: int
+    updated_at: datetime.datetime
 
 
 class TerrainMutation(BaseModel):
@@ -438,14 +461,113 @@ def _overlay_maps(payload: dict) -> tuple[dict[str, list], dict[str, list]]:
     return standard, micro
 
 
-def _clear_micro_parent(micro: dict[str, list], x: int, y: int, z: int) -> None:
+def _clear_micro_parent(micro: dict[str, list], x: int, y: int, z: int) -> int:
     base_x = x * SPACE_MICRO_DIVISIONS
     base_y = y * SPACE_MICRO_DIVISIONS
     base_z = z * SPACE_MICRO_DIVISIONS
+    removed = 0
     for dx in range(SPACE_MICRO_DIVISIONS):
         for dy in range(SPACE_MICRO_DIVISIONS):
             for dz in range(SPACE_MICRO_DIVISIONS):
-                micro.pop(f"{base_x + dx},{base_y + dy},{base_z + dz}", None)
+                if micro.pop(f"{base_x + dx},{base_y + dy},{base_z + dz}", None) is not None:
+                    removed += 1
+    return removed
+
+
+def _wrapped_chunk_distance(value: int, center: int, size: int) -> int:
+    delta = abs((value % size) - (center % size))
+    return min(delta, size - delta)
+
+
+def _validate_terrain_edit_scope(
+    db: Session,
+    world: models.SpaceWorld,
+    user: models.User,
+    touched_chunks: set[tuple[int, int]],
+    now: datetime.datetime,
+) -> None:
+    if user.is_admin or not touched_chunks:
+        return
+    snapshot = db.query(models.SpacePlayerSnapshot).filter(
+        models.SpacePlayerSnapshot.world_id == world.id,
+        models.SpacePlayerSnapshot.user_id == user.id,
+    ).first()
+    position = _decode_player_snapshot(snapshot, world)
+    if position is None:
+        profile = db.query(models.SpaceWorldPlayerProfile).filter(
+            models.SpaceWorldPlayerProfile.world_id == world.id,
+            models.SpaceWorldPlayerProfile.user_id == user.id,
+        ).first()
+        profile_created_at = profile.created_at if profile is not None else now
+        if profile_created_at.tzinfo is None:
+            profile_created_at = profile_created_at.replace(tzinfo=datetime.timezone.utc)
+        if now - profile_created_at <= datetime.timedelta(seconds=SPACE_TERRAIN_POSITION_GRACE_SECONDS):
+            return
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "TERRAIN_PLAYER_POSITION_REQUIRED",
+                "message": "A recent player position is required before editing terrain.",
+                "retryable": True,
+            },
+            headers={"Retry-After": "2"},
+        )
+    if snapshot is not None and snapshot.updated_at is not None:
+        updated_at = snapshot.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=datetime.timezone.utc)
+        if now - updated_at > datetime.timedelta(seconds=SPACE_REALTIME_POSITION_MAX_AGE_SECONDS):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "TERRAIN_PLAYER_POSITION_STALE",
+                    "message": "The saved player position is stale; reconnect before editing terrain.",
+                    "retryable": True,
+                },
+                headers={"Retry-After": "2"},
+            )
+    center_chunk_x = position["x_cm"] // (SPACE_CHUNK_SIZE * 100)
+    center_chunk_z = position["z_cm"] // (SPACE_CHUNK_SIZE * 100)
+    for chunk_x, chunk_z in touched_chunks:
+        if (
+            _wrapped_chunk_distance(chunk_x, center_chunk_x, int(world.width_chunks))
+            > SPACE_TERRAIN_EDIT_RADIUS_CHUNKS
+            or _wrapped_chunk_distance(chunk_z, center_chunk_z, int(world.length_chunks))
+            > SPACE_TERRAIN_EDIT_RADIUS_CHUNKS
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "TERRAIN_EDIT_OUT_OF_RANGE",
+                    "message": "Terrain may only be edited near the player's current position.",
+                    "radius_chunks": SPACE_TERRAIN_EDIT_RADIUS_CHUNKS,
+                },
+            )
+
+
+SPACE_REALTIME_POSITION_MAX_AGE_SECONDS = 30
+
+
+def _terrain_quota_response(
+    db: Session,
+    user_id: str,
+    now: datetime.datetime,
+) -> dict[str, int | str]:
+    used_today = quota_usage(
+        db,
+        principal_id=user_id,
+        scope_id=SPACE_TERRAIN_USAGE_SCOPE,
+        metric="terrain_effective_changes",
+        window_seconds=UTC_DAY_SECONDS,
+        now=now,
+    )
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return {
+        "daily_limit": SPACE_TERRAIN_DAILY_LIMIT,
+        "used_today": used_today,
+        "remaining_today": max(0, SPACE_TERRAIN_DAILY_LIMIT - used_today),
+        "reset_at": (day_start + datetime.timedelta(days=1)).isoformat(),
+    }
 
 
 def _get_or_create_default_world(db: Session) -> models.SpaceWorld:
@@ -535,6 +657,37 @@ def _get_or_create_player_profile(
 @limiter.exempt
 def ping_space():
     return {"status": "ok"}
+
+
+@router.get("/status", response_model=SpacePublicStatusResponse)
+@limiter.limit(SPACE_PUBLIC_STATUS_RATE_LIMIT)
+def get_space_public_status(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Expose only aggregate recent presence for the public Space landing page."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    world = db.query(models.SpaceWorld).filter(
+        models.SpaceWorld.id == settings.SPACE_DEFAULT_WORLD_ID,
+    ).first()
+    max_online_players = max(1, min(32, int(world.max_online_players))) if world else 32
+    online_players = 0
+    if world is not None:
+        cutoff = now - datetime.timedelta(seconds=SPACE_ONLINE_PRESENCE_SECONDS)
+        online_players = int(db.query(func.count(models.SpacePlayerSnapshot.user_id)).filter(
+            models.SpacePlayerSnapshot.world_id == world.id,
+            models.SpacePlayerSnapshot.updated_at >= cutoff,
+        ).scalar() or 0)
+        online_players = min(max_online_players, online_players)
+    response.headers["Cache-Control"] = "public, max-age=5, stale-while-revalidate=10"
+    return {
+        "world_id": str(world.id) if world is not None else settings.SPACE_DEFAULT_WORLD_ID,
+        "online_players": online_players,
+        "max_online_players": max_online_players,
+        "presence_window_seconds": SPACE_ONLINE_PRESENCE_SECONDS,
+        "updated_at": now,
+    }
 
 
 @router.post("/bootstrap", response_model=SpaceBootstrapResponse)
@@ -901,12 +1054,28 @@ def list_terrain_edits(
                 models.SpaceChunkSnapshot.chunk_z > cursor_z,
             ),
         ))
-    rows = query.order_by(
+    candidate_rows = query.order_by(
         models.SpaceChunkSnapshot.chunk_x,
         models.SpaceChunkSnapshot.chunk_z,
     ).limit(limit + 1).all()
-    has_more = len(rows) > limit
-    rows = rows[:limit]
+    rows = []
+    response_bytes = 0
+    for row in candidate_rows[:limit]:
+        row_bytes = max(0, int(row.uncompressed_size or 0))
+        if not rows and row_bytes > SPACE_TERRAIN_MAX_RESPONSE_BYTES:
+            raise HTTPException(status_code=413, detail={
+                "code": "TERRAIN_CHUNK_SNAPSHOT_TOO_LARGE",
+                "message": "A stored terrain chunk exceeds the response-size limit.",
+                "limit_bytes": SPACE_TERRAIN_MAX_RESPONSE_BYTES,
+                "actual_bytes": row_bytes,
+                "chunk_x": row.chunk_x,
+                "chunk_z": row.chunk_z,
+            })
+        if rows and response_bytes + row_bytes > SPACE_TERRAIN_MAX_RESPONSE_BYTES:
+            break
+        rows.append(row)
+        response_bytes += row_bytes
+    has_more = len(rows) < len(candidate_rows)
     chunks = []
     for row in rows:
         overlay = _decode_chunk_overlay(row)
@@ -1038,7 +1207,7 @@ def apply_terrain_mutation_batch(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    """Atomically apply at most 256 idempotent terrain mutations."""
+    """Apply one idempotent, spatially bounded and transactionally metered batch."""
     world = _require_world_membership(db, str(world_id), current_user)
     batch_id = str(batch_request.batch_id)
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -1051,16 +1220,6 @@ def apply_terrain_mutation_batch(
 
     client_created_at = _terrain_batch_client_created_at(batch_request, now)
     _maybe_cleanup_terrain_receipts(db, now)
-
-    stream = db.query(models.SpaceWorldEventStream).filter(
-        models.SpaceWorldEventStream.world_id == world.id,
-    ).with_for_update().first()
-    if stream is None:
-        stream = models.SpaceWorldEventStream(world_id=world.id, last_event_id=0)
-        db.add(stream)
-        db.flush()
-    stream.last_event_id = int(stream.last_event_id or 0) + 1
-    terrain_revision = stream.last_event_id
 
     normalized: list[tuple] = []
     touched_chunks: set[tuple[int, int]] = set()
@@ -1090,6 +1249,26 @@ def apply_terrain_mutation_batch(
             normalized.append((mutation.kind, chunk, x, y, z))
         touched_chunks.add(chunk)
 
+    if len(touched_chunks) > SPACE_TERRAIN_MAX_CHUNKS_PER_BATCH:
+        raise HTTPException(status_code=413, detail={
+            "code": "TERRAIN_BATCH_TOO_MANY_CHUNKS",
+            "message": "A terrain batch touches too many chunks.",
+            "limit": SPACE_TERRAIN_MAX_CHUNKS_PER_BATCH,
+            "actual": len(touched_chunks),
+        })
+    touched_zones = {
+        (chunk_x // int(world.zone_size_chunks), chunk_z // int(world.zone_size_chunks))
+        for chunk_x, chunk_z in touched_chunks
+    }
+    if len(touched_zones) > SPACE_TERRAIN_MAX_ZONES_PER_BATCH:
+        raise HTTPException(status_code=413, detail={
+            "code": "TERRAIN_BATCH_TOO_MANY_ZONES",
+            "message": "A terrain batch touches too many surface zones.",
+            "limit": SPACE_TERRAIN_MAX_ZONES_PER_BATCH,
+            "actual": len(touched_zones),
+        })
+    _validate_terrain_edit_scope(db, world, current_user, touched_chunks, now)
+
     rows = db.query(models.SpaceChunkSnapshot).filter(
         models.SpaceChunkSnapshot.world_id == world.id,
         or_(*[
@@ -1099,37 +1278,42 @@ def apply_terrain_mutation_batch(
             )
             for chunk_x, chunk_z in touched_chunks
         ]),
+    ).order_by(
+        models.SpaceChunkSnapshot.chunk_x,
+        models.SpaceChunkSnapshot.chunk_z,
     ).with_for_update().all()
     row_by_chunk = {(row.chunk_x, row.chunk_z): row for row in rows}
     state_by_chunk: dict[tuple[int, int], tuple[models.SpaceChunkSnapshot, dict, dict]] = {}
     empty_encoded, empty_hash, empty_codec, empty_size = _encode_chunk_overlay(_empty_chunk_overlay())
     for chunk in touched_chunks:
-        row = row_by_chunk.get(chunk)
-        if row is None:
-            row = models.SpaceChunkSnapshot(
-                world_id=world.id,
-                chunk_x=chunk[0],
-                chunk_z=chunk[1],
-                revision=0,
-                last_event_id=0,
-                codec=empty_codec,
-                codec_version=1,
-                uncompressed_size=empty_size,
-                content_hash=empty_hash,
-                payload=empty_encoded,
-            )
-            db.add(row)
+        row = row_by_chunk.get(chunk) or models.SpaceChunkSnapshot(
+            world_id=world.id,
+            chunk_x=chunk[0],
+            chunk_z=chunk[1],
+            revision=0,
+            last_event_id=0,
+            codec=empty_codec,
+            codec_version=1,
+            uncompressed_size=empty_size,
+            content_hash=empty_hash,
+            payload=empty_encoded,
+        )
         standard, micro = _overlay_maps(_decode_chunk_overlay(row))
         state_by_chunk[chunk] = row, standard, micro
 
+    effective_changes = 0
     for mutation in normalized:
         kind, chunk, *values = mutation
         _, standard, micro = state_by_chunk[chunk]
         if kind == "set_standard":
             x, y, z, block, color = values
-            standard[f"{x},{y},{z}"] = [x, y, z, block, color]
+            key = f"{x},{y},{z}"
+            packed = [x, y, z, block, color]
+            if standard.get(key) != packed:
+                standard[key] = packed
+                effective_changes += 1
             if block != 0:
-                _clear_micro_parent(micro, x, y, z)
+                effective_changes += _clear_micro_parent(micro, x, y, z)
         elif kind == "set_micro":
             mx, my, mz, color, part = values
             parent_key = (
@@ -1142,36 +1326,119 @@ def apply_terrain_mutation_batch(
             packed = [mx, my, mz, color]
             if part:
                 packed.append(part)
-            micro[f"{mx},{my},{mz}"] = packed
+            key = f"{mx},{my},{mz}"
+            if micro.get(key) != packed:
+                micro[key] = packed
+                effective_changes += 1
         elif kind == "remove_micro":
             mx, my, mz = values
-            micro.pop(f"{mx},{my},{mz}", None)
+            if micro.pop(f"{mx},{my},{mz}", None) is not None:
+                effective_changes += 1
         else:
             x, y, z = values
-            _clear_micro_parent(micro, x, y, z)
+            effective_changes += _clear_micro_parent(micro, x, y, z)
 
-    revisions = []
+    encoded_by_chunk: dict[tuple[int, int], tuple[bytes, bytes, int, int]] = {}
+    changed_chunks: set[tuple[int, int]] = set()
+    event_bytes = 0
     for chunk in sorted(touched_chunks):
         row, standard, micro = state_by_chunk[chunk]
         overlay = {
             "standard": sorted(standard.values(), key=lambda edit: (edit[0], edit[1], edit[2])),
             "micro": sorted(micro.values(), key=lambda edit: (edit[0], edit[1], edit[2])),
         }
-        encoded, content_hash, codec, uncompressed_size = _encode_chunk_overlay(overlay)
-        row.revision = int(row.revision or 0) + 1
-        row.last_event_id = terrain_revision
-        row.codec = codec
-        row.codec_version = 1
-        row.uncompressed_size = uncompressed_size
-        row.content_hash = content_hash
-        row.payload = encoded
-        revisions.append({"chunk_x": chunk[0], "chunk_z": chunk[1], "revision": row.revision})
+        encoded = _encode_chunk_overlay(overlay)
+        encoded_by_chunk[chunk] = encoded
+        if encoded[1] != bytes(row.content_hash):
+            changed_chunks.add(chunk)
+            event_bytes += encoded[3]
+    if event_bytes > SPACE_TERRAIN_MAX_EVENT_BYTES:
+        raise HTTPException(status_code=413, detail={
+            "code": "TERRAIN_EVENT_TOO_LARGE",
+            "message": "The resulting terrain update is too large for one resumable event.",
+            "limit_bytes": SPACE_TERRAIN_MAX_EVENT_BYTES,
+            "actual_bytes": event_bytes,
+        })
 
-    touched_zones = {
-        (chunk_x // int(world.zone_size_chunks), chunk_z // int(world.zone_size_chunks))
-        for chunk_x, chunk_z in touched_chunks
-    }
-    if touched_zones:
+    # Existing rows are serialized above; the user lock serializes missing
+    # usage buckets, while the stream lock serializes the global world budget.
+    db.query(models.User).filter(models.User.id == current_user.id).with_for_update().first()
+    stream = db.query(models.SpaceWorldEventStream).filter(
+        models.SpaceWorldEventStream.world_id == world.id,
+    ).with_for_update().first()
+    if stream is None:
+        stream = models.SpaceWorldEventStream(world_id=world.id, last_event_id=0)
+        db.add(stream)
+        db.flush()
+    if not current_user.is_admin:
+        try:
+            reserve_quota(
+                db,
+                principal_id=current_user.id,
+                scope_id=SPACE_TERRAIN_USAGE_SCOPE,
+                metric="terrain_submitted_mutations",
+                amount=len(normalized),
+                windows=(QuotaWindow(
+                    SPACE_TERRAIN_BURST_WINDOW_SECONDS,
+                    SPACE_TERRAIN_BURST_LIMIT,
+                    "10_seconds",
+                ),),
+                code="TERRAIN_BURST_QUOTA_REACHED",
+                message="Too many terrain edits were submitted at once.",
+                now=now,
+            )
+            reserve_quota(
+                db,
+                principal_id=current_user.id,
+                scope_id=SPACE_TERRAIN_USAGE_SCOPE,
+                metric="terrain_effective_changes",
+                amount=effective_changes,
+                windows=(
+                    QuotaWindow(3_600, SPACE_TERRAIN_HOURLY_LIMIT, "hour"),
+                    QuotaWindow(UTC_DAY_SECONDS, SPACE_TERRAIN_DAILY_LIMIT, "utc_day"),
+                ),
+                code="TERRAIN_EDIT_QUOTA_REACHED",
+                message="The terrain edit allowance for this period has been reached.",
+                now=now,
+            )
+            reserve_quota(
+                db,
+                principal_id="world",
+                scope_id=str(world.id),
+                metric="terrain_submitted_mutations",
+                amount=len(normalized),
+                windows=(QuotaWindow(1, SPACE_TERRAIN_WORLD_SECOND_LIMIT, "second"),),
+                code="TERRAIN_WORLD_BUSY",
+                message="The world is receiving too many terrain edits; retry shortly.",
+                now=now,
+            )
+        except HTTPException:
+            db.rollback()
+            raise
+
+    terrain_revision = int(stream.last_event_id or 0)
+    revisions = []
+    if changed_chunks:
+        stream.last_event_id = terrain_revision + 1
+        terrain_revision = stream.last_event_id
+        for chunk in sorted(changed_chunks):
+            row, _standard, _micro = state_by_chunk[chunk]
+            encoded, content_hash, codec, uncompressed_size = encoded_by_chunk[chunk]
+            if chunk not in row_by_chunk:
+                db.add(row)
+            row.revision = int(row.revision or 0) + 1
+            row.last_event_id = terrain_revision
+            row.codec = codec
+            row.codec_version = 1
+            row.uncompressed_size = uncompressed_size
+            row.content_hash = content_hash
+            row.payload = encoded
+            revisions.append({"chunk_x": chunk[0], "chunk_z": chunk[1], "revision": row.revision})
+
+        changed_zones = {
+            (chunk_x // int(world.zone_size_chunks), chunk_z // int(world.zone_size_chunks))
+            for chunk_x, chunk_z in changed_chunks
+        }
         surface_rows = db.query(models.SpaceSurfaceZoneSnapshot).filter(
             models.SpaceSurfaceZoneSnapshot.world_id == world.id,
             or_(*[
@@ -1179,7 +1446,7 @@ def apply_terrain_mutation_batch(
                     models.SpaceSurfaceZoneSnapshot.zone_x == zone_x,
                     models.SpaceSurfaceZoneSnapshot.zone_z == zone_z,
                 )
-                for zone_x, zone_z in touched_zones
+                for zone_x, zone_z in changed_zones
             ]),
         ).with_for_update().all()
         for surface_row in surface_rows:
@@ -1187,8 +1454,10 @@ def apply_terrain_mutation_batch(
 
     stored_result = {
         "applied": len(batch_request.mutations),
+        "effective_changes": effective_changes,
         "terrain_revision": terrain_revision,
         "chunks": revisions,
+        "quota": _terrain_quota_response(db, current_user.id, now),
     }
     db.add(models.SpaceTerrainMutationBatch(
         world_id=world.id,
@@ -1212,8 +1481,8 @@ def apply_terrain_mutation_batch(
             status_code=409,
             detail={"code": "TERRAIN_BATCH_RETRY", "message": "World state is updating, please retry the batch."},
         ) from exc
-    # Wake connected clients immediately; the durable REST cursor remains the
-    # source of truth and transports the potentially large chunk payload.
-    from routers.space_realtime import realtime_hub
-    realtime_hub.notify_terrain_from_thread(str(world.id), terrain_revision)
+    if changed_chunks:
+        # Wake connected clients only for an actual durable world revision.
+        from routers.space_realtime import realtime_hub
+        realtime_hub.notify_terrain_from_thread(str(world.id), terrain_revision)
     return _terrain_receipt_response(world.id, batch_id, stored_result)

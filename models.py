@@ -328,6 +328,37 @@ class SpaceTerrainMutationBatch(Base):
     )
 
 
+class SpaceUsageBucket(Base):
+    """Authoritative per-principal counters for bounded Space operations."""
+    __tablename__ = "space_usage_buckets"
+    __table_args__ = (
+        CheckConstraint("used >= 0", name="ck_space_usage_bucket_used"),
+        CheckConstraint("window_seconds > 0", name="ck_space_usage_bucket_window"),
+        Index(
+            "ix_space_usage_buckets_retention",
+            "metric", "window_seconds", "bucket_start",
+        ),
+    )
+
+    principal_id = Column(String(64), primary_key=True)
+    scope_id = Column(String(64), primary_key=True)
+    metric = Column(String(48), primary_key=True)
+    window_seconds = Column(Integer, primary_key=True)
+    bucket_start = Column(DateTime(timezone=True), primary_key=True)
+    used = Column(BigInteger, nullable=False, default=0, server_default="0")
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.datetime.now(datetime.timezone.utc),
+        onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
+        nullable=False,
+    )
+
+
 class SpaceMarketResource(Base):
     """Canonical, immutable Space backpack resource published to the market."""
     __tablename__ = "space_market_resources"

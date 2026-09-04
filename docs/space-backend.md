@@ -550,6 +550,31 @@ not remove a hot world's stream-row contention.
 
 ### 9.4 Server World Data, the Local Backpack, and the Resource Market
 
+The current REST write path also maintains transactional usage buckets. A quota
+reservation and its terrain/entity/market write commit or roll back together, and an
+idempotent retry returns the stored result without reserving the quota again. Default
+limits (all configurable) are:
+
+| Surface | Default limit |
+|---|---:|
+| Effective terrain changes | 100,000 per player/UTC day across worlds; 80,000 per hour |
+| Submitted terrain mutations | 5,000 per player/10 seconds across worlds; 5,000 per world/second |
+| Terrain batch footprint | 256 operations, 16 chunks, 4 surface zones, 16 MiB resulting event |
+| Terrain edit range | Within 8 wrapped chunks of the latest player checkpoint |
+| Owned world-entity bytes | 128 MiB per player/world |
+| Running world entities | 8 per player, 64 per world, 16 per chunk |
+| Entity checkpoint writes | 16 MiB per minute and 512 MiB per UTC day per player/world |
+| Market resources | 10 publishes and 64 MiB uploaded per UTC day; 100 live resources/256 MiB per player |
+
+An effective terrain change means a stored cell value actually changed. Replaying a
+receipt or setting a cell to its current value costs zero effective changes. Implicit
+micro-voxel removals caused by filling a parent standard cell are counted individually.
+Terrain list pages stop before their uncompressed payload would exceed 16 MiB. A new
+profile has a 30-second checkpoint grace period; afterward, missing or stale player
+position prevents edits rather than weakening the range check. Expired counters with
+windows of one day or less are removed in bounded hourly batches after a two-day retention
+period, so the per-second world buckets do not grow without limit.
+
 The browser owns the backpack. The client persists one Protobuf v3 backpack under
 `space.backpack.v3.pb`: IndexedDB stores the bytes directly, while the localStorage
 fallback stores those same bytes as base64. `.edpb` Protobuf export/import is the manual
@@ -617,7 +642,8 @@ computed over deterministic Protobuf with the display name and derived counts om
 renaming or reordering cannot evade the global duplicate
 constraint. Every publication has the fixed SPDX license `AGPL-3.0-only`; each user may
 have at most ten publications created during the current UTC day. Permanent deletion
-removes the row, so its digest and daily quota slot are released.
+removes the row and releases its canonical digest, but the consumed daily publication
+and upload budgets are not refunded.
 
 New publications upload canonical Protobuf as `application/x-protobuf` to
 `space-market/resources/{resource_id}/{digest}.pb` before the database row is committed.
@@ -832,10 +858,11 @@ The bootstrap and terrain-overlay endpoints are implemented in the current FastA
 service. The remaining endpoints belong to the gateway/worker delivery phases.
 
 ```text
+GET    /space/api/v2/status                     Public aggregate presence from snapshots active in the last 30 seconds
 POST   /space/api/v2/bootstrap                  Bearer/skin gate + latest state or ephemeral random start
 PUT    /space/api/v2/worlds/{id}/players/me/position  Save latest per-user reconnect position
 GET    /space/api/v2/worlds/{id}/terrain-edits  Paginated durable authored chunk overlays
-POST   /space/api/v2/worlds/{id}/terrain-edits/batches  Idempotent batch of 1-256 mutations
+POST   /space/api/v2/worlds/{id}/terrain-edits/batches  Idempotent, metered batch of 1-256 mutations
 GET    /space/api/v2/worlds/{id}/surface-zones  List ready far-surface zone revisions
 GET    /space/api/v2/worlds/{id}/surface-zones/{zx}/{zz}  Fetch one validated EDSZ payload
 GET    /space/api/v2/market/resources           List/rank metadata + CDN URL; mine=true filters to current publisher

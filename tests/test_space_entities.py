@@ -7,6 +7,7 @@ import base64
 from auth import get_current_user
 from main import app
 from models import SpaceApiKey, SpaceWorldEntity, User
+from routers import space_entities
 from space.inventory_codec import decode_inventory_resource, encode_inventory_resource
 
 
@@ -408,3 +409,137 @@ def test_browser_entities_are_backend_snapshotted_updated_and_hard_deleted(clien
     )
     assert deleted.json() == {"deleted": True, "entity_id": record["id"]}
     assert db.query(SpaceWorldEntity).count() == 0
+
+
+def test_world_entity_storage_quota_is_aggregate_per_owner(client, db, monkeypatch):
+    owner = _user(db, "entity-storage-owner")
+    app.dependency_overrides[get_current_user] = lambda: owner
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    _key_id, api_key = _create_api_key(client)
+    definition = encode_inventory_resource("entity", _entity("Stored Entity"))
+    monkeypatch.setattr(space_entities, "SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER", len(definition))
+    app.dependency_overrides.pop(get_current_user)
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    def create(operation_id: str):
+        return client.post(
+            f"/space/api/v2/worlds/{world_id}/entities",
+            headers=headers,
+            json={
+                "operation_id": operation_id,
+                "definition_base64": base64.b64encode(definition).decode(),
+                "position": {"x_cm": 100, "y_cm": 3200, "z_cm": 100},
+                "desired_run_state": "stopped",
+            },
+        )
+
+    first = create(str(uuid.uuid4()))
+    blocked = create(str(uuid.uuid4()))
+
+    assert first.status_code == 201, first.text
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "WORLD_ENTITY_STORAGE_QUOTA_REACHED"
+    assert blocked.json()["detail"]["limit_bytes"] == len(definition)
+    assert db.query(SpaceWorldEntity).count() == 1
+
+
+def test_world_entity_running_quota_is_enforced_on_create(client, db, monkeypatch):
+    owner = _user(db, "entity-running-owner")
+    app.dependency_overrides[get_current_user] = lambda: owner
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    _key_id, api_key = _create_api_key(client, allow_run=True)
+    definition = encode_inventory_resource("entity", _entity("Running Entity"))
+    monkeypatch.setattr(space_entities, "SPACE_ENTITY_MAX_RUNNING_PER_OWNER", 1)
+    app.dependency_overrides.pop(get_current_user)
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    def create(operation_id: str, x_cm: int):
+        return client.post(
+            f"/space/api/v2/worlds/{world_id}/entities",
+            headers=headers,
+            json={
+                "operation_id": operation_id,
+                "definition_base64": base64.b64encode(definition).decode(),
+                "position": {"x_cm": x_cm, "y_cm": 3200, "z_cm": 100},
+                "desired_run_state": "running",
+            },
+        )
+
+    first = create(str(uuid.uuid4()), 100)
+    blocked = create(str(uuid.uuid4()), 1700)
+
+    assert first.status_code == 201, first.text
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"] == {
+        "code": "WORLD_ENTITY_RUNNING_OWNER_QUOTA_REACHED",
+        "message": "Too many entities are already running for this account.",
+        "limit": 1,
+    }
+    assert db.query(SpaceWorldEntity).count() == 1
+
+
+def test_world_entity_checkpoint_budget_is_idempotent(client, db, monkeypatch):
+    owner = _user(db, "entity-checkpoint-owner")
+    app.dependency_overrides[get_current_user] = lambda: owner
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    definition = encode_inventory_resource("entity", _entity("Checkpoint Entity"))
+    snapshot = {
+        "constructorOrigin": [12, 20, 34],
+        "position": [12.5, 20.5, 34.5],
+        "quaternion": [0, 0, 0, 1],
+        "velocity": [0, 0, 0],
+        "angularVelocity": [0, 0, 0],
+        "physicsSimulationEnabled": False,
+        "scriptStatus": "stopped",
+    }
+    created = client.post(
+        f"/space/api/v2/worlds/{world_id}/entities/browser",
+        json={
+            "operation_id": str(uuid.uuid4()),
+            "definition_base64": base64.b64encode(definition).decode(),
+            "snapshot": snapshot,
+            "position": {"x_cm": 1250, "y_cm": 2050, "z_cm": 3450},
+            "desired_run_state": "stopped",
+        },
+    )
+    assert created.status_code == 201, created.text
+    record = created.json()
+    monkeypatch.setattr(
+        space_entities,
+        "SPACE_ENTITY_CHECKPOINT_MINUTE_BYTES",
+        record["snapshot_size_bytes"],
+    )
+    monkeypatch.setattr(
+        space_entities,
+        "SPACE_ENTITY_CHECKPOINT_DAILY_BYTES",
+        record["snapshot_size_bytes"],
+    )
+    checkpoint_body = {
+        "operation_id": str(uuid.uuid4()),
+        "expected_revision": 1,
+        "snapshot": snapshot,
+        "position": {"x_cm": 1250, "y_cm": 2050, "z_cm": 3450},
+        "desired_run_state": "stopped",
+    }
+
+    first = client.put(
+        f"/space/api/v2/worlds/{world_id}/entities/{record['id']}/checkpoint",
+        json=checkpoint_body,
+    )
+    duplicate = client.put(
+        f"/space/api/v2/worlds/{world_id}/entities/{record['id']}/checkpoint",
+        json=checkpoint_body,
+    )
+    blocked = client.put(
+        f"/space/api/v2/worlds/{world_id}/entities/{record['id']}/checkpoint",
+        json={**checkpoint_body, "operation_id": str(uuid.uuid4()), "expected_revision": 2},
+    )
+
+    assert first.status_code == 200, first.text
+    assert first.json()["revision"] == 2
+    assert duplicate.status_code == 200
+    assert duplicate.json()["revision"] == 2
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "WORLD_ENTITY_CHECKPOINT_QUOTA_REACHED"
+    stored = db.query(SpaceWorldEntity).filter_by(id=record["id"]).one()
+    assert stored.revision == 2

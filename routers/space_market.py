@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session, load_only
 import auth
 import models
 import s3_utils
+from config import settings
 from database import get_db
 from rate_limit import limiter
 from space.inventory_codec import (
@@ -31,6 +32,13 @@ from space.inventory_codec import (
     decode_inventory_resource,
     encode_inventory_resource,
     inventory_content_digest,
+)
+from space_quota import (
+    QuotaWindow,
+    UTC_DAY_SECONDS,
+    ensure_usage_floor,
+    reserve as reserve_quota,
+    usage as quota_usage,
 )
 
 
@@ -53,6 +61,10 @@ SPACE_MARKET_GRID_DIVISIONS = 5
 SPACE_MARKET_GRID_EPSILON = 1e-6
 SPACE_MARKET_RATE_LIMIT = "120/minute; 2000/hour"
 SPACE_MARKET_OBJECT_PREFIX = "space-market/resources"
+SPACE_MARKET_MAX_RESOURCES_PER_OWNER = settings.SPACE_MARKET_MAX_RESOURCES_PER_OWNER
+SPACE_MARKET_MAX_TOTAL_BYTES_PER_OWNER = settings.SPACE_MARKET_MAX_TOTAL_BYTES_PER_OWNER
+SPACE_MARKET_DAILY_UPLOAD_BYTES = settings.SPACE_MARKET_DAILY_UPLOAD_BYTES
+SPACE_MARKET_USAGE_SCOPE = "market"
 COMPONENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 HEX_COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -599,13 +611,33 @@ def _utc_day_bounds(now: datetime.datetime | None = None) -> tuple[datetime.date
     return start, start + datetime.timedelta(days=1)
 
 
-def _published_today(db: Session, user_id: str) -> int:
+def _live_publications_today(db: Session, user_id: str) -> int:
     start, end = _utc_day_bounds()
     return int(db.query(func.count(models.SpaceMarketResource.id)).filter(
         models.SpaceMarketResource.publisher_user_id == user_id,
         models.SpaceMarketResource.created_at >= start,
         models.SpaceMarketResource.created_at < end,
     ).scalar() or 0)
+
+
+def _live_publication_bytes_today(db: Session, user_id: str) -> int:
+    start, end = _utc_day_bounds()
+    return int(db.query(func.coalesce(func.sum(models.SpaceMarketResource.size_bytes), 0)).filter(
+        models.SpaceMarketResource.publisher_user_id == user_id,
+        models.SpaceMarketResource.created_at >= start,
+        models.SpaceMarketResource.created_at < end,
+    ).scalar() or 0)
+
+
+def _published_today(db: Session, user_id: str) -> int:
+    metered = quota_usage(
+        db,
+        principal_id=user_id,
+        scope_id=SPACE_MARKET_USAGE_SCOPE,
+        metric="market_publications",
+        window_seconds=UTC_DAY_SECONDS,
+    )
+    return max(metered, _live_publications_today(db, user_id))
 
 
 def _quota_response(db: Session, user_id: str) -> dict[str, int]:
@@ -771,18 +803,81 @@ async def publish_market_resource(
             "message": "An identical canonical resource is already in the market.",
             "resource_id": existing.id,
         })
-    if _published_today(db, current_user.id) >= SPACE_MARKET_DAILY_PUBLISH_LIMIT:
+    owned_count, owned_bytes = db.query(
+        func.count(models.SpaceMarketResource.id),
+        func.coalesce(func.sum(models.SpaceMarketResource.size_bytes), 0),
+    ).filter(
+        models.SpaceMarketResource.publisher_user_id == current_user.id,
+    ).one()
+    if int(owned_count or 0) >= SPACE_MARKET_MAX_RESOURCES_PER_OWNER:
         raise HTTPException(status_code=429, detail={
-            "code": "DAILY_PUBLISH_LIMIT_REACHED",
-            "message": "The daily market publication limit is 10.",
-            "daily_limit": SPACE_MARKET_DAILY_PUBLISH_LIMIT,
+            "code": "MARKET_RESOURCE_COUNT_QUOTA_REACHED",
+            "message": "The account's market resource count allowance has been reached.",
+            "limit": SPACE_MARKET_MAX_RESOURCES_PER_OWNER,
         })
+    if int(owned_bytes or 0) + len(encoded) > SPACE_MARKET_MAX_TOTAL_BYTES_PER_OWNER:
+        raise HTTPException(status_code=429, detail={
+            "code": "MARKET_STORAGE_QUOTA_REACHED",
+            "message": "The account's market storage allowance has been reached.",
+            "limit_bytes": SPACE_MARKET_MAX_TOTAL_BYTES_PER_OWNER,
+            "used_bytes": int(owned_bytes or 0),
+            "requested_bytes": len(encoded),
+        })
+    try:
+        ensure_usage_floor(
+            db,
+            principal_id=current_user.id,
+            scope_id=SPACE_MARKET_USAGE_SCOPE,
+            metric="market_publications",
+            window_seconds=UTC_DAY_SECONDS,
+            floor=_live_publications_today(db, current_user.id),
+        )
+        ensure_usage_floor(
+            db,
+            principal_id=current_user.id,
+            scope_id=SPACE_MARKET_USAGE_SCOPE,
+            metric="market_upload_bytes",
+            window_seconds=UTC_DAY_SECONDS,
+            floor=_live_publication_bytes_today(db, current_user.id),
+        )
+        reserve_quota(
+            db,
+            principal_id=current_user.id,
+            scope_id=SPACE_MARKET_USAGE_SCOPE,
+            metric="market_publications",
+            amount=1,
+            windows=(QuotaWindow(
+                UTC_DAY_SECONDS,
+                SPACE_MARKET_DAILY_PUBLISH_LIMIT,
+                "utc_day",
+            ),),
+            code="DAILY_PUBLISH_LIMIT_REACHED",
+            message="The daily market publication limit is 10.",
+        )
+        reserve_quota(
+            db,
+            principal_id=current_user.id,
+            scope_id=SPACE_MARKET_USAGE_SCOPE,
+            metric="market_upload_bytes",
+            amount=len(encoded),
+            windows=(QuotaWindow(
+                UTC_DAY_SECONDS,
+                SPACE_MARKET_DAILY_UPLOAD_BYTES,
+                "utc_day",
+            ),),
+            code="MARKET_DAILY_UPLOAD_QUOTA_REACHED",
+            message="The daily market upload-byte allowance has been reached.",
+        )
+    except HTTPException:
+        db.rollback()
+        raise
 
     resource_id = models.generate_base58_id()
     object_key = _market_object_key(resource_id, digest)
     try:
         _upload_market_object(encoded, object_key)
     except Exception as error:
+        db.rollback()
         logger.exception("Could not upload market resource %s", resource_id)
         raise _market_storage_error("store") from error
 

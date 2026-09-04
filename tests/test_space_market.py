@@ -185,6 +185,50 @@ def test_market_enforces_ten_successful_publications_per_utc_day(client, db):
     assert db.query(SpaceMarketResource).count() == 10
 
 
+def test_market_enforces_live_resource_count_and_storage_quotas(client, db, monkeypatch):
+    user = _user(db, "market-aggregate-owner")
+    app.dependency_overrides[get_current_user] = lambda: user
+    first_payload = _colorset("Aggregate one", 1)
+    first_size = len(encode_inventory_resource("colorset", first_payload))
+    monkeypatch.setattr(space_market, "SPACE_MARKET_MAX_TOTAL_BYTES_PER_OWNER", first_size)
+
+    first = _publish(client, "colorset", first_payload)
+    storage_blocked = _publish(client, "colorset", _colorset("Aggregate two", 2))
+    assert first.status_code == 201, first.text
+    assert storage_blocked.status_code == 429
+    assert storage_blocked.json()["detail"]["code"] == "MARKET_STORAGE_QUOTA_REACHED"
+
+    monkeypatch.setattr(space_market, "SPACE_MARKET_MAX_TOTAL_BYTES_PER_OWNER", 1024 * 1024)
+    monkeypatch.setattr(space_market, "SPACE_MARKET_MAX_RESOURCES_PER_OWNER", 1)
+    count_blocked = _publish(client, "colorset", _colorset("Aggregate three", 3))
+    assert count_blocked.status_code == 429
+    assert count_blocked.json()["detail"]["code"] == "MARKET_RESOURCE_COUNT_QUOTA_REACHED"
+    assert db.query(SpaceMarketResource).count() == 1
+
+
+def test_market_daily_upload_bytes_are_not_refunded_by_delete(
+    client,
+    db,
+    monkeypatch,
+    market_object_storage,
+):
+    user = _user(db, "market-upload-owner")
+    app.dependency_overrides[get_current_user] = lambda: user
+    first_payload = _colorset("Upload budget one", 1)
+    first_size = len(encode_inventory_resource("colorset", first_payload))
+    monkeypatch.setattr(space_market, "SPACE_MARKET_DAILY_UPLOAD_BYTES", first_size)
+
+    first = _publish(client, "colorset", first_payload)
+    assert first.status_code == 201, first.text
+    resource_id = first.json()["resource"]["id"]
+    assert client.delete(f"/space/api/v2/market/resources/{resource_id}").status_code == 200
+
+    blocked = _publish(client, "colorset", _colorset("Upload budget two", 2))
+    assert blocked.status_code == 429
+    assert blocked.json()["detail"]["code"] == "MARKET_DAILY_UPLOAD_QUOTA_REACHED"
+    assert db.query(SpaceMarketResource).count() == 0
+
+
 def test_market_validates_entity_hierarchy(client, db):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
@@ -447,14 +491,14 @@ def test_author_can_permanently_delete_market_resource(client, db, market_object
     assert client.get(f"/space/api/v2/market/resources/{resource['id']}/download").status_code == 404
     market = client.get("/space/api/v2/market/resources").json()
     assert market["total"] == 0
-    assert market["quota"] == {"daily_limit": 10, "published_today": 0, "remaining_today": 10}
+    assert market["quota"] == {"daily_limit": 10, "published_today": 1, "remaining_today": 9}
 
-    # Removing the row releases both the canonical digest and the publication quota.
+    # Removing the row releases the canonical digest but never refunds today's quota.
     app.dependency_overrides[get_current_user] = lambda: author
     republished = _publish(client, "colorset", _colorset("Renamed after deletion"))
     assert republished.status_code == 201
     market = client.get("/space/api/v2/market/resources").json()
-    assert market["quota"] == {"daily_limit": 10, "published_today": 1, "remaining_today": 9}
+    assert market["quota"] == {"daily_limit": 10, "published_today": 2, "remaining_today": 8}
 
 
 def test_admin_can_permanently_delete_another_publishers_resource(client, db, monkeypatch):

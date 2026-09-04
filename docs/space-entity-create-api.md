@@ -82,7 +82,12 @@ without `space:entity:run` returns `403 SPACE_API_KEY_SCOPE_REQUIRED`.
 
 The backend base64-decodes the definition, requires the entity resource kind, validates
 and canonicalizes every field, re-encodes it, and stores the canonical bytes plus an exact
-SHA-256. Definitions are capped at 8 MiB. Each user may own at most 256 entities per world.
+SHA-256. Definitions are capped at 8 MiB. Each user may own at most 256 entities and
+128 MiB of definition/snapshot data per world. By default, at most 8 entities may be in
+the requested `running` state for one user, 64 for one world, and 16 in one chunk.
+Browser checkpoints are additionally limited to 16 MiB per minute and 512 MiB per UTC
+day for one user/world. These limits are enforced after idempotency lookup, so retrying
+the same successful operation does not consume the allowance twice.
 
 ## Browser synchronization
 
