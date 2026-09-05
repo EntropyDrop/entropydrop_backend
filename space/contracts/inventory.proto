@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package entropydrop.space.inventory.v4;
+package entropydrop.space.inventory.v5;
 
 // Canonical binary contract for portable files, market uploads, and immutable
 // CDN objects. Derived counts and the constant block id
@@ -93,6 +93,9 @@ message Component {
   // Identity means +Y points away from the surface and -Z points forward; this
   // is also restricted to the 24 axis-aligned cube orientations.
   optional Quaternion anchor_rotation = 11;
+  // Display-only, non-unique name. Empty means unnamed; UI falls back to id.
+  // Names travel with subtrees and do not participate in content deduplication.
+  string name = 12;
 }
 
 enum ConstraintType {
@@ -125,7 +128,9 @@ message EntityConstraint {
 }
 
 message Entity {
-  string name = 1;
+  reserved 1;
+  reserved "name";
+  // The entity display name is its root component's name (or id if unnamed).
   Component root = 2;
   repeated EntityConstraint constraints = 3;
 }

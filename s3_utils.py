@@ -1,16 +1,29 @@
 import uuid
+from functools import lru_cache
 
 import boto3
 from botocore.exceptions import ClientError
 from config import settings
 
-s3_client = boto3.client(
-    's3',
-    aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-    region_name=settings.AWS_REGION,
-    endpoint_url=f"https://s3.{settings.AWS_REGION}.amazonaws.com"
-)
+@lru_cache(maxsize=1)
+def _get_s3_client():
+    # Validators and the hosted simulator import this module but do not use S3.
+    # Initialize only for an actual storage operation, not at worker startup.
+    return boto3.client(
+        's3',
+        aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
+        region_name=settings.AWS_REGION,
+        endpoint_url=f"https://s3.{settings.AWS_REGION}.amazonaws.com"
+    )
+
+
+class _LazyS3Client:
+    def __getattr__(self, name):
+        return getattr(_get_s3_client(), name)
+
+
+s3_client = _LazyS3Client()
 
 def generate_presigned_url_get(object_name, bucket=None, expiration=3600):
     """Generate a presigned URL to share an S3 object (GET)"""

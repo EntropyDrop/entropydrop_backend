@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     # Space uses the same JWT/users table. These settings identify the initial
     # persistent world and tune the integrated realtime WebSocket gateway.
     SPACE_DEFAULT_WORLD_ID: str = "00000000-0000-4000-8000-000000000001"
+    # Paid hosting is not released. Both API access and worker execution require opt-in.
+    SPACE_HOSTING_ENABLED: bool = False
     SPACE_WORLD_SEED: int = 20260827
     SPACE_WS_URL: str = "/space/ws/v2"
     SPACE_WS_ALLOWED_ORIGINS: str = ""

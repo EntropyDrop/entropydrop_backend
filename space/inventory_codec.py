@@ -10,7 +10,7 @@ from google.protobuf.message import DecodeError
 from space.contracts import inventory_pb2
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 InventoryKind = Literal["blockset", "entity", "colorset"]
 
 
@@ -182,8 +182,10 @@ def _decode_body(message) -> dict[str, Any]:
     return result
 
 
-def _encode_component(message, component: dict[str, Any]) -> None:
+def _encode_component(message, component: dict[str, Any], include_name: bool) -> None:
     message.id = str(component["id"])
+    if include_name:
+        message.name = component.get("name", "")
     if component.get("pivot") is not None:
         _set_vector(message.pivot, component["pivot"])
     _encode_body(message.body, component.get("body", {}))
@@ -195,7 +197,7 @@ def _encode_component(message, component: dict[str, Any]) -> None:
     for seat in component.get("seats", []):
         _set_vector(message.seats.add().position, seat["position"])
     for child in sorted(component.get("children", []), key=lambda value: str(value["id"])):
-        _encode_component(message.children.add(), child)
+        _encode_component(message.children.add(), child, include_name)
     if component.get("localPosition") is not None:
         _set_vector(message.local_position, component["localPosition"])
     if component.get("localRotation") is not None:
@@ -212,6 +214,7 @@ def _decode_component(message) -> dict[str, Any]:
             raise InventoryCodecError(f'component "{message.id}" contains a seat without a position')
     result: dict[str, Any] = {
         "id": message.id,
+        "name": message.name,
         "body": _decode_body(message.body),
         "blocks": [_decode_voxel(block) for block in message.blocks],
         "seats": [{"position": _vector(seat.position)} for seat in message.seats],
@@ -236,9 +239,9 @@ def _decode_component(message) -> dict[str, Any]:
 
 
 def _encode_entity(message, canonical: dict[str, Any], include_name: bool) -> None:
-    if include_name:
-        message.name = canonical["name"]
-    _encode_component(message.root, canonical["root"])
+    if "name" in canonical:
+        raise InventoryCodecError("entity names belong to root.name")
+    _encode_component(message.root, canonical["root"], include_name)
     for constraint in sorted(canonical.get("constraints", []), key=lambda value: str(value["id"])):
         encoded = message.constraints.add()
         encoded.id = constraint["id"]
@@ -276,7 +279,6 @@ def _decode_entity(message) -> dict[str, Any]:
     result: dict[str, Any] = {
         "type": "space-entity",
         "version": SCHEMA_VERSION,
-        "name": message.name,
         "root": _decode_component(message.root),
         "constraints": [],
     }
@@ -351,3 +353,11 @@ def decode_inventory_resource(encoded: bytes) -> tuple[InventoryKind, dict[str, 
 def inventory_content_digest(kind: InventoryKind, canonical: dict[str, Any]) -> bytes:
     encoded = encode_inventory_resource(kind, canonical, include_name=False)
     return hashlib.sha256(encoded).digest()
+
+
+def inventory_resource_name(kind: InventoryKind, canonical: dict[str, Any]) -> str:
+    """Derive list metadata without introducing a second entity name source."""
+    if kind == "entity":
+        root = canonical["root"]
+        return root.get("name") or root["id"]
+    return canonical["name"]

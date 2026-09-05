@@ -34,6 +34,7 @@ from space.inventory_codec import (
     InventoryCodecError,
     decode_inventory_resource,
     encode_inventory_resource,
+    inventory_resource_name,
 )
 from space_quota import QuotaWindow, UTC_DAY_SECONDS, reserve as reserve_quota
 
@@ -55,7 +56,8 @@ SPACE_API_KEY_MAX_PER_USER = 20
 SPACE_API_KEY_PREFIX = "edapi_"
 SPACE_API_KEY_CREATE_SCOPE = "space:entity:create"
 SPACE_API_KEY_RUN_SCOPE = "space:entity:run"
-SPACE_API_KEY_SCOPES = (SPACE_API_KEY_CREATE_SCOPE, SPACE_API_KEY_RUN_SCOPE)
+SPACE_API_KEY_BUILD_SCOPE = "space:blockset:build"
+SPACE_API_KEY_SCOPES = (SPACE_API_KEY_CREATE_SCOPE, SPACE_API_KEY_RUN_SCOPE, SPACE_API_KEY_BUILD_SCOPE)
 SPACE_ENTITY_EXECUTION_LEASE_SECONDS = 8
 SPACE_ENTITY_SNAPSHOT_MAX_DEPTH = 20
 SPACE_ENTITY_SNAPSHOT_MAX_VALUES = 100_000
@@ -123,7 +125,7 @@ class SetWorldEntityRunStateRequest(StrictEntityModel):
 
 class CreateSpaceApiKeyRequest(StrictEntityModel):
     name: StrictStr = Field(min_length=1, max_length=80)
-    scopes: list[Literal["space:entity:create", "space:entity:run"]] = Field(
+    scopes: list[Literal["space:entity:create", "space:entity:run", "space:blockset:build"]] = Field(
         default_factory=lambda: [SPACE_API_KEY_CREATE_SCOPE],
         min_length=1,
         max_length=len(SPACE_API_KEY_SCOPES),
@@ -519,9 +521,11 @@ def _entity_response(entity: models.SpaceWorldEntity, current_user: models.User)
         },
         "yaw_quarter_turns": entity.yaw_quarter_turns,
         "desired_run_state": entity.desired_run_state,
+        "execution_mode": entity.execution_mode,
+        "hosting_enabled": entity.hosting_enabled,
         "revision": entity.revision,
         "can_control": can_control,
-        "can_edit": can_control,
+        "can_edit": can_control and entity.execution_mode != "hosted",
         "created_at": entity.created_at.isoformat(),
         "updated_at": entity.updated_at.isoformat(),
     }
@@ -683,7 +687,7 @@ def create_world_entity(
     entity = models.SpaceWorldEntity(
         world_id=world.id,
         owner_user_id=current_user.id,
-        name=str(canonical.get("name") or "Entity")[:80],
+        name=inventory_resource_name("entity", canonical),
         schema_version=INVENTORY_SCHEMA_VERSION,
         content_digest=definition_digest,
         definition=definition,
@@ -768,7 +772,7 @@ def create_browser_world_entity(
     entity = models.SpaceWorldEntity(
         world_id=world.id,
         owner_user_id=current_user.id,
-        name=str(canonical.get("name") or "Entity")[:80],
+        name=inventory_resource_name("entity", canonical),
         schema_version=INVENTORY_SCHEMA_VERSION,
         content_digest=definition_digest,
         definition=definition,
@@ -932,6 +936,8 @@ def checkpoint_browser_world_entity(
         raise HTTPException(status_code=404, detail={"code": "WORLD_ENTITY_NOT_FOUND"})
     if entity.owner_user_id != current_user.id and not current_user.is_admin:
         raise HTTPException(status_code=403, detail={"code": "ENTITY_EDIT_FORBIDDEN"})
+    if entity.execution_mode == "hosted":
+        raise HTTPException(status_code=409, detail={"code": "ENTITY_HOSTED_CHECKPOINT_FORBIDDEN"})
     definition = None
     definition_digest = None
     canonical = None
@@ -992,7 +998,7 @@ def checkpoint_browser_world_entity(
         entity.definition = definition
         entity.content_digest = definition_digest
         entity.size_bytes = len(definition)
-        entity.name = str((canonical or {}).get("name") or entity.name)[:80]
+        entity.name = inventory_resource_name("entity", canonical)
     entity.snapshot = snapshot
     entity.snapshot_digest = snapshot_digest
     entity.snapshot_size_bytes = len(snapshot)
@@ -1063,6 +1069,7 @@ def claim_world_entity_execution_leases(
         if (
             entity is not None
             and entity.owner_user_id == current_user.id
+            and entity.execution_mode == "browser"
             and entity.desired_run_state == "running"
         ):
             current_expiry = _utc(entity.execution_lease_expires_at)
@@ -1111,6 +1118,12 @@ def set_world_entity_run_state(
             "code": "ENTITY_CONTROL_FORBIDDEN",
             "message": "Only the entity owner or an administrator may start or stop it.",
         })
+    if entity.execution_mode == "hosted":
+        if payload.desired_run_state == "running":
+            raise HTTPException(status_code=409, detail={"code": "USE_ENTITY_HOSTING_API"})
+        entity.hosting_enabled = False
+        entity.hosting_budget_remaining = 0
+        entity.hosting_reason = "user_paused"
     operation_id = str(payload.operation_id)
     if str(entity.last_control_operation_id or "") == operation_id:
         return _entity_response(entity, current_user)

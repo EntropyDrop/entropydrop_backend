@@ -16,11 +16,17 @@ of entity creation.
 - Created entities belong to the key owner. There is no market/browser source type; an
   owner or administrator can edit, checkpoint, control, or delete any entity they own.
 - API keys are not login tokens. They cannot list the world, read definitions or snapshots,
-  change existing entities, edit terrain, or call the market API.
+  change existing entity definitions, call the general terrain-edit endpoint, or call the market API.
+- Keys may opt into `space:blockset:build` to stamp blocksets at specified world coordinates;
+  see [Blockset building and API allowances](space-blockset-build-api.md).
+- Hosting is currently disabled (`503 HOSTING_DISABLED`). When explicitly enabled,
+  keys with `space:entity:run` can start/pause/query paid hosting of their
+  owner's entities. Hosting costs **1 credit/hour** and requires a spending budget;
+  see [Entity hosting](space-entity-hosting.md).
 
 ## 1. Create an API key
 
-The in-game Settings panel exposes the same API. A user may keep at most 20 active keys.
+The in-game Settings → API tab exposes the same API, current pricing, and live allowances. A user may keep at most 20 active keys.
 
 ```http
 POST /space/api/v2/api-keys
@@ -56,10 +62,14 @@ DELETE /space/api/v2/api-keys/{api_key_id}
 
 ## 2. Create an entity directly
 
-`definition_base64` is a base64-encoded canonical `InventoryResource` Protobuf v4 whose
+`definition_base64` is a base64-encoded canonical `InventoryResource` Protobuf v5 whose
 kind is `entity`. Coordinates are integer centimetres. X and Z must be inside the world's
 canonical wrapped coordinate range; Y uses the Space vertical bounds. `yaw_quarter_turns`
 is 0 through 3. The position is the entity construction origin.
+
+The display name belongs to `Component.name` at every level. `Entity` contains only
+`root` and `constraints`; API list metadata derives its name from `root.name` or, when
+empty, `root.id`. Names can repeat, and changing a name does not change component IDs.
 
 ```http
 POST /space/api/v2/worlds/{world_id}/entities
@@ -105,7 +115,10 @@ PUT /space/api/v2/worlds/{world_id}/entities/{entity_id}/run-state
 ```
 
 Nearby browsers discover an API-created entity through the same AOI list as a browser-created
-entity. Until authoritative server execution ships, one owner browser obtains the existing
-eight-second execution lease; observers render its stopped collision pose. Once the owner
+entity. Ordinary entities use one owner browser with the existing eight-second execution lease; observers render its stopped collision pose. Once the owner
 browser checkpoints the entity, its bounded runtime snapshot is stored beside the definition.
 Online mode does not use browser local storage for durable world entities.
+
+Explicitly hosted entities instead execute in the independent server worker even without
+nearby players. Browsers install their current runtime snapshots as static collision
+poses and do not acquire execution leases. Creating with `running` alone never buys hosting.

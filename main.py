@@ -22,6 +22,8 @@ from routers import (
     order,
     space,
     space_entities,
+    space_hosting,
+    space_external,
     space_market,
     space_realtime,
     webhooks,
@@ -278,6 +280,8 @@ app.include_router(credit.router, prefix="/skin")
 app.include_router(space.router)
 app.include_router(space_entities.router)
 app.include_router(space_entities.api_key_router)
+app.include_router(space_hosting.router)
+app.include_router(space_external.router)
 app.include_router(space_market.router)
 app.include_router(space_realtime.api_router)
 app.include_router(space_realtime.realtime_router)

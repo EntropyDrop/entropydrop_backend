@@ -1,4 +1,5 @@
 """Credit purchase / top-up endpoints."""
+from credit_balance import lock_balance
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
@@ -139,6 +140,7 @@ async def capture_credits(
     if not capture_completed:
         raise HTTPException(status_code=400, detail="Payment not completed")
 
+    lock_balance(db, current_user)
     # Check for duplicate capture (idempotency)
     existing = (
         db.query(models.CreditLog)

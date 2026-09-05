@@ -1,3 +1,4 @@
+from credit_balance import lock_balance
 from redis import Redis
 from config import settings
 import datetime
@@ -123,7 +124,7 @@ def award_daily_login_credits(db: Session, user: models.User):
 
     try:
         # Refresh user from DB to get the latest state after releasing/acquiring the lock
-        db.refresh(user)
+        db.refresh(user, with_for_update=True)
         if user.last_login_date == today_utc:
             return
             
@@ -208,6 +209,7 @@ def award_subscription_credits(db: Session, user: models.User, pro_level: str, s
     from datetime import timezone
     three_days_ago = datetime.datetime.now(timezone.utc) - timedelta(days=3)
     
+    lock_balance(db, user)
     existing_grant = db.query(models.CreditLog).filter(
         models.CreditLog.user_id == user.id,
         models.CreditLog.action == "subscription_grant",

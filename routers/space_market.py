@@ -32,6 +32,7 @@ from space.inventory_codec import (
     decode_inventory_resource,
     encode_inventory_resource,
     inventory_content_digest,
+    inventory_resource_name,
 )
 from space_quota import (
     QuotaWindow,
@@ -170,7 +171,7 @@ class MarketVoxel(StrictResourceModel):
 
 class BlockSetPayload(StrictResourceModel):
     type: Literal["space-blockset"]
-    version: Literal[4]
+    version: Literal[5]
     name: StrictStr = Field(min_length=1, max_length=80)
     blocks: list[MarketVoxel] = Field(min_length=1, max_length=SPACE_MARKET_MAX_BLOCKS)
 
@@ -218,6 +219,7 @@ class ComponentSeat(StrictResourceModel):
 
 class EntityComponent(StrictResourceModel):
     id: StrictStr = Field(min_length=1, max_length=64)
+    name: StrictStr = Field(default="", max_length=80)
     pivot: Vector3 | None = None
     localPosition: Vector3 | None = None
     localRotation: Quaternion | None = None
@@ -231,6 +233,7 @@ class EntityComponent(StrictResourceModel):
 
     @model_validator(mode="after")
     def validate_component(self):
+        self.name = self.name.strip()
         if not _valid_component_id(self.id):
             raise ValueError("component id is not portable")
         self.pivot = _validate_vector(self.pivot, "component pivot", SPACE_MARKET_MAX_COORDINATE)
@@ -300,17 +303,12 @@ class EntityConstraint(StrictResourceModel):
 
 class EntityPayload(StrictResourceModel):
     type: Literal["space-entity"]
-    version: Literal[4]
-    name: StrictStr = Field(min_length=1, max_length=80)
+    version: Literal[5]
     root: EntityComponent
     constraints: list[EntityConstraint] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_CONSTRAINTS)
 
     @model_validator(mode="after")
     def validate_entity(self):
-        self.name = self.name.strip()
-        if not self.name:
-            raise ValueError("resource name may not be blank")
-
         if self.root.localPosition is not None or self.root.localRotation is not None:
             raise ValueError("entity root may not have a parent-relative transform")
         known_ids: set[str] = set()
@@ -360,7 +358,7 @@ class EntityPayload(StrictResourceModel):
 
 class ColorSetPayload(StrictResourceModel):
     type: Literal["space-colorset"]
-    version: Literal[4]
+    version: Literal[5]
     name: StrictStr = Field(min_length=1, max_length=80)
     colors: list[StrictStr] = Field(min_length=9, max_length=9)
 
@@ -910,7 +908,7 @@ async def publish_market_resource(
         publisher_user_id=current_user.id,
         kind=kind,
         schema_version=INVENTORY_SCHEMA_VERSION,
-        name=canonical["name"],
+        name=inventory_resource_name(kind, canonical),
         license=SPACE_MARKET_LICENSE,
         content_digest=digest,
         object_key=object_key,

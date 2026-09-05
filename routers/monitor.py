@@ -1,3 +1,4 @@
+from credit_balance import lock_balance
 from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
 from redis import Redis
 from rq import Worker, Queue
@@ -707,7 +708,8 @@ async def gift_credits_to_seven_day_active_users(
             .all()
         print(f"Admin gifting {req.amount} credits to {len(users)} seven-day active users...")
         
-        for u in users:
+        for u in sorted(users, key=lambda item: item.id):
+            lock_balance(db, u)
             u.credits = (u.credits or 0) + req.amount
             
             # Generate a new CreditLog
@@ -763,7 +765,8 @@ async def gift_credits_to_pro_users(
         users = [u for u in all_users if u.is_pro]
         print(f"Admin gifting {req.amount} credits to {len(users)} Pro users...")
         
-        for u in users:
+        for u in sorted(users, key=lambda item: item.id):
+            lock_balance(db, u)
             u.credits = (u.credits or 0) + req.amount
             
             # Generate a new CreditLog
@@ -825,6 +828,7 @@ async def gift_credits_to_specific_user(
         raise HTTPException(status_code=404, detail=f"User with email {req.email} not found")
 
     try:
+        lock_balance(db, user)
         user.credits = (user.credits or 0) + req.amount
 
         # Generate a new CreditLog

@@ -61,7 +61,7 @@ def _user(db, user_id: str = "market-user", email: str | None = None):
 def _blockset(name: str = "Signal tower", color: int = 0xF2A93B):
     return {
         "type": "space-blockset",
-        "version": 4,
+        "version": 5,
         "name": name,
         "blocks": [
             {"dx": 1, "dy": 0, "dz": 0, "block": 1, "color": color},
@@ -73,9 +73,9 @@ def _blockset(name: str = "Signal tower", color: int = 0xF2A93B):
 def _entity(name: str = "Walker"):
     return {
         "type": "space-entity",
-        "version": 4,
-        "name": name,
+        "version": 5,
         "root": {
+            "name": name,
             "id": "root",
             "anchorRotation": [0, 0, math.sqrt(0.5), math.sqrt(0.5)],
             "body": {"type": "dynamic", "useGravity": True},
@@ -85,6 +85,7 @@ def _entity(name: str = "Walker"):
             "seats": [{"position": [0, 1, 0]}],
             "children": [{
                 "id": "arm",
+                "name": "Arm module",
                 "pivot": [1.5, 0.5, 0.5],
                 "localPosition": [0.5, 0, 0],
                 "localRotation": [0, 1, 0, 0],
@@ -107,7 +108,7 @@ def _colorset(name: str = "Sunset", variant: int = 0):
         "#f1c40f", "#ff6b81", "#a55eea", "#48dbfb", "#2ed573",
         "#eb4d4b", "#f5f6fa", "#2f3542", f"#{variant:06x}",
     ]
-    return {"type": "space-colorset", "version": 4, "name": name, "colors": colors}
+    return {"type": "space-colorset", "version": 5, "name": name, "colors": colors}
 
 
 def _publish(client, kind: str, payload: dict):
@@ -139,6 +140,10 @@ def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client
     assert data["resource"]["content_url"] == f"https://cdn.example.test/{stored.object_key}"
     kind, canonical = decode_inventory_resource(market_object_storage["objects"][stored.object_key])
     assert kind == "entity"
+    assert "name" not in canonical
+    assert canonical["root"]["name"] == "Walker"
+    assert data["resource"]["name"] == canonical["root"]["name"]
+    assert canonical["root"]["children"][0]["name"] == "Arm module"
     assert canonical["root"]["children"][0]["id"] == "arm"
     assert canonical["root"]["body"]["useGravity"] is True
     assert canonical["root"]["anchorRotation"] == [0, 0, math.sqrt(0.5), math.sqrt(0.5)]
@@ -224,9 +229,9 @@ def test_market_stopped_grid_uses_the_explicit_root_pivot():
     def entity_with_root_pivot(local_position):
         return {
             "type": "space-entity",
-            "version": 4,
-            "name": "Pivot",
+            "version": 5,
             "root": {
+                "name": "Pivot",
                 "id": "root",
                 "pivot": [0.6, 0.5, 0.5],
                 "body": {"type": "dynamic"},
@@ -283,12 +288,37 @@ def test_market_digest_rejects_renamed_and_reordered_duplicate_content(client, d
     })
     assert _publish(client, "entity", entity).status_code == 201
 
-    entity["name"] = "Renamed entity"
+    entity["root"]["name"] = "Renamed entity"
+    entity["root"]["children"][0]["name"] = "Renamed child"
     entity["root"]["children"].reverse()
     response = _publish(client, "entity", entity)
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "RESOURCE_ALREADY_PUBLISHED"
     assert db.query(SpaceMarketResource).count() == 2
+
+
+def test_component_names_are_optional_non_unique_unicode_and_root_metadata(client, db):
+    user = _user(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+    entity = _entity("")
+    entity["root"]["children"][0]["name"] = "🧱" * 80
+    canonical = space_market.validate_inventory_resource_payload("entity", entity)
+    assert canonical["root"]["name"] == ""
+    assert canonical["root"]["children"][0]["name"] == "🧱" * 80
+    published = _publish(client, "entity", entity)
+    assert published.status_code == 201, published.text
+    assert published.json()["resource"]["name"] == entity["root"]["id"]
+
+    entity["root"]["name"] = "🧱" * 80
+    assert space_market.validate_inventory_resource_payload("entity", entity)["root"]["name"] == "🧱" * 80
+    entity["root"]["children"][0]["name"] += "🧱"
+    with pytest.raises(ValueError):
+        space_market.validate_inventory_resource_payload("entity", entity)
+    entity["root"]["children"][0]["name"] = 123
+    with pytest.raises(ValueError):
+        space_market.validate_inventory_resource_payload("entity", entity)
+    with pytest.raises(ValueError):
+        space_market.validate_inventory_resource_payload("entity", {**_entity(), "name": "obsolete"})
 
 
 def test_market_enforces_ten_successful_publications_per_utc_day(client, db):
@@ -514,7 +544,7 @@ def test_market_publish_body_limit_allows_large_valid_protobuf_resources(client,
         })
     payload = {
         "type": "space-blockset",
-        "version": 4,
+        "version": 5,
         "name": "Large valid shape",
         "blocks": blocks,
     }

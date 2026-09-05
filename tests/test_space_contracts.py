@@ -37,7 +37,7 @@ def test_space_contract_covers_persistence_queue_and_browser_only_backpack():
     assert "slot_number BETWEEN 0 AND 31" in SCHEMA
     assert "player_inventories" not in SCHEMA
     assert "spawn_x_cm" not in SCHEMA
-    assert "space.backpack.v5.pb" in DESIGN
+    assert "space.backpack.v6.pb" in DESIGN
     assert "QueueStatus queue_status" in PROTOCOL
 
 

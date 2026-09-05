@@ -27,9 +27,9 @@ def _user(db, user_id: str):
 def _entity(name="External Walker"):
     return {
         "type": "space-entity",
-        "version": 4,
-        "name": name,
+        "version": 5,
         "root": {
+            "name": name,
             "id": "root",
             "anchorRotation": [0, 0, math.sqrt(0.5), math.sqrt(0.5)],
             "body": {"type": "dynamic", "useGravity": True},
@@ -140,7 +140,7 @@ def test_external_create_is_idempotent_and_stores_validated_definition(client, d
     assert hashlib.sha256(definition.content).hexdigest() == created.json()["definition_digest"]
     kind, decoded = decode_inventory_resource(definition.content)
     assert kind == "entity"
-    assert decoded["name"] == "External Walker"
+    assert decoded["root"]["name"] == "External Walker"
 
 
 def test_api_key_scope_and_entity_validation_are_enforced(client, db):

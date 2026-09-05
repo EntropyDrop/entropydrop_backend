@@ -1,0 +1,22 @@
+# Build from the parent directory containing both repositories.
+FROM node:24-bookworm-slim AS runtime
+WORKDIR /frontend
+COPY entropydrop_frontend/package.json entropydrop_frontend/package-lock.json ./
+COPY entropydrop_frontend/apps/space/package.json ./apps/space/package.json
+RUN npm ci --omit=dev --workspace @entropydrop/space --include-workspace-root=false
+COPY entropydrop_frontend/apps/space/src ./apps/space/src
+
+FROM python:3.10-slim-bookworm
+WORKDIR /app
+COPY --from=runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=runtime /frontend /frontend
+COPY entropydrop_backend/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+COPY entropydrop_backend/*.py ./
+COPY entropydrop_backend/routers ./routers
+COPY entropydrop_backend/space ./space
+ENV SPACE_HOSTING_RUNTIME_PATH=/frontend/apps/space/src/server/hosting-runtime.ts
+RUN useradd --uid 10001 --create-home runner
+USER runner
+RUN DATABASE_URL=sqlite:///:memory: python -m space.hosting_smoke
+CMD ["python", "-m", "space.hosting_worker"]

@@ -180,7 +180,7 @@ class SpacePlayerSnapshot(Base):
 
 
 class SpaceWorldEntity(Base):
-    """Durable placement/control metadata for an entity executed by Space browsers."""
+    """Durable entity state for browser leases and metered server execution."""
     __tablename__ = "space_world_entities"
     __table_args__ = (
         UniqueConstraint(
@@ -197,6 +197,11 @@ class SpaceWorldEntity(Base):
         ),
         CheckConstraint("revision >= 1", name="ck_space_world_entity_revision"),
         CheckConstraint("execution_epoch >= 0", name="ck_space_world_entity_execution_epoch"),
+        CheckConstraint("execution_mode IN ('browser', 'hosted')", name="ck_space_hosting_mode"),
+        CheckConstraint("hosting_remaining_ms BETWEEN 0 AND 3600000", name="ck_space_hosting_time"),
+        CheckConstraint("hosting_budget_remaining BETWEEN 0 AND 168", name="ck_space_hosting_budget"),
+        CheckConstraint("hosting_billed_hours >= 0", name="ck_space_hosting_billed"),
+        CheckConstraint("NOT hosting_enabled OR (execution_mode = 'hosted' AND desired_run_state = 'running')", name="ck_space_hosting_enabled"),
         CheckConstraint("size_bytes > 0", name="ck_space_world_entity_size"),
         CheckConstraint("snapshot_size_bytes >= 0", name="ck_space_world_entity_snapshot_size"),
         Index("ix_space_world_entities_world_position", "world_id", "position_x_cm", "position_z_cm"),
@@ -215,7 +220,7 @@ class SpaceWorldEntity(Base):
         nullable=False,
     )
     name = Column(String(80), nullable=False)
-    schema_version = Column(SmallInteger, nullable=False, default=4, server_default="4")
+    schema_version = Column(SmallInteger, nullable=False, default=5, server_default="5")
     content_digest = Column(LargeBinary(32), nullable=False)
     definition = Column(LargeBinary, nullable=False)
     size_bytes = Column(Integer, nullable=False)
@@ -236,6 +241,15 @@ class SpaceWorldEntity(Base):
     execution_instance_id = Column(Uuid(as_uuid=False), nullable=True)
     execution_lease_expires_at = Column(DateTime(timezone=True), nullable=True)
     execution_epoch = Column(BigInteger, nullable=False, default=0, server_default="0")
+    execution_mode = Column(String(16), nullable=False, default="browser", server_default="browser")
+    hosting_enabled = Column(Boolean, nullable=False, default=False, server_default="false")
+    hosting_remaining_ms = Column(BigInteger, nullable=False, default=0, server_default="0")
+    hosting_budget_remaining = Column(Integer, nullable=False, default=0, server_default="0")
+    hosting_billed_hours = Column(Integer, nullable=False, default=0, server_default="0")
+    hosting_anchor = Column(JSON, nullable=True)
+    hosting_reason = Column(String(80), nullable=True)
+    hosting_error = Column(String(500), nullable=True)
+    hosting_last_tick_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         default=lambda: datetime.datetime.now(datetime.timezone.utc),
@@ -247,6 +261,23 @@ class SpaceWorldEntity(Base):
         onupdate=lambda: datetime.datetime.now(datetime.timezone.utc),
         nullable=False,
     )
+
+
+class SpaceHostingOperation(Base):
+    """Durable dedupe receipts: a delayed retry can never reopen a stopped job."""
+    __tablename__ = "space_hosting_operations"
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
+    operation_id = Column(Uuid(as_uuid=False), primary_key=True)
+    request_digest = Column(LargeBinary(32), nullable=False)
+    result = Column(JSON, nullable=False)
+
+
+class SpaceHostingWorker(Base):
+    __tablename__ = "space_hosting_workers"
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
+    instance_id = Column(String(36), nullable=False)
+    epoch = Column(BigInteger, nullable=False, default=1)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=False)
 
 
 class SpaceChunkSnapshot(Base):
@@ -369,7 +400,7 @@ class SpaceMarketResource(Base):
             name="ck_space_market_resource_kind",
         ),
         CheckConstraint(
-            "schema_version = 4",
+            "schema_version = 5",
             name="ck_space_market_resource_schema_version",
         ),
         CheckConstraint("license = 'AGPL-3.0-only'", name="ck_space_market_resource_license"),
@@ -406,7 +437,7 @@ class SpaceMarketResource(Base):
         nullable=True,
     )
     kind = Column(String(16), nullable=False)
-    schema_version = Column(SmallInteger, nullable=False, default=4, server_default="4")
+    schema_version = Column(SmallInteger, nullable=False, default=5, server_default="5")
     name = Column(String(80), nullable=False)
     license = Column(String(32), nullable=False, default="AGPL-3.0-only", server_default="AGPL-3.0-only")
     content_digest = Column(LargeBinary(32), nullable=False)

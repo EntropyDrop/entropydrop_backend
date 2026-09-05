@@ -33,6 +33,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/ed_db
       - REDIS_URL=redis://redis:6379/0
+      - SPACE_HOSTING_ENABLED=${SPACE_HOSTING_ENABLED:-false}
     depends_on:
       - db
       - redis
@@ -73,6 +74,27 @@ services:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
       - app
+
+  space-hosting:
+    build:
+      context: ..
+      dockerfile: entropydrop_backend/Dockerfile.hosting
+    restart: unless-stopped
+    profiles: [space-hosting]
+    command: ["python", "-m", "space.hosting_worker"]
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 64
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/ed_db
+      REDIS_URL: redis://redis:6379/0
+      SPACE_HOSTING_WORLD_IDS: ${SPACE_HOSTING_WORLD_IDS:-00000000-0000-4000-8000-000000000001}
+      SPACE_HOSTING_ENABLED: ${SPACE_HOSTING_ENABLED:-false}
+    depends_on: [db, redis]
 
 volumes:
   postgres_data:

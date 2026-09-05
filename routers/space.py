@@ -226,7 +226,8 @@ def _require_world_membership(
     world_id: str,
     user: models.User,
 ) -> models.SpaceWorld:
-    world = db.query(models.SpaceWorld).filter(models.SpaceWorld.id == world_id).first()
+    # Serialize short world transactions with hosted simulation commits.
+    world = db.query(models.SpaceWorld).filter(models.SpaceWorld.id == world_id).with_for_update().first()
     if world is None:
         raise HTTPException(status_code=404, detail={"code": "WORLD_NOT_FOUND"})
     membership = db.query(models.SpaceWorldPlayerProfile).filter(
@@ -1201,7 +1202,12 @@ def apply_terrain_mutation_batch(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    """Apply one idempotent, spatially bounded and transactionally metered batch."""
+    return _apply_terrain_mutation_batch(request, world_id, batch_request, db, current_user)
+
+
+def _apply_terrain_mutation_batch(request, world_id, batch_request, db, current_user,
+                                  *, hosted_chunks=None, external_build=False, commit=True):
+    """Shared transaction body; external_build requires a scoped API authorization."""
     world = _require_world_membership(db, str(world_id), current_user)
     batch_id = str(batch_request.batch_id)
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -1261,7 +1267,10 @@ def apply_terrain_mutation_batch(
             "limit": SPACE_TERRAIN_MAX_ZONES_PER_BATCH,
             "actual": len(touched_zones),
         })
-    _validate_terrain_edit_scope(db, world, current_user, touched_chunks, now)
+    if hosted_chunks is None and not external_build:
+        _validate_terrain_edit_scope(db, world, current_user, touched_chunks, now)
+    elif hosted_chunks is not None and not touched_chunks.issubset(hosted_chunks):
+        raise HTTPException(422, detail={"code": "HOSTING_AREA_LIMIT"})
 
     rows = db.query(models.SpaceChunkSnapshot).filter(
         models.SpaceChunkSnapshot.world_id == world.id,
@@ -1461,6 +1470,9 @@ def apply_terrain_mutation_batch(
         client_created_at=client_created_at,
         result=stored_result,
     ))
+    if not commit:
+        db.flush()
+        return _terrain_receipt_response(world.id, batch_id, stored_result)
     try:
         db.commit()
     except IntegrityError as exc:

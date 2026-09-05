@@ -1,3 +1,4 @@
+from credit_balance import lock_balance
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, BackgroundTasks, Query, Response
 import io
 import json
@@ -646,6 +647,7 @@ async def generate_image(
     generation_credit_cost = backend_utils.get_model_credit_cost(model_version)
     if aux_model_version:
         generation_credit_cost += backend_utils.get_model_credit_cost(aux_model_version)
+    lock_balance(db, current_user)
     remaining = current_user.credits if current_user.credits is not None else 0
     if remaining < generation_credit_cost:
         raise HTTPException(status_code=403, detail="Insufficient credits")
@@ -885,6 +887,7 @@ def refund_generation_credits(db: Session, log: models.GenerationLog) -> int:
             f"Cannot refund generation {log.id}: user {log.user_id} was not found"
         )
 
+    lock_balance(db, user)
     refund_source = f"Skin Generation Refund: {log.id}"
     existing_refund = (
         db.query(models.CreditLog)
