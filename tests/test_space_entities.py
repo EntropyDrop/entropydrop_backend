@@ -27,7 +27,7 @@ def _user(db, user_id: str):
 def _entity(name="External Walker"):
     return {
         "type": "space-entity",
-        "version": 3,
+        "version": 4,
         "name": name,
         "root": {
             "id": "root",
@@ -193,6 +193,29 @@ def test_api_key_scope_and_entity_validation_are_enforced(client, db):
     )
     assert invalid.status_code == 422
     assert invalid.json()["detail"]["code"] == "ENTITY_DEFINITION_INVALID"
+
+    opaque_component_ids = _entity("Opaque Component IDs")
+    opaque_component_ids["root"]["id"] = "world"
+    opaque_component_ids["root"]["children"] = [{
+        "id": "root",
+        "body": {"type": "kinematic"},
+        "blocks": [],
+        "seats": [],
+        "children": [],
+    }]
+    opaque_component_ids_ingest = client.post(
+        f"/space/api/v2/worlds/{world_id}/entities",
+        json={
+            **body,
+            "operation_id": str(uuid.uuid4()),
+            "definition_base64": base64.b64encode(
+                    encode_inventory_resource("entity", opaque_component_ids)
+            ).decode(),
+            "desired_run_state": "stopped",
+        },
+        headers=headers,
+    )
+    assert opaque_component_ids_ingest.status_code == 201, opaque_component_ids_ingest.text
 
     above_build_height = client.post(
         f"/space/api/v2/worlds/{world_id}/entities",
@@ -409,6 +432,84 @@ def test_browser_entities_are_backend_snapshotted_updated_and_hard_deleted(clien
     )
     assert deleted.json() == {"deleted": True, "entity_id": record["id"]}
     assert db.query(SpaceWorldEntity).count() == 0
+
+
+def test_browser_entity_build_height_is_checked_only_for_new_definitions(client, db):
+    owner = _user(db, "browser-build-height-owner")
+    app.dependency_overrides[get_current_user] = lambda: owner
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+
+    def snapshot_at(y: float):
+        return {
+            "constructorOrigin": [1, y, 1],
+            "position": [1, y, 1],
+            "quaternion": [0, 0, 0, 1],
+            "velocity": [0, 0, 0],
+            "angularVelocity": [0, 0, 0],
+            "physicsSimulationEnabled": False,
+            "scriptStatus": "stopped",
+        }
+
+    crossing = _entity("Crossing ceiling")
+    crossing["root"]["blocks"][0]["dy"] = 1
+    crossing_definition = base64.b64encode(
+        encode_inventory_resource("entity", crossing)
+    ).decode()
+    rejected_create = client.post(
+        f"/space/api/v2/worlds/{world_id}/entities/browser",
+        json={
+            "operation_id": str(uuid.uuid4()),
+            "definition_base64": crossing_definition,
+            "snapshot": snapshot_at(255),
+            "position": {"x_cm": 100, "y_cm": 25500, "z_cm": 100},
+            "desired_run_state": "stopped",
+        },
+    )
+    assert rejected_create.status_code == 422
+    assert rejected_create.json()["detail"]["code"] == "ENTITY_POSITION_OUT_OF_BOUNDS"
+
+    definition = base64.b64encode(
+        encode_inventory_resource("entity", _entity("Movable entity"))
+    ).decode()
+    created = client.post(
+        f"/space/api/v2/worlds/{world_id}/entities/browser",
+        json={
+            "operation_id": str(uuid.uuid4()),
+            "definition_base64": definition,
+            "snapshot": snapshot_at(20),
+            "position": {"x_cm": 100, "y_cm": 2000, "z_cm": 100},
+            "desired_run_state": "stopped",
+        },
+    )
+    assert created.status_code == 201, created.text
+    record = created.json()
+
+    rejected_replacement = client.put(
+        f"/space/api/v2/worlds/{world_id}/entities/{record['id']}/checkpoint",
+        json={
+            "operation_id": str(uuid.uuid4()),
+            "expected_revision": 1,
+            "definition_base64": crossing_definition,
+            "snapshot": snapshot_at(255),
+            "position": {"x_cm": 100, "y_cm": 25500, "z_cm": 100},
+            "desired_run_state": "stopped",
+        },
+    )
+    assert rejected_replacement.status_code == 422
+    assert rejected_replacement.json()["detail"]["code"] == "ENTITY_POSITION_OUT_OF_BOUNDS"
+
+    moved_without_replacement = client.put(
+        f"/space/api/v2/worlds/{world_id}/entities/{record['id']}/checkpoint",
+        json={
+            "operation_id": str(uuid.uuid4()),
+            "expected_revision": 1,
+            "snapshot": snapshot_at(300),
+            "position": {"x_cm": 100, "y_cm": 30000, "z_cm": 100},
+            "desired_run_state": "stopped",
+        },
+    )
+    assert moved_without_replacement.status_code == 200, moved_without_replacement.text
+    assert moved_without_replacement.json()["position"]["y_cm"] == 30000
 
 
 def test_world_entity_storage_quota_is_aggregate_per_owner(client, db, monkeypatch):

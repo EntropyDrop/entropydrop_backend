@@ -1,10 +1,14 @@
 syntax = "proto3";
 
-package entropydrop.space.inventory.v3;
+package entropydrop.space.inventory.v4;
 
-// Canonical binary contract for browser backpacks, portable files, market
-// uploads, and immutable CDN objects. Derived counts and the constant block id
+// Canonical binary contract for portable files, market uploads, and immutable
+// CDN objects. Derived counts and the constant block id
 // are intentionally omitted.
+// Canonical encoders normalize every double -0.0 to +0.0; sort BlockSet.blocks
+// and Component.blocks by (dx,dy,dz,micro coordinates,color); and sort
+// Component.children and Entity.constraints by Unicode code-point id order.
+// Color and seat order remains significant and is preserved.
 message InventoryResource {
   uint32 schema_version = 1;
 
@@ -65,8 +69,11 @@ message Seat {
   Vector3 position = 1;
 }
 
-// The entity owns exactly one root Component. Children recursively own their
-// voxels and configuration, so per-voxel component indexes are unnecessary.
+// Entity.root and Component.children alone determine root/child hierarchy;
+// do not add a hierarchy kind or index. Component ids are opaque identifiers:
+// no spelling has special root, child, or world semantics. Children recursively
+// own their voxels and configuration, so per-voxel component indexes are
+// unnecessary.
 message Component {
   string id = 1;
   optional Vector3 pivot = 2;
@@ -75,6 +82,7 @@ message Component {
   optional string script = 5;
   bool script_disabled = 6;
   repeated Seat seats = 7;
+  // Sibling order is non-semantic; canonical encoders and decoders sort by id.
   repeated Component children = 8;
   // Parent-relative authored transform. The root omits these fields.
   // local_rotation is restricted to the 24 axis-aligned cube orientations so
@@ -101,46 +109,23 @@ message ConstraintLimits {
 message EntityConstraint {
   string id = 1;
   ConstraintType type = 2;
-  bool body_a_is_world = 3;
-  string body_a = 4;
-  string body_b = 5;
-  optional Vector3 anchor_a = 6;
-  optional Vector3 anchor_b = 7;
-  optional Vector3 axis_a = 8;
-  optional Vector3 axis_b = 9;
-  optional Vector3 reference_a = 10;
-  optional Vector3 reference_b = 11;
-  optional ConstraintLimits limits = 12;
-  double stiffness = 13;
-  bool collide_connected = 14;
+  // Absence means that side A is attached to the external world. Presence is
+  // always an exact component id; no id spelling has sentinel semantics.
+  optional string body_a_component_id = 3;
+  string body_b_component_id = 4;
+  optional Vector3 anchor_a = 5;
+  optional Vector3 anchor_b = 6;
+  optional Vector3 axis_a = 7;
+  optional Vector3 axis_b = 8;
+  optional Vector3 reference_a = 9;
+  optional Vector3 reference_b = 10;
+  optional ConstraintLimits limits = 11;
+  double stiffness = 12;
+  bool collide_connected = 13;
 }
 
 message Entity {
   string name = 1;
   Component root = 2;
   repeated EntityConstraint constraints = 3;
-}
-
-enum InventoryCategory {
-  INVENTORY_CATEGORY_BLOCK_SET = 0;
-  INVENTORY_CATEGORY_ENTITY = 1;
-  INVENTORY_CATEGORY_COLOR_SET = 2;
-}
-
-message InventorySlot {
-  uint32 index = 1;
-  InventoryResource resource = 2;
-}
-
-message InventoryGroup {
-  uint32 selected = 1;
-  repeated InventorySlot slots = 2;
-}
-
-message Backpack {
-  uint32 schema_version = 1;
-  InventoryCategory active_category = 2;
-  InventoryGroup block_sets = 3;
-  InventoryGroup entities = 4;
-  InventoryGroup color_sets = 5;
 }

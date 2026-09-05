@@ -42,7 +42,7 @@ state, and snapshot-plus-event persistence**.
 - Each world admits at most **32 occupied session slots**. Reserved handshakes,
   active players, and reconnect-grace sessions consume a slot; excess players
   wait in a FIFO admission queue without creating hot world state.
-- The three-category backpack is browser-local (`space.backpack.v2`). PostgreSQL
+- The three-category backpack is browser-local (`space.backpack.v5.pb`). PostgreSQL
   and the real-time protocol store no backpack slots, selection, names, or quantities.
 - The server's in-memory model and atomic commands enforce standard-block and
   microblock coexistence rules; client state is never trusted.
@@ -55,7 +55,7 @@ target ships; theoretical concurrency is not a promise.
 > Transitional implementation note (2026-09-03): online world entities now use
 > `space_world_entities` as their only durable source. Account-level, long-lived Space API
 > keys let external agents submit inline entity definitions to any world the owner can access;
-> the backend canonicalizes and validates the same Protobuf v3 contract used by browsers.
+> the backend canonicalizes and validates the same Protobuf v4 contract used by browsers.
 > All created entities share one editable ownership model, with no market/browser source
 > discriminator. The browser removes and never reads/writes its legacy per-world entity storage
 > online; offline mode keeps browser persistence. The API does not run physics. An
@@ -578,13 +578,14 @@ position prevents edits rather than weakening the range check. Expired counters 
 windows of one day or less are removed in bounded hourly batches after a two-day retention
 period, so the per-second world buckets do not grow without limit.
 
-The browser owns the backpack. The client persists one Protobuf v3 backpack under
-`space.backpack.v3.pb`: IndexedDB stores the bytes directly, while the localStorage
-fallback stores those same bytes as base64. `.edpb` Protobuf export/import is the manual
-backup and transfer mechanism. The server does not know which slot is selected, which
-name a player gave an unpublished item, or whether two unpublished local entries are
-identical. Publishing is an explicit copy operation; it never synchronizes or mutates a
-player's local slots.
+The browser owns the backpack. The client persists frontend-only Protobuf v5 backpack
+state under `space.backpack.v5.pb`: IndexedDB stores the bytes directly, while the
+localStorage fallback stores those same bytes as base64. `.edpb` Protobuf export/import
+carries only the shared `InventoryResource` v4 message and is the manual backup and
+transfer mechanism. The
+server does not know which slot is selected, which name a player gave an unpublished
+item, or whether two unpublished local entries are identical. Publishing is an explicit
+copy operation; it never synchronizes or mutates a player's local slots.
 
 This does not make placement client-authoritative. There are two different lifetimes:
 
@@ -619,7 +620,7 @@ browser backpack entry --untrusted placement command--> authoritative world muta
 
 #### 9.4.1 Canonical publish contract
 
-All published resources use the shared `InventoryResource` Protobuf schema version 3.
+All published resources use the shared `InventoryResource` Protobuf schema version 4.
 The API decodes the binary message and then validates a closed canonical model
 (`extra=forbid`):
 
@@ -639,6 +640,12 @@ complete stopped component hierarchy must place every voxel on one shared 0.2-un
 construction grid without volume overlap; runtime motion is discarded when Stop restores
 that authored pose.
 
+Component ids are opaque portable ASCII identifiers and are unique across the entity;
+`root` and `world` have no reserved meaning. Tree position alone identifies the root.
+For a constraint, an absent `body_a_component_id` means the external world anchor, while
+any present value is an exact component id. `body_b_component_id` always identifies a
+component.
+
 Before object storage, the API recomputes derived counts, normalizes colors and numbers,
 sorts order-insensitive arrays, and deterministically re-encodes Protobuf. SHA-256 is
 computed over deterministic Protobuf with the display name and derived counts omitted, so
@@ -650,7 +657,7 @@ and upload budgets are not refunded.
 
 New publications upload canonical Protobuf as `application/x-protobuf` to
 `space-market/resources/{resource_id}/{digest}.pb` before the database row is committed.
-If the database write fails, the API removes the unreferenced object. The pre-launch v3
+If the database write fails, the API removes the unreferenced object. The pre-launch v4
 schema has no database JSON fallback and intentionally accepts no older entity wire shape.
 Voxel ownership follows recursive component nesting, so voxels carry neither component
 indexes nor `part`; mountability is derived solely from explicit component seats.
@@ -948,7 +955,7 @@ Reject incompatible protocol versions immediately; never guess old field semanti
 - Rate-limit join-ticket creation, queued sockets, queue heartbeats, and reconnect attempts;
   one user may own only one queue row or occupied world slot.
 - Validate command size, coordinates, colors, micro offsets, and entity ownership after decode.
-- Treat browser-local backpack payloads as hostile uploads: bound compressed and expanded
+- Treat imported or published `InventoryResource` payloads as hostile input: bound compressed and expanded
   bytes, parse depth, nodes/blocks, coordinates, script capabilities, and validation CPU.
 - Never accept client `event_id`, `server_tick`, or `fence_token` as authoritative.
 - Bound decompressed snapshot size and compression ratio to prevent compression bombs.
@@ -1103,9 +1110,10 @@ The system is not real-time multiplayer until it passes at least these scenarios
 - Ten thousand retries of one `operation_id` create exactly one event.
 - One thousand identical world entity instances reuse one structural asset; editing one
   instance does not alter the others.
-- Backpack edits survive a same-browser reload through `space.backpack.v3.pb`, create no
-  server inventory rows/messages, and are lost when that browser storage is cleared.
-- Market publication accepts only canonical Protobuf v3 resources, rejects renamed/reordered
+- Backpack edits survive a same-browser reload through frontend-local
+  `space.backpack.v5.pb`, create no server inventory rows/messages, and are lost when
+  that browser storage is cleared.
+- Market publication accepts only canonical Protobuf v4 resources, rejects renamed/reordered
   duplicates, enforces ten successful publications per UTC day, and fixes the license to
   `AGPL-3.0-only`; direct-CDN previews do not increment downloads, while explicit
   download/like rankings, publisher filtering, and authorized hard deletion converge.
@@ -1156,8 +1164,8 @@ implemented.
 | All world entity information | Immutable `build_assets` + `entity_snapshots` + indexed events + coverage manifest | Reliable entity presence; immutable HTTPS definition; 20 Hz runtime deltas | Checkpoint/replay and 1,000 shared definitions recover identically |
 | Enabled entity auto-run in loaded chunks | Durable desired run state, health, lifecycle/ownership epochs | AOI wake references and exhaustive wake/sleep state machine | Concurrent observers wake once; durable sleep, retry, quarantine and handoff tested |
 | Visible player state/orientation/skin/pose | Latest `player_snapshots`, stable player id, and existing `users.skin_url`/`skin_type` | Reliable presence carries URL/model; epoch-gated 20 Hz motion deltas never carry PNG bytes | Missing skin blocks entry; latest checkpoint restores, AOI enter/leave and reconnect reset converge |
-| Browser-only backpack | No inventory tables; `space.backpack.v3.pb` Protobuf in IndexedDB/base64 localStorage fallback plus `.edpb` import/export | Untrusted local placement is revalidated; only accepted world result persists | Reload stays local, clearing storage loses it, server has no backpack endpoint/message |
-| Explicit resource market | Immutable canonical Protobuf v3 content, global SHA-256 uniqueness, publisher/quota metadata, likes and permanent deletion | Authenticated REST publish/list/download/like/delete with a current-publisher filter; no slot synchronization | Protobuf wire fixtures, strict-schema validation, duplicate/order/name equivalence, 10/day, counters/rankings and authorization tests |
+| Browser-only backpack | No inventory tables; frontend-only `space.backpack.v5.pb` Protobuf in IndexedDB/base64 localStorage fallback | Untrusted local placement is revalidated; only accepted world result persists | Reload stays local, clearing storage loses it, server has no backpack endpoint/message |
+| Explicit resource market | Immutable canonical Protobuf v4 content, global SHA-256 uniqueness, publisher/quota metadata, likes and permanent deletion | Authenticated REST publish/list/download/like/delete with a current-publisher filter; no slot synchronization | Protobuf wire fixtures, strict-schema validation, duplicate/order/name equivalence, 10/day, counters/rankings and authorization tests |
 | Maximum 32 online with queue | Fixed session slots, FIFO queue leases and user advisory lock | Queue status/heartbeat, reservation, active and reconnect-grace states | 32 simultaneous admits, 33rd queues, promotion/reconnect never oversubscribes |
 | Real-time WebSocket behavior | No frame history in PostgreSQL | WSS binary protobuf, reliable presence/events, coalesced state, bounded fragmentation/backpressure | Slow client and stale-interest tests cannot delay tick or install obsolete data |
 | Reconnect/idempotency/conflicts | Resume hash, operation id unique index, revisions, event/checkpoint watermarks | Input replay, presence reset, `InterestReset`, compare-and-swap commands | Crash points and 10,000 retries produce one durable result |

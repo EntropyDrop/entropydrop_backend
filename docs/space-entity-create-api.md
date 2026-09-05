@@ -56,7 +56,7 @@ DELETE /space/api/v2/api-keys/{api_key_id}
 
 ## 2. Create an entity directly
 
-`definition_base64` is a base64-encoded canonical `InventoryResource` Protobuf v3 whose
+`definition_base64` is a base64-encoded canonical `InventoryResource` Protobuf v4 whose
 kind is `entity`. Coordinates are integer centimetres. X and Z must be inside the world's
 canonical wrapped coordinate range; Y uses the Space vertical bounds. `yaw_quarter_turns`
 is 0 through 3. The position is the entity construction origin.

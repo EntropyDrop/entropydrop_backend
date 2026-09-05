@@ -1,4 +1,4 @@
-"""Canonical Protobuf codec for Space backpack and market resources."""
+"""Canonical Protobuf codec for portable Space and market resources."""
 
 from __future__ import annotations
 
@@ -10,12 +10,18 @@ from google.protobuf.message import DecodeError
 from space.contracts import inventory_pb2
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 InventoryKind = Literal["blockset", "entity", "colorset"]
 
 
 class InventoryCodecError(ValueError):
     pass
+
+
+def _canonical_double(value: Any) -> float:
+    """Return the unique protobuf representation for either signed zero."""
+    number = float(value)
+    return 0.0 if number == 0.0 else number
 
 
 _BODY_TYPE_TO_PROTO = {
@@ -34,13 +40,17 @@ _CONSTRAINT_FROM_PROTO = {value: key for key, value in _CONSTRAINT_TO_PROTO.item
 def _set_vector(target, value: list[float] | tuple[float, float, float] | None) -> None:
     if value is None:
         return
-    target.x = float(value[0])
-    target.y = float(value[1])
-    target.z = float(value[2])
+    target.x = _canonical_double(value[0])
+    target.y = _canonical_double(value[1])
+    target.z = _canonical_double(value[2])
 
 
 def _vector(value) -> list[float]:
-    return [float(value.x), float(value.y), float(value.z)]
+    return [
+        _canonical_double(value.x),
+        _canonical_double(value.y),
+        _canonical_double(value.z),
+    ]
 
 
 def _set_quaternion(
@@ -49,14 +59,19 @@ def _set_quaternion(
 ) -> None:
     if value is None:
         return
-    target.x = float(value[0])
-    target.y = float(value[1])
-    target.z = float(value[2])
-    target.w = float(value[3])
+    target.x = _canonical_double(value[0])
+    target.y = _canonical_double(value[1])
+    target.z = _canonical_double(value[2])
+    target.w = _canonical_double(value[3])
 
 
 def _quaternion(value) -> list[float]:
-    return [float(value.x), float(value.y), float(value.z), float(value.w)]
+    return [
+        _canonical_double(value.x),
+        _canonical_double(value.y),
+        _canonical_double(value.z),
+        _canonical_double(value.w),
+    ]
 
 
 def _encode_voxel(target, block: dict[str, Any]) -> None:
@@ -93,10 +108,22 @@ def _decode_voxel(block) -> dict[str, Any]:
     return result
 
 
+def _voxel_sort_key(block: dict[str, Any]) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        int(block["dx"]),
+        int(block["dy"]),
+        int(block["dz"]),
+        -1 if block.get("mx") is None else int(block["mx"]),
+        -1 if block.get("my") is None else int(block["my"]),
+        -1 if block.get("mz") is None else int(block["mz"]),
+        int(block["color"]),
+    )
+
+
 def _encode_block_set(message, canonical: dict[str, Any], include_name: bool) -> None:
     if include_name:
         message.name = canonical["name"]
-    for block in canonical["blocks"]:
+    for block in sorted(canonical["blocks"], key=_voxel_sort_key):
         _encode_voxel(message.blocks.add(), block)
 
 
@@ -130,7 +157,7 @@ def _encode_body(message, body: dict[str, Any]) -> None:
     message.type = _BODY_TYPE_TO_PROTO[body.get("type", "dynamic")]
     for field in ("mass", "restitution", "friction"):
         if body.get(field) is not None:
-            setattr(message, field, float(body[field]))
+            setattr(message, field, _canonical_double(body[field]))
     for source, target in (
         ("useGravity", "use_gravity"),
         ("collisionEnabled", "collision_enabled"),
@@ -145,7 +172,7 @@ def _decode_body(message) -> dict[str, Any]:
     }
     for field in ("mass", "restitution", "friction"):
         if message.HasField(field):
-            result[field] = float(getattr(message, field))
+            result[field] = _canonical_double(getattr(message, field))
     for field, target in (
         ("use_gravity", "useGravity"),
         ("collision_enabled", "collisionEnabled"),
@@ -160,14 +187,14 @@ def _encode_component(message, component: dict[str, Any]) -> None:
     if component.get("pivot") is not None:
         _set_vector(message.pivot, component["pivot"])
     _encode_body(message.body, component.get("body", {}))
-    for block in component.get("blocks", []):
+    for block in sorted(component.get("blocks", []), key=_voxel_sort_key):
         _encode_voxel(message.blocks.add(), block)
     if component.get("script") is not None:
         message.script = str(component["script"])
     message.script_disabled = bool(component.get("scriptDisabled", False))
     for seat in component.get("seats", []):
         _set_vector(message.seats.add().position, seat["position"])
-    for child in component.get("children", []):
+    for child in sorted(component.get("children", []), key=lambda value: str(value["id"])):
         _encode_component(message.children.add(), child)
     if component.get("localPosition") is not None:
         _set_vector(message.local_position, component["localPosition"])
@@ -188,7 +215,10 @@ def _decode_component(message) -> dict[str, Any]:
         "body": _decode_body(message.body),
         "blocks": [_decode_voxel(block) for block in message.blocks],
         "seats": [{"position": _vector(seat.position)} for seat in message.seats],
-        "children": [_decode_component(child) for child in message.children],
+        "children": [
+            _decode_component(child)
+            for child in sorted(message.children, key=lambda value: str(value.id))
+        ],
     }
     if message.HasField("pivot"):
         result["pivot"] = _vector(message.pivot)
@@ -209,14 +239,13 @@ def _encode_entity(message, canonical: dict[str, Any], include_name: bool) -> No
     if include_name:
         message.name = canonical["name"]
     _encode_component(message.root, canonical["root"])
-    for constraint in canonical.get("constraints", []):
+    for constraint in sorted(canonical.get("constraints", []), key=lambda value: str(value["id"])):
         encoded = message.constraints.add()
         encoded.id = constraint["id"]
         encoded.type = _CONSTRAINT_TO_PROTO[constraint.get("type", "point")]
-        encoded.body_a_is_world = constraint["bodyA"] == "world"
-        if not encoded.body_a_is_world:
-            encoded.body_a = constraint["bodyA"]
-        encoded.body_b = constraint["bodyB"]
+        if constraint.get("bodyA") is not None:
+            encoded.body_a_component_id = constraint["bodyA"]
+        encoded.body_b_component_id = constraint["bodyB"]
         for source, target in (
             ("anchorA", "anchor_a"),
             ("anchorB", "anchor_b"),
@@ -228,9 +257,9 @@ def _encode_entity(message, canonical: dict[str, Any], include_name: bool) -> No
             if constraint.get(source) is not None:
                 _set_vector(getattr(encoded, target), constraint[source])
         if constraint.get("limits") is not None:
-            encoded.limits.min = float(constraint["limits"]["min"])
-            encoded.limits.max = float(constraint["limits"]["max"])
-        encoded.stiffness = float(constraint.get("stiffness", 0.9))
+            encoded.limits.min = _canonical_double(constraint["limits"]["min"])
+            encoded.limits.max = _canonical_double(constraint["limits"]["max"])
+        encoded.stiffness = _canonical_double(constraint.get("stiffness", 0.9))
         encoded.collide_connected = bool(constraint.get("collideConnected", False))
 
 
@@ -251,13 +280,17 @@ def _decode_entity(message) -> dict[str, Any]:
         "root": _decode_component(message.root),
         "constraints": [],
     }
-    for constraint in message.constraints:
+    for constraint in sorted(message.constraints, key=lambda value: str(value.id)):
         decoded: dict[str, Any] = {
             "id": constraint.id,
             "type": _enum_value(_CONSTRAINT_FROM_PROTO, constraint.type, "constraint type"),
-            "bodyA": "world" if constraint.body_a_is_world else constraint.body_a,
-            "bodyB": constraint.body_b,
-            "stiffness": float(constraint.stiffness),
+            "bodyA": (
+                constraint.body_a_component_id
+                if constraint.HasField("body_a_component_id")
+                else None
+            ),
+            "bodyB": constraint.body_b_component_id,
+            "stiffness": _canonical_double(constraint.stiffness),
             "collideConnected": bool(constraint.collide_connected),
         }
         for source, target in (
@@ -272,8 +305,8 @@ def _decode_entity(message) -> dict[str, Any]:
                 decoded[target] = _vector(getattr(constraint, source))
         if constraint.HasField("limits"):
             decoded["limits"] = {
-                "min": float(constraint.limits.min),
-                "max": float(constraint.limits.max),
+                "min": _canonical_double(constraint.limits.min),
+                "max": _canonical_double(constraint.limits.max),
             }
         result["constraints"].append(decoded)
     return result

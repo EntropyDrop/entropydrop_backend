@@ -61,7 +61,7 @@ def _user(db, user_id: str = "market-user", email: str | None = None):
 def _blockset(name: str = "Signal tower", color: int = 0xF2A93B):
     return {
         "type": "space-blockset",
-        "version": 3,
+        "version": 4,
         "name": name,
         "blocks": [
             {"dx": 1, "dy": 0, "dz": 0, "block": 1, "color": color},
@@ -73,7 +73,7 @@ def _blockset(name: str = "Signal tower", color: int = 0xF2A93B):
 def _entity(name: str = "Walker"):
     return {
         "type": "space-entity",
-        "version": 3,
+        "version": 4,
         "name": name,
         "root": {
             "id": "root",
@@ -107,7 +107,7 @@ def _colorset(name: str = "Sunset", variant: int = 0):
         "#f1c40f", "#ff6b81", "#a55eea", "#48dbfb", "#2ed573",
         "#eb4d4b", "#f5f6fa", "#2f3542", f"#{variant:06x}",
     ]
-    return {"type": "space-colorset", "version": 3, "name": name, "colors": colors}
+    return {"type": "space-colorset", "version": 4, "name": name, "colors": colors}
 
 
 def _publish(client, kind: str, payload: dict):
@@ -157,6 +157,108 @@ def test_market_publishes_strict_canonical_resources_with_agpl_and_digest(client
     assert stored.downloads_count == 0
 
 
+def test_market_validation_normalizes_signed_zero_doubles():
+    entity = _entity("Canonical zero")
+    root = entity["root"]
+    root["anchorRotation"] = [-0.0, -0.0, math.sqrt(0.5), math.sqrt(0.5)]
+    root["body"].update({"restitution": -0.0, "friction": -0.0})
+    root["seats"][0]["position"] = [-0.0, 1.0, -0.0]
+    child = root["children"][0]
+    child["pivot"] = [1.5, 0.5, 0.5]
+    child["localPosition"] = [0.5, -0.0, -0.0]
+    child["localRotation"] = [-0.0, 1.0, -0.0, -0.0]
+    child["anchorRotation"] = [math.sqrt(0.5), -0.0, -0.0, math.sqrt(0.5)]
+    child["body"].update({"restitution": -0.0, "friction": -0.0})
+    entity["constraints"] = [{
+        "id": "joint",
+        "type": "point",
+        "bodyA": "root",
+        "bodyB": "arm",
+        "anchorA": [-0.0, -0.0, -0.0],
+        "anchorB": [-0.0, -0.0, -0.0],
+        "axisA": [-0.0, -0.0, -0.0],
+        "axisB": [-0.0, -0.0, -0.0],
+        "referenceA": [-0.0, -0.0, -0.0],
+        "referenceB": [-0.0, -0.0, -0.0],
+        "limits": {"min": -0.0, "max": -0.0},
+        "stiffness": -0.0,
+        "collideConnected": False,
+    }]
+
+    canonical = space_market.validate_inventory_resource_payload("entity", entity)
+
+    def assert_no_negative_zero(value):
+        if isinstance(value, float) and value == 0.0:
+            assert math.copysign(1.0, value) == 1.0
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                assert_no_negative_zero(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                assert_no_negative_zero(item)
+
+    assert_no_negative_zero(canonical)
+
+
+def test_market_name_limit_counts_unicode_code_points():
+    accepted = space_market.validate_inventory_resource_payload(
+        "blockset",
+        _blockset("🧱" * 80),
+    )
+    assert accepted["name"] == "🧱" * 80
+    assert space_market.validate_inventory_resource_payload(
+        "blockset",
+        _blockset("\ufeffSignal"),
+    )["name"] == "\ufeffSignal"
+
+    with pytest.raises(ValueError):
+        space_market.validate_inventory_resource_payload(
+            "blockset",
+            _blockset("🧱" * 81),
+        )
+    with pytest.raises(ValueError):
+        space_market.validate_inventory_resource_payload("blockset", _blockset("\x1c"))
+
+
+def test_market_stopped_grid_uses_the_explicit_root_pivot():
+    def entity_with_root_pivot(local_position):
+        return {
+            "type": "space-entity",
+            "version": 4,
+            "name": "Pivot",
+            "root": {
+                "id": "root",
+                "pivot": [0.6, 0.5, 0.5],
+                "body": {"type": "dynamic"},
+                "blocks": [{"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 0}],
+                "seats": [],
+                "children": [{
+                    "id": "arm",
+                    "pivot": [2.5, 0.5, 0.5],
+                    "localPosition": local_position,
+                    "localRotation": [0, 0, 0, 1],
+                    "body": {"type": "kinematic"},
+                    "blocks": [{"dx": 2, "dy": 0, "dz": 0, "block": 1, "color": 0}],
+                    "seats": [],
+                    "children": [],
+                }],
+            },
+            "constraints": [],
+        }
+
+    accepted = space_market.validate_inventory_resource_payload(
+        "entity",
+        entity_with_root_pivot([1.9, 0, 0]),
+    )
+    assert accepted["root"]["pivot"] == (0.6, 0.5, 0.5)
+
+    with pytest.raises(ValueError, match="construction grid"):
+        space_market.validate_inventory_resource_payload(
+            "entity",
+            entity_with_root_pivot([1, 0, 0]),
+        )
+
+
 def test_market_digest_rejects_renamed_and_reordered_duplicate_content(client, db):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
@@ -170,6 +272,23 @@ def test_market_digest_rejects_renamed_and_reordered_duplicate_content(client, d
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "RESOURCE_ALREADY_PUBLISHED"
     assert db.query(SpaceMarketResource).count() == 1
+
+    entity = _entity("First entity name")
+    entity["root"]["children"].append({
+        "id": "antenna",
+        "body": {"type": "kinematic"},
+        "blocks": [],
+        "seats": [],
+        "children": [],
+    })
+    assert _publish(client, "entity", entity).status_code == 201
+
+    entity["name"] = "Renamed entity"
+    entity["root"]["children"].reverse()
+    response = _publish(client, "entity", entity)
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "RESOURCE_ALREADY_PUBLISHED"
+    assert db.query(SpaceMarketResource).count() == 2
 
 
 def test_market_enforces_ten_successful_publications_per_utc_day(client, db):
@@ -232,6 +351,32 @@ def test_market_daily_upload_bytes_are_not_refunded_by_delete(
 def test_market_validates_entity_hierarchy(client, db):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
+
+    opaque_ids = _entity("Opaque component ids")
+    opaque_ids["root"]["id"] = "world"
+    opaque_ids["root"]["children"][0]["id"] = "root"
+    opaque_ids["constraints"] = [
+        {
+            "id": "root",
+            "type": "point",
+            "bodyA": None,
+            "bodyB": "root",
+            "stiffness": 0.9,
+        },
+        {
+            "id": "world",
+            "type": "point",
+            "bodyA": "world",
+            "bodyB": "root",
+            "stiffness": 0.9,
+        },
+    ]
+    canonical = space_market.validate_inventory_resource_payload("entity", opaque_ids)
+    assert canonical["root"]["id"] == "world"
+    assert canonical["root"]["children"][0]["id"] == "root"
+    assert canonical["constraints"][0]["bodyA"] is None
+    assert canonical["constraints"][1]["bodyA"] == "world"
+
     duplicate = _entity()
     duplicate["root"]["children"].append({
         "id": "arm",
@@ -369,7 +514,7 @@ def test_market_publish_body_limit_allows_large_valid_protobuf_resources(client,
         })
     payload = {
         "type": "space-blockset",
-        "version": 3,
+        "version": 4,
         "name": "Large valid shape",
         "blocks": blocks,
     }

@@ -90,16 +90,17 @@ def _finite_number(value: Any, label: str, minimum: float | None = None, maximum
         raise ValueError(f"{label} must be at least {minimum}")
     if maximum is not None and number > maximum:
         raise ValueError(f"{label} must be at most {maximum}")
-    return number
+    return 0.0 if number == 0.0 else number
 
 
-def _validate_vector(value: Vector3 | None, label: str, max_abs: float = 256) -> None:
+def _validate_vector(value: Vector3 | None, label: str, max_abs: float = 256) -> tuple[float, float, float] | None:
     if value is None:
-        return
-    for component in value:
-        number = _finite_number(component, label)
-        if abs(number) > max_abs:
+        return None
+    normalized = tuple(_finite_number(component, label) for component in value)
+    for component in normalized:
+        if abs(component) > max_abs:
             raise ValueError(f"{label} components must be within ±{max_abs}")
+    return normalized
 
 
 def _grid_rotation_matrix(value: Quaternion | None, label: str) -> RotationMatrix:
@@ -129,12 +130,20 @@ def _grid_rotation_matrix(value: Quaternion | None, label: str) -> RotationMatri
     return tuple(snapped)  # type: ignore[return-value]
 
 
-def _validate_quaternion(value: Quaternion | None, label: str) -> None:
+def _validate_quaternion(value: Quaternion | None, label: str) -> tuple[float, float, float, float] | None:
+    if value is None:
+        return None
     _grid_rotation_matrix(value, label)
+    return tuple(_finite_number(component, label, -1, 1) for component in value)
 
 
-def _valid_component_id(value: str, allow_root: bool = True) -> bool:
-    return bool(COMPONENT_ID_PATTERN.fullmatch(value)) and (allow_root or value != "root")
+def _valid_component_id(value: str) -> bool:
+    return bool(COMPONENT_ID_PATTERN.fullmatch(value))
+
+
+def _valid_constraint_id(value: str) -> bool:
+    # Constraint ids have their own namespace and never identify endpoints.
+    return bool(COMPONENT_ID_PATTERN.fullmatch(value))
 
 
 class MarketVoxel(StrictResourceModel):
@@ -161,7 +170,7 @@ class MarketVoxel(StrictResourceModel):
 
 class BlockSetPayload(StrictResourceModel):
     type: Literal["space-blockset"]
-    version: Literal[3]
+    version: Literal[4]
     name: StrictStr = Field(min_length=1, max_length=80)
     blocks: list[MarketVoxel] = Field(min_length=1, max_length=SPACE_MARKET_MAX_BLOCKS)
 
@@ -199,7 +208,11 @@ class ComponentSeat(StrictResourceModel):
 
     @model_validator(mode="after")
     def validate_position(self):
-        _validate_vector(self.position, "seat position", SPACE_MARKET_MAX_COORDINATE)
+        self.position = _validate_vector(
+            self.position,
+            "seat position",
+            SPACE_MARKET_MAX_COORDINATE,
+        )
         return self
 
 
@@ -220,10 +233,14 @@ class EntityComponent(StrictResourceModel):
     def validate_component(self):
         if not _valid_component_id(self.id):
             raise ValueError("component id is not portable")
-        _validate_vector(self.pivot, "component pivot", SPACE_MARKET_MAX_COORDINATE)
-        _validate_vector(self.localPosition, "component local position", SPACE_MARKET_MAX_COORDINATE)
-        _validate_quaternion(self.localRotation, "component local rotation")
-        _validate_quaternion(self.anchorRotation, "component anchor rotation")
+        self.pivot = _validate_vector(self.pivot, "component pivot", SPACE_MARKET_MAX_COORDINATE)
+        self.localPosition = _validate_vector(
+            self.localPosition,
+            "component local position",
+            SPACE_MARKET_MAX_COORDINATE,
+        )
+        self.localRotation = _validate_quaternion(self.localRotation, "component local rotation")
+        self.anchorRotation = _validate_quaternion(self.anchorRotation, "component anchor rotation")
         if self.script is not None and len(self.script.encode("utf-8")) > SPACE_MARKET_MAX_SCRIPT_BYTES:
             raise ValueError("one component script exceeds 64 KiB")
         if self.blocks:
@@ -251,7 +268,7 @@ class ConstraintLimits(StrictResourceModel):
 class EntityConstraint(StrictResourceModel):
     id: StrictStr = Field(min_length=1, max_length=64)
     type: Literal["point", "hinge", "weld"] = "point"
-    bodyA: StrictStr = Field(min_length=1, max_length=64)
+    bodyA: StrictStr | None = Field(default=None, min_length=1, max_length=64)
     bodyB: StrictStr = Field(min_length=1, max_length=64)
     anchorA: Vector3 | None = None
     anchorB: Vector3 | None = None
@@ -265,17 +282,25 @@ class EntityConstraint(StrictResourceModel):
 
     @model_validator(mode="after")
     def validate_constraint_values(self):
-        if not _valid_component_id(self.id, allow_root=False):
+        if not _valid_constraint_id(self.id):
             raise ValueError("constraint id is not portable")
+        if self.bodyA is not None and not _valid_component_id(self.bodyA):
+            raise ValueError("constraint bodyA component id is not portable")
+        if not _valid_component_id(self.bodyB):
+            raise ValueError("constraint bodyB component id is not portable")
         for field_name in ("anchorA", "anchorB", "axisA", "axisB", "referenceA", "referenceB"):
-            _validate_vector(getattr(self, field_name), f"constraint {field_name}")
+            setattr(
+                self,
+                field_name,
+                _validate_vector(getattr(self, field_name), f"constraint {field_name}"),
+            )
         self.stiffness = _finite_number(self.stiffness, "constraint stiffness", 0, 1)
         return self
 
 
 class EntityPayload(StrictResourceModel):
     type: Literal["space-entity"]
-    version: Literal[3]
+    version: Literal[4]
     name: StrictStr = Field(min_length=1, max_length=80)
     root: EntityComponent
     constraints: list[EntityConstraint] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_CONSTRAINTS)
@@ -286,8 +311,6 @@ class EntityPayload(StrictResourceModel):
         if not self.name:
             raise ValueError("resource name may not be blank")
 
-        if self.root.id != "root":
-            raise ValueError("entity root component id must be root")
         if self.root.localPosition is not None or self.root.localRotation is not None:
             raise ValueError("entity root may not have a parent-relative transform")
         known_ids: set[str] = set()
@@ -301,8 +324,6 @@ class EntityPayload(StrictResourceModel):
                 raise ValueError("component hierarchy exceeds maximum depth 16")
             if component.id in known_ids:
                 raise ValueError("component ids must be unique across the entity")
-            if depth > 0 and component.id == "root":
-                raise ValueError("only the entity root may use component id root")
             known_ids.add(component.id)
             total_blocks += len(component.blocks)
             total_seats += len(component.seats)
@@ -327,7 +348,7 @@ class EntityPayload(StrictResourceModel):
             raise ValueError("constraint ids must be unique")
         for constraint in self.constraints:
             if (
-                (constraint.bodyA != "world" and constraint.bodyA not in known_ids)
+                (constraint.bodyA is not None and constraint.bodyA not in known_ids)
                 or constraint.bodyB not in known_ids
                 or constraint.bodyA == constraint.bodyB
             ):
@@ -339,7 +360,7 @@ class EntityPayload(StrictResourceModel):
 
 class ColorSetPayload(StrictResourceModel):
     type: Literal["space-colorset"]
-    version: Literal[3]
+    version: Literal[4]
     name: StrictStr = Field(min_length=1, max_length=80)
     colors: list[StrictStr] = Field(min_length=9, max_length=9)
 
@@ -531,6 +552,9 @@ def validate_inventory_resource_payload(kind: str, payload: dict[str, Any]) -> d
         raise ValueError("unsupported resource kind")
     model = model_type.model_validate(payload)
     canonical = model.model_dump(exclude_none=True)
+    if isinstance(model, EntityPayload):
+        for canonical_constraint, constraint in zip(canonical["constraints"], model.constraints):
+            canonical_constraint["bodyA"] = constraint.bodyA
     encoded = encode_inventory_resource(kind, canonical)
     if len(encoded) > SPACE_MARKET_MAX_RESOURCE_BYTES:
         raise ValueError("canonical resource exceeds 8 MiB")

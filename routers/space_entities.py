@@ -30,6 +30,7 @@ from routers.space import (
 )
 from routers.space_market import entity_stopped_y_bounds, validate_inventory_resource_payload
 from space.inventory_codec import (
+    SCHEMA_VERSION as INVENTORY_SCHEMA_VERSION,
     InventoryCodecError,
     decode_inventory_resource,
     encode_inventory_resource,
@@ -683,7 +684,7 @@ def create_world_entity(
         world_id=world.id,
         owner_user_id=current_user.id,
         name=str(canonical.get("name") or "Entity")[:80],
-        schema_version=3,
+        schema_version=INVENTORY_SCHEMA_VERSION,
         content_digest=definition_digest,
         definition=definition,
         size_bytes=len(definition),
@@ -726,6 +727,7 @@ def create_browser_world_entity(
     world = _require_world_membership(db, world_id, current_user)
     _validate_position(world, payload.position, require_buildable_height=True)
     definition, definition_digest, canonical = _decode_entity_definition(payload.definition_base64)
+    _validate_entity_build_height(payload.position, canonical)
     snapshot, snapshot_digest = _encode_snapshot(payload.snapshot, world, payload.position)
     operation_id = str(payload.operation_id)
     request_digest = _browser_request_digest(
@@ -767,7 +769,7 @@ def create_browser_world_entity(
         world_id=world.id,
         owner_user_id=current_user.id,
         name=str(canonical.get("name") or "Entity")[:80],
-        schema_version=3,
+        schema_version=INVENTORY_SCHEMA_VERSION,
         content_digest=definition_digest,
         definition=definition,
         size_bytes=len(definition),
@@ -935,6 +937,7 @@ def checkpoint_browser_world_entity(
     canonical = None
     if payload.definition_base64 is not None:
         definition, definition_digest, canonical = _decode_entity_definition(payload.definition_base64)
+        _validate_entity_build_height(payload.position, canonical)
     snapshot, snapshot_digest = _encode_snapshot(payload.snapshot, world, payload.position)
     request_digest = _browser_request_digest(
         definition_digest=definition_digest,
