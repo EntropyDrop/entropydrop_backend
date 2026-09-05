@@ -116,10 +116,29 @@ display identifies server hosting and its hourly price.
 
 ## Run locally
 
-Requires Node **24+**, the frontend workspace dependencies and the normal Python backend
-dependencies. Keep both repositories under the same parent, or set
-`SPACE_HOSTING_RUNTIME_PATH` to the absolute `apps/space/src/server/hosting-runtime.ts` path.
-`SPACE_HOSTING_NODE` can select an absolute Node executable.
+The Node worker source belongs to the backend under `space/runtime/`. Its build imports
+`@entropydrop/space-engine` from the sibling `entropydrop_space_engine` repository and bundles it
+into `space/runtime/dist/hosting-runtime.mjs`. There is no separate copy of the engine.
+The running worker needs only this bundle, the runtime's production npm dependencies
+(including QuickJS/WASM), Node **24+**, and the normal Python backend dependencies.
+It does not need a frontend checkout, a browser, or a renderer at runtime.
+
+For a local build, keep the backend and `entropydrop_space_engine` repositories under
+the same parent. Run `npm ci` in the engine repository first, then from the backend
+directory run (no frontend checkout or frontend dependencies are required):
+
+```sh
+npm ci --prefix space/runtime
+npm run build --prefix space/runtime
+# Offline smoke test: does not enable hosting or connect to a database.
+DATABASE_URL=sqlite:///:memory: python -m space.hosting_smoke
+```
+
+Rebuild after changing either the shared engine or the hosting TypeScript source.
+`SPACE_HOSTING_RUNTIME_PATH` can override the absolute path to a **built** runtime bundle;
+`SPACE_HOSTING_NODE` can select an absolute Node executable. The normal API deployment
+does not need these build steps: hosting remains disabled by default, and the normal
+Python image excludes `space/runtime/`.
 
 1. Apply `alembic upgrade head` against the intended backend database.
 2. Run the API normally and bootstrap a Space world using the existing login flow.
@@ -135,9 +154,12 @@ enabling returns `503 HOSTING_WORKER_UNAVAILABLE` and makes no charge.
 
 ## Container deployment
 
-The optional compose service uses both repositories as build inputs. It runs as a non-root
-user, exposes no port, and has CPU, memory and process limits. Secrets are passed only to the
-Python service; the child simulation process receives a minimal environment.
+The optional compose service uses the backend and engine repositories as build inputs. Its Node build stage
+typechecks and bundles the backend runtime with the shared engine. The final image copies
+only the built JavaScript and production Node dependencies, along with the Python backend;
+it contains no frontend checkout or frontend development dependencies. It runs as a non-root
+user, exposes no port, and has CPU, memory and process limits. Secrets are passed only to
+the Python service; the child simulation process receives a minimal environment.
 
 ```sh
 docker compose --profile tools run --rm migrate
@@ -152,6 +174,7 @@ For a custom deployment build from the common parent directory:
 docker build -f entropydrop_backend/Dockerfile.hosting -t entropydrop-space-hosting .
 ```
 
-Deploy the matching backend migration/API and frontend build. The worker source is the
-same frontend engine source, so changing physics/script contracts requires updating both
-images. This feature does not run migrations or change production services automatically.
+Deploy the matching backend migration/API and frontend build. Both runtimes use the
+same engine source, so changing physics/script contracts requires updating the frontend
+and rebuilding the worker image. This feature does not run migrations or change
+production services automatically.

@@ -15,3 +15,5 @@ venv/
 tools/
 *.md
 .DS_Store
+# Hosting has its own image; the normal Python API does not need Node artifacts.
+space/runtime/

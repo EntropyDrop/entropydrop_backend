@@ -1,0 +1,25 @@
+{
+  "name": "@entropydrop/space-hosting-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && node build.mjs",
+    "start": "node dist/hosting-runtime.mjs"
+  },
+  "dependencies": {
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "quickjs-emscripten-core": "0.32.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "esbuild": "0.28.1",
+    "typescript": "~5.9.3",
+    "@entropydrop/space-engine": "file:../../../entropydrop_space_engine"
+  }
+}

@@ -268,8 +268,10 @@ class NodeRuntime:
 
     async def step(self, payload):
         if not self.process or self.process.returncode is not None:
-            entry = os.getenv("SPACE_HOSTING_RUNTIME_PATH", str(Path(__file__).resolve().parents[2] /
-                "entropydrop_frontend/apps/space/src/server/hosting-runtime.ts"))
+            entry = os.getenv("SPACE_HOSTING_RUNTIME_PATH", str(Path(__file__).resolve().parent /
+                "runtime/dist/hosting-runtime.mjs"))
+            if not Path(entry).is_file():
+                raise RuntimeError("hosting runtime is not built; run npm ci and npm run build in space/runtime")
             self.process = await asyncio.create_subprocess_exec(os.getenv("SPACE_HOSTING_NODE", "node"),
                 "--max-old-space-size=256", entry, stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, limit=MAX_MESSAGE,
