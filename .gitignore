@@ -149,6 +149,14 @@ activemq-data/
 *.sage.py
 
 *.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ecdsa
+id_ed25519
+*.dump
+*.sql.gz
 
 # Environments
 .env
@@ -156,6 +164,9 @@ activemq-data/
 !.env.example
 .env.prod
 .envrc
+# Machine-specific deployment scripts, credentials and database backups.
+/deploy/
+/.local/
 .venv
 env/
 venv/

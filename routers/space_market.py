@@ -20,11 +20,14 @@ from sqlalchemy import desc, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, load_only
 
-import auth
-import models
+from space import auth
+from space import models
 import s3_utils
 from config import settings
-from database import get_db
+if settings.SPACE_STANDALONE:
+    from space import object_store as s3_utils
+from config import settings
+from space.database import get_db
 from rate_limit import limiter
 from space.inventory_codec import (
     SCHEMA_VERSION as INVENTORY_SCHEMA_VERSION,
@@ -607,7 +610,7 @@ def _market_storage_error(action: str) -> HTTPException:
 def _is_missing_market_object(error: Exception) -> bool:
     response = getattr(error, "response", None)
     code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
-    return str(code) in {"404", "NoSuchKey", "NotFound"}
+    return isinstance(error, FileNotFoundError) or str(code) in {"404", "NoSuchKey", "NotFound"}
 
 
 def _cleanup_unreferenced_market_object(db: Session, object_key: str) -> None:

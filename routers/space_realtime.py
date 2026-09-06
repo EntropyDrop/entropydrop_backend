@@ -17,10 +17,10 @@ from redis.asyncio import Redis as AsyncRedis
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-import auth
-import models
+from space import auth
+from space import models
 from config import settings
-from database import SessionLocal, get_db
+from space.database import SessionLocal, get_db
 from rate_limit import limiter
 from routers import space as space_api
 
@@ -339,8 +339,8 @@ def _create_join_ticket(world_id: str, user_id: str) -> str:
             "iat": now,
             "exp": now + datetime.timedelta(seconds=SPACE_JOIN_TICKET_TTL_SECONDS),
         },
-        settings.JWT_SECRET_KEY,
-        algorithm=settings.JWT_ALGORITHM,
+        (settings.SPACE_JOIN_TICKET_SECRET if settings.SPACE_STANDALONE else settings.JWT_SECRET_KEY),
+        algorithm=("HS256" if settings.SPACE_STANDALONE else settings.JWT_ALGORITHM),
     )
 
 
@@ -348,8 +348,8 @@ def _decode_join_ticket(ticket: str) -> dict:
     try:
         payload = jwt.decode(
             ticket,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
+            (settings.SPACE_JOIN_TICKET_SECRET if settings.SPACE_STANDALONE else settings.JWT_SECRET_KEY),
+            algorithms=[("HS256" if settings.SPACE_STANDALONE else settings.JWT_ALGORITHM)],
         )
     except jwt.ExpiredSignatureError as exc:
         raise HTTPException(status_code=401, detail={"code": "SPACE_JOIN_TICKET_EXPIRED"}) from exc

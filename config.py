@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     # Space uses the same JWT/users table. These settings identify the initial
     # persistent world and tune the integrated realtime WebSocket gateway.
     SPACE_DEFAULT_WORLD_ID: str = "00000000-0000-4000-8000-000000000001"
+    SPACE_STANDALONE: bool = False
+    SPACE_ACCOUNT_API_URL: str = ""
+    SPACE_ACCOUNT_SERVICE_TOKEN: str = ""
+    SPACE_IDENTITY_CACHE_SECONDS: int = 30
+    SPACE_SERVICE_URL: str = ""
+    SPACE_EDGE_TOKEN: str = ""
+    SPACE_PUBLIC_API_URL: str = ""
+    SPACE_OBJECT_DIR: str = "/var/lib/space/objects"
+    SPACE_JOIN_TICKET_SECRET: str = ""
     # Paid hosting is not released. Both API access and worker execution require opt-in.
     SPACE_HOSTING_ENABLED: bool = False
     SPACE_WORLD_SEED: int = 20260827
@@ -146,6 +155,22 @@ def validate_runtime_settings() -> None:
         "secret",
         "jwt-secret",
     }
+
+    if settings.SPACE_STANDALONE:
+        if not settings.DATABASE_URL or settings.DATABASE_URL.startswith("sqlite"):
+            errors.append("DATABASE_URL must point to local PostgreSQL")
+        if not settings.REDIS_URL:
+            errors.append("REDIS_URL must be configured")
+        if not settings.SPACE_ACCOUNT_API_URL.startswith("https://"):
+            errors.append("SPACE_ACCOUNT_API_URL must use HTTPS")
+        for name in ("SPACE_ACCOUNT_SERVICE_TOKEN", "SPACE_JOIN_TICKET_SECRET"):
+            if len(getattr(settings, name)) < 32:
+                errors.append(f"{name} must contain at least 32 characters")
+        if not settings.SPACE_PUBLIC_API_URL.startswith("https://"):
+            errors.append("SPACE_PUBLIC_API_URL must use HTTPS")
+        if errors:
+            raise RuntimeError("Invalid Space configuration: " + "; ".join(errors))
+        return
 
     jwt_secret = settings.JWT_SECRET_KEY.strip()
     if jwt_secret.lower() in placeholder_secrets or len(jwt_secret) < 32:

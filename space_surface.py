@@ -12,8 +12,8 @@ import time
 import zstandard as zstd
 from sqlalchemy import func
 
-import models
-from database import SessionLocal
+from space import models
+from space.database import SessionLocal
 
 
 SURFACE_MAGIC = b"EDSZ"

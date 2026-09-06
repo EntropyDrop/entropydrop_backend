@@ -31,6 +31,11 @@ The API is mounted under `/skin`; for example:
 http://localhost:8000/skin/api/health
 ```
 
+To connect the account API to a separate Space service, configure
+`SPACE_SERVICE_URL` on the account API and `SPACE_STANDALONE=true` on the Space API.
+Keep machine-specific deployment scripts and credentials in the ignored `deploy/`
+and `.local/` directories.
+
 ## Production Notes
 
 - Keep real credentials in your deployment secret manager or local `.env` files.

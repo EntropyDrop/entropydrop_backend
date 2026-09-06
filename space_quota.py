@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException
 from sqlalchemy.orm import Session, load_only
 
-import models
+from space import models
 
 
 UTC = datetime.timezone.utc

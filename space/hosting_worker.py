@@ -17,9 +17,10 @@ import uuid
 from fastapi import HTTPException
 from sqlalchemy import and_, or_
 
-import models
+from space import models
 from config import settings
-from database import SessionLocal
+from credit_balance import available_balance
+from space.database import SessionLocal
 from routers import space as terrain
 from routers.space_entities import _decode_entity_definition, _encode_snapshot, EntityPosition, _enforce_entity_storage_quota
 from routers.space_hosting import HOUR_MS, utc, validate_hosted_definition
@@ -47,8 +48,11 @@ def charge_time(db, entity, user, elapsed_ms):
         raise RuntimeError("Entity hosting is disabled")
     if not isinstance(elapsed_ms, int) or not 0 < elapsed_ms <= STEP_MS or elapsed_ms % 50:
         raise ValueError("invalid hosted duration")
+    if settings.SPACE_STANDALONE:
+        from space.billing import consume
+        return consume(db, entity, elapsed_ms)
     if entity.hosting_remaining_ms < elapsed_ms:
-        if entity.hosting_budget_remaining < 1 or user.credits < 1:
+        if entity.hosting_budget_remaining < 1 or available_balance(db, user) < 1:
             raise ValueError("unfunded hosted step")
         user.credits -= 1
         entity.hosting_budget_remaining -= 1
@@ -105,7 +109,7 @@ def prepare(db, world_id, instance_id):
     active = db.query(models.SpaceWorldEntity).filter_by(world_id=world_id, hosting_enabled=True).order_by(models.SpaceWorldEntity.id).all()
     users = {u.id: u for u in db.query(models.User).filter(models.User.id.in_(sorted({e.owner_user_id for e in active}))).order_by(models.User.id).with_for_update().populate_existing().all()}
     funded = []
-    available = {uid: u.credits for uid, u in users.items()}
+    available = {uid: available_balance(db, u) for uid, u in users.items()} if not settings.SPACE_STANDALONE else {}
     for entity in active:
         if entity.execution_lease_expires_at and utc(entity.execution_lease_expires_at) > instant:
             continue
@@ -114,10 +118,14 @@ def prepare(db, world_id, instance_id):
             pause(entity, "world_membership_required")
         elif entity.hosting_remaining_ms == 0 and entity.hosting_budget_remaining < 1:
             pause(entity, "budget_exhausted")
-        elif entity.hosting_remaining_ms == 0 and available[entity.owner_user_id] < 1:
+        elif entity.hosting_remaining_ms == 0 and not settings.SPACE_STANDALONE and available[entity.owner_user_id] < 1:
             pause(entity, "insufficient_credits")
         else:
-            if entity.hosting_remaining_ms == 0:
+            if settings.SPACE_STANDALONE and entity.hosting_remaining_ms == 0:
+                from space.billing import ready_grant
+                if ready_grant(db, entity) is None:
+                    continue
+            elif entity.hosting_remaining_ms == 0:
                 available[entity.owner_user_id] -= 1
             funded.append(entity)
     if not funded:
@@ -185,7 +193,7 @@ def commit_result(db, world_id, instance_id, payload, result):
     owners = sorted({by_id[eid].owner_user_id for eid in expected})
     users = {u.id: u for u in db.query(models.User).filter(models.User.id.in_(owners)).order_by(models.User.id).with_for_update().populate_existing().all()}
     # Re-check balances under lock: another world/generation may have spent credits meanwhile.
-    available = {uid: u.credits for uid, u in users.items()}
+    available = {uid: available_balance(db, u) for uid, u in users.items()} if not settings.SPACE_STANDALONE else {}
     for eid in sorted(expected):
         entity = by_id[eid]
         if not entity.hosting_enabled:
@@ -195,11 +203,16 @@ def commit_result(db, world_id, instance_id, payload, result):
             db.commit()
             return False
         if entity.hosting_remaining_ms < payload["steps"] * 50:
-            if entity.hosting_budget_remaining < 1 or available[entity.owner_user_id] < 1:
+            if settings.SPACE_STANDALONE:
+                from space.billing import ready_grant
+                if entity.hosting_budget_remaining < 1 or ready_grant(db, entity) is None:
+                    return False
+            elif entity.hosting_budget_remaining < 1 or available[entity.owner_user_id] < 1:
                 pause(entity, "insufficient_credits" if available[entity.owner_user_id] < 1 else "budget_exhausted")
                 db.commit()
                 return False
-            available[entity.owner_user_id] -= 1
+            if not settings.SPACE_STANDALONE:
+                available[entity.owner_user_id] -= 1
     mutations = result.get("mutations", [])
     if len(mutations) > 256:
         raise ValueError("hosting mutation limit")
@@ -335,7 +348,11 @@ async def main():
         ).limit(4).all()]
     if not ids:
         raise RuntimeError("Bootstrap a Space world before starting the hosting worker")
-    await asyncio.gather(*(run_world(world_id) for world_id in ids))
+    jobs = [run_world(world_id) for world_id in ids]
+    if settings.SPACE_STANDALONE:
+        from space.billing import run as run_billing
+        jobs.append(run_billing(ids))
+    await asyncio.gather(*jobs)
 
 
 if __name__ == "__main__":

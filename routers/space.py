@@ -15,11 +15,11 @@ from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-import auth
-import models
+from space import auth
+from space import models
 import space_surface
 from config import settings
-from database import get_db
+from space.database import get_db
 from rate_limit import limiter
 from space_quota import QuotaWindow, UTC_DAY_SECONDS, reserve as reserve_quota, usage as quota_usage
 

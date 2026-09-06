@@ -10,9 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field, StrictInt, StrictStr
 from sqlalchemy.orm import Session
 
-import models
+from space import models
 from config import settings
-from database import get_db
+from space.database import get_db
 from rate_limit import limiter
 from routers import space, space_entities as entities
 from routers.space_market import validate_inventory_resource_payload
@@ -143,7 +143,7 @@ def api_usage(request: Request, world_id: uuid.UUID, db: Session = Depends(get_d
         "features": {"entity_hosting": settings.SPACE_HOSTING_ENABLED},
         "pricing": {"entity_create_credits": 0, "blockset_build_credits": 0},
         "quotas": {
-            "api_keys": allowance(db.query(models.SpaceApiKey).filter_by(user_id=user.id).count(), entities.SPACE_API_KEY_MAX_PER_USER),
+            "api_keys": allowance(user.api_key_count if settings.SPACE_STANDALONE else db.query(models.SpaceApiKey).filter_by(user_id=user.id).count(), entities.SPACE_API_KEY_MAX_PER_USER),
             "entities": allowance(owned.count(), entities.SPACE_ENTITY_MAX_PER_OWNER),
             "entity_storage_bytes": allowance(entities._owned_entity_storage_bytes(db, str(world.id), user.id), entities.SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER),
             "running_entities": allowance(owned.filter_by(desired_run_state="running").count(), entities.SPACE_ENTITY_MAX_RUNNING_PER_OWNER),

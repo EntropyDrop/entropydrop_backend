@@ -8,9 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import StrictBool, StrictInt
 from sqlalchemy.orm import Session
 
-import models
+from space import models
 from config import settings
-from database import get_db
+from space.database import get_db
 from rate_limit import limiter
 from routers.space import _require_world_membership
 from routers.space_entities import (
@@ -144,6 +144,9 @@ def set_hosting(request: Request, world_id: uuid.UUID, entity_id: uuid.UUID, pay
         if payload.release_to_browser:
             entity.execution_mode = "browser"
             entity.hosting_anchor = None
+    if settings.SPACE_STANDALONE:
+        from space.billing import authorize
+        authorize(db, creator, entity, payload)
     entity.hosting_enabled = payload.enabled
     entity.desired_run_state = "running" if payload.enabled else "stopped"
     entity.execution_instance_id = None

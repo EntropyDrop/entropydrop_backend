@@ -6,6 +6,9 @@ from fastapi.testclient import TestClient
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# These tests exercise the API against the isolated test DB, even when the
+# developer's .env sends real Space traffic to a separate DS service.
+os.environ.setdefault('SPACE_SERVICE_URL', '')
 
 # Mock Redis globally for testing to avoid polluting real Redis
 import redis
