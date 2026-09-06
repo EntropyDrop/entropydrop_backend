@@ -86,9 +86,6 @@ class HostingRequest(StrictEntityModel):
 
 
 def authorized_entity(db, world_id, entity_id, creator):
-    if creator.api_key_scopes is not None and "space:entity:run" not in creator.api_key_scopes:
-        raise HTTPException(403, detail={"code": "SPACE_API_KEY_SCOPE_REQUIRED",
-                                        "required_scope": "space:entity:run"})
     world = _require_world_membership(db, world_id, creator.user)
     entity = db.query(models.SpaceWorldEntity).filter_by(world_id=world_id, id=entity_id).with_for_update().first()
     if entity is None:

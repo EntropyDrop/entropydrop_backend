@@ -10,7 +10,7 @@ from space.database import engine, get_db
 from space import models
 from http_middleware import configure_http
 from rate_limit import limiter
-from routers import space, space_entities, space_hosting, space_external, space_market, space_realtime
+from routers import space, space_entities, space_hosting, space_external, space_agent, space_market, space_realtime
 
 if not settings.SPACE_STANDALONE:
     raise RuntimeError("space.main requires SPACE_STANDALONE=true")
@@ -22,6 +22,8 @@ configure_http(app)
 for router in (space.router, space_entities.router, space_hosting.router, space_external.router,
                space_market.router, space_realtime.api_router, space_realtime.realtime_router):
     app.include_router(router)
+app.include_router(space_agent.router)
+app.include_router(space_agent.public_router)
 
 redis = Redis.from_url(settings.REDIS_URL, socket_timeout=3, socket_connect_timeout=3)
 

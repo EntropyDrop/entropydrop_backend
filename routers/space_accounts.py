@@ -18,14 +18,18 @@ SPACE_API_KEY_MAX_PER_USER = 20
 SPACE_API_KEY_PREFIX = "edapi_"
 SPACE_API_KEY_CREATE_SCOPE = "space:entity:create"
 SPACE_API_KEY_RUN_SCOPE = "space:entity:run"
+SPACE_API_KEY_EDIT_SCOPE = "space:entity:edit"
 SPACE_API_KEY_BUILD_SCOPE = "space:blockset:build"
-SPACE_API_KEY_SCOPES = (SPACE_API_KEY_CREATE_SCOPE, SPACE_API_KEY_RUN_SCOPE, SPACE_API_KEY_BUILD_SCOPE)
+# All valid keys, including legacy keys, have the same full Space access.
+# The scope list remains in responses for compatibility with existing clients.
+SPACE_API_KEY_SCOPES = (SPACE_API_KEY_CREATE_SCOPE, SPACE_API_KEY_RUN_SCOPE, SPACE_API_KEY_BUILD_SCOPE, SPACE_API_KEY_EDIT_SCOPE)
 
 class CreateSpaceApiKeyRequest(StrictEntityModel):
     name: StrictStr = Field(min_length=1, max_length=80)
-    scopes: list[Literal["space:entity:create", "space:entity:run", "space:blockset:build"]] = Field(
-        default_factory=lambda: [SPACE_API_KEY_CREATE_SCOPE],
-        min_length=1,
+    scopes: list[Literal["space:entity:create", "space:entity:run", "space:blockset:build", "space:entity:edit"]] = Field(
+        default_factory=lambda: list(SPACE_API_KEY_SCOPES),
+        deprecated=True,
+        description="Compatibility input only; every key has all Space permissions regardless of this value.",
         max_length=len(SPACE_API_KEY_SCOPES),
     )
 
@@ -35,7 +39,7 @@ def _api_key_response(api_key: models.SpaceApiKey) -> dict:
         "id": api_key.id,
         "name": api_key.name,
         "key_prefix": api_key.key_prefix,
-        "scopes": list(api_key.scopes or []),
+        "scopes": list(SPACE_API_KEY_SCOPES),
         "created_at": api_key.created_at.isoformat(),
         "last_used_at": api_key.last_used_at.isoformat() if api_key.last_used_at else None,
     }
@@ -52,12 +56,7 @@ def create_space_api_key(
     name = payload.name.strip()
     if not name:
         raise HTTPException(status_code=422, detail={"code": "SPACE_API_KEY_NAME_REQUIRED"})
-    scopes = [scope for scope in SPACE_API_KEY_SCOPES if scope in set(payload.scopes)]
-    if SPACE_API_KEY_CREATE_SCOPE not in scopes:
-        raise HTTPException(status_code=422, detail={
-            "code": "SPACE_API_KEY_CREATE_SCOPE_REQUIRED",
-            "required_scope": SPACE_API_KEY_CREATE_SCOPE,
-        })
+    scopes = list(SPACE_API_KEY_SCOPES)
     db.query(models.User).filter(models.User.id == current_user.id).with_for_update().first()
     count = db.query(models.SpaceApiKey).filter(
         models.SpaceApiKey.user_id == current_user.id,

@@ -143,10 +143,10 @@ def test_zero_balance_and_budget_exhaustion_pause_without_debt(client, db):
     assert user.credits == 0
 
 
-def test_scope_ownership_and_worker_readiness(client, db):
+def test_legacy_key_hosting_ownership_and_worker_readiness(client, db):
     user, world, entity_id, base = setup(client, db)
     app.dependency_overrides[_entity_creator] = lambda: EntityCreator(user=user, api_key_scopes=frozenset(['space:entity:create']))
-    assert enable(client, base).status_code == 403
+    assert enable(client, base).status_code == 200
     other = User(id='other-host', email='other-host@example.com', credits=100)
     db.add(other)
     db.commit()

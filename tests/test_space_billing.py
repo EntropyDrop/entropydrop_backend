@@ -13,7 +13,7 @@ def account(client, db, monkeypatch):
     token = 'edapi_billing_test'
     db.add(user)
     db.add(SpaceApiKey(id=str(uuid.uuid4()), user_id=user.id, name='test', key_prefix='edapi_',
-        token_hash=hashlib.sha256(token.encode()).digest(), scopes=['space:entity:create', 'space:entity:run']))
+        token_hash=hashlib.sha256(token.encode()).digest(), scopes=['space:entity:create']))
     db.commit()
     def post(path, body):
         return client.post('/internal/space/' + path, headers={'X-Space-Service-Token': 'service-test-token'}, json=body)
@@ -65,3 +65,16 @@ def test_revocation_and_request_binding(account, db, client):
     db.delete(key)
     db.commit()
     assert post('identity', {'credential': payload['credential']}).status_code == 401
+
+
+def test_legacy_key_identity_has_full_space_access_without_admin_access(account, db, monkeypatch):
+    from routers.space_accounts import SPACE_API_KEY_SCOPES
+    user, post, payload, _ = account
+    monkeypatch.setattr(settings, "ADMIN_EMAILS", user.email)
+    assert user.is_admin
+    db.query(SpaceApiKey).one().scopes = []
+    db.commit()
+    response = post('identity', {'credential': payload['credential']})
+    assert response.status_code == 200, response.text
+    assert response.json()['scopes'] == list(SPACE_API_KEY_SCOPES)
+    assert response.json()['is_admin'] is False

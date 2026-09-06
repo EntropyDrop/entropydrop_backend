@@ -1,16 +1,16 @@
-# External blockset building API
+# spaceAPI — External blockset building
+
+[spaceAPI](../space/agent/spaceAPI.md) · [entityAPI](../space/agent/entityAPI.md)
+
+spaceAPI handles Agent/client HTTP requests; entityAPI is called by entity component code (`self` / `ctx`) inside the runtime.
 
 External agents can stamp a validated blockset directly into world terrain without an
 open browser or a nearby player. This creates terrain, not a physics entity. Use the
-[entity API](space-entity-create-api.md) for scripted objects.
+[spaceAPI entity creation](space-entity-create-api.md) for scripted objects.
 
 ## Permission and pricing
 
-Create an account API key in **Settings → API** and enable **Allow building blocksets**,
-or request scopes `['space:entity:create', 'space:blockset:build']` through the existing
-key-management endpoint. Existing keys retain their permissions; keys without
-`space:blockset:build` receive `403 SPACE_API_KEY_SCOPE_REQUIRED`. A normal login token
-can also call this endpoint. World membership is always required.
+Create an account API key under **Space → API Keys** or **Settings → API**. All keys, including existing keys, have full Space permissions and can build blocksets without selecting extra permissions. A normal login token can also call this endpoint. World membership is always required.
 
 Creating entities and building blocksets currently cost **0 credits**, within the
 existing allowances. Hosted entity execution is currently disabled. The future enabled tier costs **1 credit
@@ -106,7 +106,7 @@ Quota exhaustion returns `429` with structured usage and `Retry-After`. Size/chu
 limits return `413`. An unchanged retry returns the original receipt, whose quota
 snapshot may now be old.
 
-Read current data with either a login token or a valid Space API key:
+Read current data with either a login token or a valid spaceAPI key:
 
 ```http
 GET /space/api/v2/worlds/{world_id}/api-usage

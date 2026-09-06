@@ -21,6 +21,7 @@ COPY entropydrop_backend/*.py ./
 COPY entropydrop_backend/routers ./routers
 COPY entropydrop_backend/space/*.py ./space/
 COPY entropydrop_backend/space/contracts ./space/contracts
+COPY entropydrop_backend/space/agent ./space/agent
 COPY entropydrop_backend/space/migrations ./space/migrations
 COPY entropydrop_backend/space/alembic.ini ./space/alembic.ini
 COPY --from=runtime-build /workspace/entropydrop_backend/space/runtime/dist ./space/runtime/dist

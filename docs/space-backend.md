@@ -1,5 +1,9 @@
 # Space Multiplayer V2: Real-Time Backend and Persistence Design
 
+[spaceAPI](../space/agent/spaceAPI.md) · [entityAPI](../space/agent/entityAPI.md)
+
+spaceAPI handles Agent/client HTTP requests; entityAPI is called by entity component code (`self` / `ctx`) inside the runtime.
+
 > Status: shared-user bootstrap, durable latest-player snapshots, paginated authored chunk
 > AOI-paged Zstd chunk overlays, bounded epoch-1 idempotent terrain mutation batches,
 > 128 asynchronously rebuilt far-surface zone snapshots,
@@ -53,7 +57,7 @@ many worlds scale horizontally across gateways/workers. Load tests determine whe
 target ships; theoretical concurrency is not a promise.
 
 > Transitional implementation note (2026-09-03): online world entities now use
-> `space_world_entities` as their only durable source. Account-level, long-lived Space API
+> `space_world_entities` as their only durable source. Account-level, long-lived spaceAPI
 > keys let external agents submit inline entity definitions to any world the owner can access;
 > the backend canonicalizes and validates the same Protobuf v5 contract used by browsers.
 > All created entities share one editable ownership model, with no market/browser source
@@ -493,7 +497,7 @@ newer client wall-clock time never wins automatically.
 | `world_events` | Tick batch | Ordered durable structural events and idempotency |
 | `world_event_chunks` | Tick batch | Event-to-chunk index for AOI catch-up |
 | `world_event_entities` | Tick batch | Event-to-entity index for entity recovery |
-| `script_bundles` | Script save | API V2 source bundle and content hash |
+| `script_bundles` | Script save | entityAPI V2 source bundle and content hash |
 | `build_assets` | Entity placement/checkpoint | Deduplicated immutable definitions for entities already in the world |
 | `entity_snapshots` | Sleep/checkpoint/unload | Definition, spatial manifest, run intent, health, and necessary recovery state |
 | `entity_chunk_coverage` | Entity checkpoint | AOI lookup for sleeping entities, including multi-chunk bounds |
@@ -502,7 +506,7 @@ newer client wall-clock time never wins automatically.
 | `world_checkpoints` | Background | Safe event-pruning watermark |
 
 The current transitional deployment additionally has `space_api_keys` (hashed, revocable,
-account-level credentials with explicit scopes) and `space_world_entities` (canonical
+account-level credentials with full Space permissions) and `space_world_entities` (canonical
 definition, optional browser runtime snapshot, AOI transform, owner run intent and browser
 execution lease). Online browsers persist no separate world-entity copy; all owned entity
 definitions/snapshots are revision-checked here, while offline entities remain local.
@@ -855,7 +859,7 @@ I/O thread.
 
 ### 10.5 Script Sandbox
 
-The server runs API V2 scripts under these requirements:
+The server runs entityAPI V2 scripts under these requirements:
 
 - One isolated VM or secure WASM runtime per entity, with no network, filesystem, DOM,
   system time, or dynamic module loading.
@@ -1092,7 +1096,7 @@ results stored by commit. Average FPS alone is insufficient.
 ### Phase 3: Entities and Scripts
 
 1. Add server physics, component trees, and driving input.
-2. Add the complete wake/sleep state machine, sandboxed API V2, aggregate budgets,
+2. Add the complete wake/sleep state machine, sandboxed entityAPI V2, aggregate budgets,
    compile switching, and state recovery.
 3. Add cross-zone entity handoff and ghost collision.
 

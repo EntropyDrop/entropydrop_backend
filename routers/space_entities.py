@@ -11,7 +11,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, model_validator
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -40,7 +40,7 @@ from space_quota import QuotaWindow, UTC_DAY_SECONDS, reserve as reserve_quota
 
 
 router = APIRouter(prefix="/space/api/v2/worlds/{world_id}/entities", tags=["space-entities"])
-from routers.space_accounts import api_key_router, CreateSpaceApiKeyRequest
+from routers.space_accounts import api_key_router, CreateSpaceApiKeyRequest, SPACE_API_KEY_SCOPES
 entity_security = HTTPBearer(auto_error=False)
 
 SPACE_ENTITY_RATE_LIMIT = "120/minute; 2000/hour"
@@ -54,10 +54,6 @@ SPACE_ENTITY_MAX_AOI_RESULTS = 256
 SPACE_ENTITY_MAX_AOI_CANDIDATES = 4096
 SPACE_API_KEY_MAX_PER_USER = 20
 SPACE_API_KEY_PREFIX = "edapi_"
-SPACE_API_KEY_CREATE_SCOPE = "space:entity:create"
-SPACE_API_KEY_RUN_SCOPE = "space:entity:run"
-SPACE_API_KEY_BUILD_SCOPE = "space:blockset:build"
-SPACE_API_KEY_SCOPES = (SPACE_API_KEY_CREATE_SCOPE, SPACE_API_KEY_RUN_SCOPE, SPACE_API_KEY_BUILD_SCOPE)
 SPACE_ENTITY_EXECUTION_LEASE_SECONDS = 8
 SPACE_ENTITY_SNAPSHOT_MAX_DEPTH = 20
 SPACE_ENTITY_SNAPSHOT_MAX_VALUES = 100_000
@@ -123,6 +119,46 @@ class SetWorldEntityRunStateRequest(StrictEntityModel):
     expected_revision: StrictInt | None = Field(default=None, ge=1)
 
 
+
+
+class ComponentDefaultsPatch(StrictEntityModel):
+    type: Literal["dynamic", "kinematic"] | None = None
+    mass: StrictFloat | None = Field(default=None, ge=0.1, le=1e12)
+    restitution: StrictFloat | None = Field(default=None, ge=0, le=1)
+    friction: StrictFloat | None = Field(default=None, ge=0, le=1)
+    useGravity: StrictBool | None = None
+    collisionEnabled: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def nonempty_nonnull(self):
+        if not self.model_fields_set or any(getattr(self, key) is None for key in self.model_fields_set):
+            raise ValueError("Supply at least one non-null default property")
+        return self
+
+
+class EntityComponentPatch(StrictEntityModel):
+    id: StrictStr = Field(min_length=1, max_length=64)
+    name: StrictStr | None = Field(default=None, max_length=80)
+    script: StrictStr | None = Field(default=None, max_length=65536)
+    body: ComponentDefaultsPatch | None = None
+
+    @model_validator(mode="after")
+    def nonempty_nonnull(self):
+        if self.model_fields_set == {"id"} or any(getattr(self, key) is None for key in self.model_fields_set):
+            raise ValueError("Supply name, script or body; use an empty string to clear code")
+        return self
+
+
+class UpdateEntityConfigurationRequest(StrictEntityModel):
+    operation_id: uuid.UUID
+    expected_revision: StrictInt = Field(ge=1)
+    components: list[EntityComponentPatch] = Field(min_length=1, max_length=64)
+
+    @model_validator(mode="after")
+    def unique_components(self):
+        if len({item.id for item in self.components}) != len(self.components):
+            raise ValueError("Each component may appear only once")
+        return self
 
 
 class ClaimEntityExecutionLeasesRequest(StrictEntityModel):
@@ -298,10 +334,7 @@ def _entity_creator(
     credential = credentials.credentials
     if settings.SPACE_STANDALONE:
         user, raw_scopes = auth.resolve_identity(db, credential, allow_api_key=True)
-        scopes = frozenset(raw_scopes) if raw_scopes is not None else None
-        if scopes is not None and SPACE_API_KEY_CREATE_SCOPE not in scopes:
-            raise HTTPException(403, detail={"code": "SPACE_API_KEY_SCOPE_REQUIRED",
-                                            "required_scope": SPACE_API_KEY_CREATE_SCOPE})
+        scopes = frozenset(SPACE_API_KEY_SCOPES) if raw_scopes is not None else None
         return EntityCreator(user=user, api_key_scopes=scopes, credential=credential)
     if not credential.startswith(SPACE_API_KEY_PREFIX):
         return EntityCreator(user=auth.get_current_user(credentials=credentials, db=db))
@@ -318,15 +351,7 @@ def _entity_creator(
     user = db.query(models.User).filter(models.User.id == api_key.user_id).first()
     if user is None:
         raise HTTPException(status_code=401, detail={"code": "SPACE_API_KEY_INVALID"})
-    scopes = frozenset(
-        scope for scope in (api_key.scopes if isinstance(api_key.scopes, list) else [])
-        if isinstance(scope, str)
-    )
-    if SPACE_API_KEY_CREATE_SCOPE not in scopes:
-        raise HTTPException(status_code=403, detail={
-            "code": "SPACE_API_KEY_SCOPE_REQUIRED",
-            "required_scope": SPACE_API_KEY_CREATE_SCOPE,
-        })
+    scopes = frozenset(SPACE_API_KEY_SCOPES)
     api_key.last_used_at = datetime.datetime.now(datetime.timezone.utc)
     return EntityCreator(user=user, api_key_scopes=scopes)
 
@@ -555,15 +580,6 @@ def create_world_entity(
     current_user = creator.user
     world = _require_world_membership(db, world_id, current_user)
     _validate_position(world, payload.position, require_buildable_height=True)
-    if (
-        creator.api_key_scopes is not None
-        and payload.desired_run_state == "running"
-        and SPACE_API_KEY_RUN_SCOPE not in creator.api_key_scopes
-    ):
-        raise HTTPException(status_code=403, detail={
-            "code": "SPACE_API_KEY_SCOPE_REQUIRED",
-            "required_scope": SPACE_API_KEY_RUN_SCOPE,
-        })
     definition, definition_digest, canonical = _decode_entity_definition(payload.definition_base64)
     _validate_entity_build_height(payload.position, canonical)
     operation_id = str(payload.operation_id)
@@ -832,6 +848,135 @@ def get_world_entity_snapshot(
     )
 
 
+def _owned_entity(db, world, entity_id, user):
+    entity = db.query(models.SpaceWorldEntity).filter_by(world_id=world.id, id=entity_id).with_for_update().first()
+    if entity is None:
+        raise HTTPException(404, detail={"code": "WORLD_ENTITY_NOT_FOUND"})
+    if entity.owner_user_id != user.id and not user.is_admin:
+        raise HTTPException(403, detail={"code": "ENTITY_EDIT_FORBIDDEN"})
+    return entity
+
+
+def _operation_digest(entity, user, action, payload):
+    return hashlib.sha256(json.dumps({
+        "entity_id": str(entity.id), "actor_id": user.id, "action": action,
+        "payload": payload.model_dump(mode="json", exclude={"operation_id"}, exclude_unset=True),
+    }, sort_keys=True, separators=(",", ":")).encode()).digest()
+
+
+def _replay_entity_operation(db, entity, operation_id, digest):
+    receipt = db.get(models.SpaceEntityOperation, (str(entity.world_id), str(operation_id)))
+    if receipt is None:
+        return None
+    if bytes(receipt.request_digest) != digest:
+        raise HTTPException(409, detail={"code": "ENTITY_OPERATION_ID_REUSED"})
+    # Return the original acknowledgement, never execute a delayed retry again.
+    return receipt.result
+
+
+def _commit_entity_operation(db, entity, user, operation_id, digest):
+    db.flush()
+    result = _entity_response(entity, user)
+    db.add(models.SpaceEntityOperation(world_id=str(entity.world_id), operation_id=str(operation_id),
+                                      request_digest=digest, result=result))
+    db.commit()
+    return result
+
+
+def _reset_entity_runtime_snapshot(entity, world, canonical):
+    # Keep the last saved placement, including arbitrary root orientation. Drop
+    # runtime body overrides, child poses, variables, clock, errors and velocity.
+    if entity.snapshot is not None:
+        previous = json.loads(bytes(entity.snapshot))
+        snapshot = {key: previous[key] for key in (
+            "position", "quaternion", "constructorOrigin", "localCenter", "rootPivotOverride"
+        ) if key in previous}
+        snapshot.update({"nodes": [], "states": {}, "scriptStatus": "stopped",
+                         "physicsSimulationEnabled": False, "resetRuntime": True, "bodies": [{
+            "id": canonical["root"]["id"], "position": snapshot["position"],
+            "quaternion": snapshot["quaternion"],
+        }]})
+        encoded, digest = _encode_snapshot(snapshot, world, EntityPosition(
+            x_cm=entity.position_x_cm, y_cm=entity.position_y_cm, z_cm=entity.position_z_cm))
+        entity.snapshot, entity.snapshot_digest = encoded, digest
+        entity.snapshot_size_bytes = len(encoded)
+    entity.execution_instance_id = None
+    entity.execution_lease_expires_at = None
+    entity.execution_epoch = int(entity.execution_epoch or 0) + 1
+
+
+@router.get("/{entity_id}/configuration")
+@limiter.limit(SPACE_ENTITY_RATE_LIMIT)
+def get_entity_configuration(request: Request, response: Response, world_id: str, entity_id: str,
+                             db: Session = Depends(get_db), creator: EntityCreator = Depends(_entity_creator)):
+    world = _require_world_membership(db, world_id, creator.user)
+    entity = _owned_entity(db, world, entity_id, creator.user)
+    _kind, definition = decode_inventory_resource(bytes(entity.definition))
+    response.headers["Cache-Control"] = "private, no-store"
+    result = {"entity": _entity_response(entity, creator.user), "definition": definition}
+    db.commit()
+    return result
+
+
+@router.patch("/{entity_id}/configuration")
+@limiter.limit(SPACE_ENTITY_RATE_LIMIT)
+def update_entity_configuration(request: Request, world_id: str, entity_id: str,
+                                payload: UpdateEntityConfigurationRequest,
+                                db: Session = Depends(get_db), creator: EntityCreator = Depends(_entity_creator)):
+    world = _require_world_membership(db, world_id, creator.user)
+    _lock_entity_quota_scope(db, world, creator.user)
+    entity = _owned_entity(db, world, entity_id, creator.user)
+    digest = _operation_digest(entity, creator.user, "configuration", payload)
+    replay = _replay_entity_operation(db, entity, payload.operation_id, digest)
+    if replay is not None:
+        return replay
+    if entity.execution_mode == "hosted":
+        raise HTTPException(409, detail={"code": "ENTITY_HOSTED_EDIT_FORBIDDEN"})
+    if payload.expected_revision != entity.revision:
+        raise HTTPException(409, detail={"code": "ENTITY_REVISION_CONFLICT", "current": _entity_response(entity, creator.user)})
+    if entity.desired_run_state != "stopped":
+        raise HTTPException(409, detail={"code": "ENTITY_MUST_BE_STOPPED", "message": "Stop the entity before editing code or defaults."})
+    _kind, definition = decode_inventory_resource(bytes(entity.definition))
+    components = {}
+    def visit(component):
+        components[component["id"]] = component
+        for child in component.get("children", []):
+            visit(child)
+    visit(definition["root"])
+    for patch in payload.components:
+        if patch.id not in components:
+            raise HTTPException(422, detail={"code": "ENTITY_COMPONENT_NOT_FOUND", "component_id": patch.id})
+        target = components[patch.id]
+        for key, value in patch.model_dump(exclude_unset=True, exclude={"id"}).items():
+            if key == "body":
+                target["body"].update(value)
+            else:
+                target[key] = value
+    try:
+        canonical = validate_inventory_resource_payload("entity", definition)
+        encoded = encode_inventory_resource("entity", canonical)
+    except (ValueError, InventoryCodecError) as error:
+        raise HTTPException(422, detail={"code": "ENTITY_DEFINITION_INVALID"}) from error
+    if len(encoded) > SPACE_ENTITY_MAX_DEFINITION_BYTES:
+        raise HTTPException(413, detail={"code": "ENTITY_DEFINITION_TOO_LARGE"})
+    replaced_bytes = int(entity.size_bytes) + int(entity.snapshot_size_bytes or 0)
+    _reset_entity_runtime_snapshot(entity, world, canonical)
+    _enforce_entity_storage_quota(db, world, creator.user,
+        incoming_bytes=len(encoded)+int(entity.snapshot_size_bytes or 0), replaced_bytes=replaced_bytes)
+    if not creator.user.is_admin:
+        reserve_quota(db, principal_id=creator.user.id, scope_id=str(world.id), metric="entity_checkpoint_bytes",
+                      amount=len(encoded)+int(entity.snapshot_size_bytes or 0), windows=(
+                          QuotaWindow(60, SPACE_ENTITY_CHECKPOINT_MINUTE_BYTES, "minute"),
+                          QuotaWindow(UTC_DAY_SECONDS, SPACE_ENTITY_CHECKPOINT_DAILY_BYTES, "utc_day")),
+                      code="WORLD_ENTITY_CHECKPOINT_QUOTA_REACHED", message="Entity write allowance reached.")
+    entity.definition, entity.content_digest = encoded, hashlib.sha256(encoded).digest()
+    entity.size_bytes = len(encoded)
+    entity.name = inventory_resource_name("entity", canonical)
+    entity.revision += 1
+    entity.updated_at = datetime.datetime.now(datetime.timezone.utc)
+    return _commit_entity_operation(db, entity, creator.user, payload.operation_id, digest)
+
+
 @router.put("/{entity_id}/checkpoint")
 @limiter.limit(SPACE_ENTITY_RATE_LIMIT)
 def checkpoint_browser_world_entity(
@@ -844,6 +989,7 @@ def checkpoint_browser_world_entity(
 ):
     world = _require_world_membership(db, world_id, current_user)
     _validate_position(world, payload.position)
+    _lock_entity_quota_scope(db, world, current_user)
     entity = db.query(models.SpaceWorldEntity).filter(
         models.SpaceWorldEntity.world_id == world.id,
         models.SpaceWorldEntity.id == entity_id,
@@ -878,7 +1024,6 @@ def checkpoint_browser_world_entity(
             "current": _entity_response(entity, current_user),
         })
 
-    _lock_entity_quota_scope(db, world, current_user)
     _enforce_entity_storage_quota(
         db,
         world,
@@ -1020,9 +1165,11 @@ def set_world_entity_run_state(
     entity_id: str,
     payload: SetWorldEntityRunStateRequest,
     db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user),
+    creator: EntityCreator = Depends(_entity_creator),
 ):
+    current_user = creator.user
     world = _require_world_membership(db, world_id, current_user)
+    _lock_entity_quota_scope(db, world, current_user)
     entity = db.query(models.SpaceWorldEntity).filter(
         models.SpaceWorldEntity.world_id == world.id,
         models.SpaceWorldEntity.id == entity_id,
@@ -1034,15 +1181,17 @@ def set_world_entity_run_state(
             "code": "ENTITY_CONTROL_FORBIDDEN",
             "message": "Only the entity owner or an administrator may start or stop it.",
         })
+    operation_id = str(payload.operation_id)
+    digest = _operation_digest(entity, current_user, "run-state", payload)
+    replay = _replay_entity_operation(db, entity, operation_id, digest)
+    if replay is not None:
+        return replay
     if entity.execution_mode == "hosted":
         if payload.desired_run_state == "running":
-            raise HTTPException(status_code=409, detail={"code": "USE_ENTITY_HOSTING_API"})
+            raise HTTPException(409, detail={"code": "USE_ENTITY_HOSTING_API"})
         entity.hosting_enabled = False
         entity.hosting_budget_remaining = 0
-        entity.hosting_reason = "user_paused"
-    operation_id = str(payload.operation_id)
-    if str(entity.last_control_operation_id or "") == operation_id:
-        return _entity_response(entity, current_user)
+        entity.hosting_reason = "user_stopped"
     if payload.expected_revision is not None and payload.expected_revision != entity.revision:
         raise HTTPException(status_code=409, detail={
             "code": "ENTITY_REVISION_CONFLICT",
@@ -1061,15 +1210,11 @@ def set_world_entity_run_state(
             ),
             exclude_entity_id=str(entity.id),
         )
-    if entity.desired_run_state != payload.desired_run_state:
-        entity.desired_run_state = payload.desired_run_state
-        entity.revision += 1
-        if payload.desired_run_state == "stopped" and entity.execution_instance_id is not None:
-            entity.execution_instance_id = None
-            entity.execution_lease_expires_at = None
-            entity.execution_epoch = int(entity.execution_epoch or 0) + 1
+    entity.desired_run_state = payload.desired_run_state
+    entity.revision += 1
+    if payload.desired_run_state == "stopped":
+        _kind, canonical = decode_inventory_resource(bytes(entity.definition))
+        _reset_entity_runtime_snapshot(entity, world, canonical)
     entity.last_control_operation_id = operation_id
     entity.updated_at = datetime.datetime.now(datetime.timezone.utc)
-    db.commit()
-    db.refresh(entity)
-    return _entity_response(entity, current_user)
+    return _commit_entity_operation(db, entity, current_user, operation_id, digest)

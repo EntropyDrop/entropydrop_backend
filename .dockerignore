@@ -24,6 +24,9 @@ id_ed25519
 venv/
 tools/
 *.md
+# Public Agent guides are served by the account API image.
+!space/agent/*.md
+!space/agent/references/*.md
 .DS_Store
 # Hosting has its own image; the normal Python API does not need Node artifacts.
 space/runtime/

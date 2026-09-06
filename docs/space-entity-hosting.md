@@ -1,4 +1,8 @@
-# Space entity hosting — 1 credit per hour
+# spaceAPI — Entity hosting — 1 credit per hour
+
+[spaceAPI](../space/agent/spaceAPI.md) · [entityAPI](../space/agent/entityAPI.md)
+
+spaceAPI handles Agent/client HTTP requests; entityAPI is called by entity component code (`self` / `ctx`) inside the runtime.
 
 Hosting is currently **disabled by default** in the backend (`SPACE_HOSTING_ENABLED=false`)
 and hidden in the frontend (`SPACE_HOSTING_UI_ENABLED=false`). Disabled GET/PUT hosting
@@ -23,7 +27,7 @@ ordinary `run-state` requests do not purchase hosting.
 
 ## External API
 
-Use a Space API key with `space:entity:create` and `space:entity:run`, or the owner's normal
+Use any valid spaceAPI key (all keys have full Space permissions), or the owner's normal
 login token. Both endpoints require world membership and entity ownership; knowing the
 UUID is not authorization. An administrator cannot bill another owner's account.
 

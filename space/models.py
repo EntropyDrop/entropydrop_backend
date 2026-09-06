@@ -177,6 +177,15 @@ class SpaceWorldEntity(Base):
     )
 
 
+class SpaceEntityOperation(Base):
+    """Durable acknowledgements for code/default edits and start/stop commands."""
+    __tablename__ = "space_entity_operations"
+    world_id = Column(Uuid(as_uuid=False), ForeignKey("worlds.id", ondelete="CASCADE"), primary_key=True)
+    operation_id = Column(Uuid(as_uuid=False), primary_key=True)
+    request_digest = Column(LargeBinary(32), nullable=False)
+    result = Column(JSON, nullable=False)
+
+
 class SpaceHostingOperation(Base):
     """Durable dedupe receipts: a delayed retry can never reopen a stopped job."""
     __tablename__ = "space_hosting_operations"

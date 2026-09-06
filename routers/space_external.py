@@ -70,9 +70,6 @@ def _build_mutations(payload, canonical):
 @limiter.limit(BUILD_RATE_LIMIT)
 def build_blockset(request: Request, world_id: uuid.UUID, payload: BuildBlocksetRequest,
                    db: Session = Depends(get_db), creator: entities.EntityCreator = Depends(entities._entity_creator)):
-    if creator.api_key_scopes is not None and entities.SPACE_API_KEY_BUILD_SCOPE not in creator.api_key_scopes:
-        raise HTTPException(403, detail={"code": "SPACE_API_KEY_SCOPE_REQUIRED",
-                                        "required_scope": entities.SPACE_API_KEY_BUILD_SCOPE})
     world = space._require_world_membership(db, str(world_id), creator.user)
     entities._validate_position(world, payload.position, require_buildable_height=True)
     if any(getattr(payload.position, f"{axis}_cm") % 100 for axis in "xyz"):

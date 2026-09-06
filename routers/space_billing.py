@@ -21,6 +21,7 @@ from config import settings
 from credit_balance import available_balance, lock_balance
 from database import get_db
 from rate_limit import limiter
+from routers.space_accounts import SPACE_API_KEY_SCOPES
 
 
 def require_service(x_space_service_token: str = Header(default="")):
@@ -46,7 +47,7 @@ def credential_identity(db, credential):
         if key is None:
             raise HTTPException(401, detail={"code": "SPACE_API_KEY_INVALID"})
         user = db.get(models.User, key.user_id)
-        scopes = list(key.scopes)
+        scopes = list(SPACE_API_KEY_SCOPES)
         key.last_used_at = dt.datetime.now(dt.timezone.utc)
     else:
         user = auth.get_current_user(credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=credential), db=db)
@@ -80,9 +81,7 @@ class AuthorizationRequest(Credential):
 @router.post("/authorizations")
 @limiter.exempt
 def authorize(payload: AuthorizationRequest, db: Session = Depends(get_db)):
-    user, scopes, _ = credential_identity(db, payload.credential)
-    if scopes is not None and "space:entity:run" not in scopes:
-        raise HTTPException(403, detail={"code": "SPACE_API_KEY_SCOPE_REQUIRED"})
+    user, _, _ = credential_identity(db, payload.credential)
     lock_balance(db, user)
     aid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"space:{payload.world_id}:{payload.operation_id}"))
     body = payload.model_dump(mode="json", exclude={"credential"})

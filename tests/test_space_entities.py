@@ -4,7 +4,7 @@ import uuid
 import datetime
 import base64
 
-from auth import get_current_user
+from auth import get_current_user, create_access_token
 from main import app
 from models import SpaceApiKey, SpaceWorldEntity, User
 from routers import space_entities
@@ -143,11 +143,13 @@ def test_external_create_is_idempotent_and_stores_validated_definition(client, d
     assert decoded["root"]["name"] == "External Walker"
 
 
-def test_api_key_scope_and_entity_validation_are_enforced(client, db):
+def test_legacy_api_key_has_full_access_and_entity_validation_is_enforced(client, db):
     owner = _user(db, "scope-owner")
     app.dependency_overrides[get_current_user] = lambda: owner
     world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
     _key_id, api_key = _create_api_key(client)
+    db.get(SpaceApiKey, _key_id).scopes = ["space:entity:create"]
+    db.commit()
     app.dependency_overrides.pop(get_current_user)
     headers = {"Authorization": f"Bearer {api_key}"}
     body = {
@@ -159,16 +161,11 @@ def test_api_key_scope_and_entity_validation_are_enforced(client, db):
         "desired_run_state": "running",
     }
 
-    forbidden = client.post(
-        f"/space/api/v2/worlds/{world_id}/entities",
-        json=body,
-        headers=headers,
+    created = client.post(
+        f"/space/api/v2/worlds/{world_id}/entities", json=body, headers=headers,
     )
-    assert forbidden.status_code == 403
-    assert forbidden.json()["detail"] == {
-        "code": "SPACE_API_KEY_SCOPE_REQUIRED",
-        "required_scope": "space:entity:run",
-    }
+    assert created.status_code == 201, created.text
+    assert created.json()["desired_run_state"] == "running"
 
     legacy_market_request = client.post(
         f"/space/api/v2/worlds/{world_id}/entities",
@@ -320,6 +317,7 @@ def test_list_wraps_aoi_and_only_owner_can_change_run_state(client, db):
     assert client.post("/space/api/v2/bootstrap").status_code == 200
     forbidden = client.put(
         f"/space/api/v2/worlds/{world_id}/entities/{created['id']}/run-state",
+        headers={"Authorization": "Bearer " + create_access_token({"sub": other.id})},
         json={
             "operation_id": str(uuid.uuid4()),
             "desired_run_state": "stopped",
@@ -332,6 +330,7 @@ def test_list_wraps_aoi_and_only_owner_can_change_run_state(client, db):
     app.dependency_overrides[get_current_user] = lambda: owner
     stopped = client.put(
         f"/space/api/v2/worlds/{world_id}/entities/{created['id']}/run-state",
+        headers={"Authorization": "Bearer " + create_access_token({"sub": owner.id})},
         json={
             "operation_id": str(uuid.uuid4()),
             "desired_run_state": "stopped",
@@ -347,6 +346,7 @@ def test_list_wraps_aoi_and_only_owner_can_change_run_state(client, db):
 
     conflict = client.put(
         f"/space/api/v2/worlds/{world_id}/entities/{created['id']}/run-state",
+        headers={"Authorization": "Bearer " + create_access_token({"sub": owner.id})},
         json={
             "operation_id": str(uuid.uuid4()),
             "desired_run_state": "running",
@@ -517,6 +517,8 @@ def test_world_entity_storage_quota_is_aggregate_per_owner(client, db, monkeypat
     app.dependency_overrides[get_current_user] = lambda: owner
     world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
     _key_id, api_key = _create_api_key(client)
+    db.get(SpaceApiKey, _key_id).scopes = ["space:entity:create"]
+    db.commit()
     definition = encode_inventory_resource("entity", _entity("Stored Entity"))
     monkeypatch.setattr(space_entities, "SPACE_ENTITY_MAX_TOTAL_BYTES_PER_OWNER", len(definition))
     app.dependency_overrides.pop(get_current_user)

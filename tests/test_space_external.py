@@ -87,14 +87,13 @@ def test_micro_build_replaces_touched_cell_and_retains_neighbors(client, db):
     assert [801, 252, 803, 123] in micro
 
 
-def test_build_scope_membership_and_revocation(client, db):
+def test_legacy_key_builds_with_membership_and_revocation_enforced(client, db):
     owner, world, headers, key_id = setup(client, db, build=False)
-    denied = post(client, world, headers, body())
-    assert denied.status_code == 403
-    assert denied.json()['detail']['required_scope'] == 'space:blockset:build'
     key = db.query(models.SpaceApiKey).filter_by(id=key_id).one()
-    key.scopes = ['space:entity:create', 'space:blockset:build']
+    key.scopes = ['space:entity:create']
     db.commit()
+    built = post(client, world, headers, body())
+    assert built.status_code == 201, built.text
     db.query(models.SpaceWorldPlayerProfile).filter_by(user_id=owner.id).delete()
     db.commit()
     assert post(client, world, headers, body()).status_code == 403
