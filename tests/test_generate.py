@@ -10,7 +10,7 @@ from fastapi import BackgroundTasks
 from main import app
 from auth import get_current_user, get_current_user_optional
 from models import User, GenerationLog, UserFeedback, CreditLog
-from pipeline_registry import SKING_DDJ_V61B
+from pipeline_registry import SKING_DDJ_V61B, SKING_DDJ_V104
 import routers.generate
 
 pytestmark = pytest.mark.usefixtures("mock_auth", "mock_db_session")
@@ -63,7 +63,8 @@ def test_get_models(client):
     data = response.json()
     assert "image_to_skin_models" in data
     assert "sking_v73_flux_4b_000027000" in data["image_to_skin_models"]
-    assert "SKING_DDJ_v61b" in data["image_to_skin_models"]
+    assert SKING_DDJ_V104 in data["image_to_skin_models"]
+    assert SKING_DDJ_V61B not in data["image_to_skin_models"]
     assert "SKING_DDJ_v54" not in data["image_to_skin_models"]
     assert "SKING_DDJ_v61" not in data["image_to_skin_models"]
     assert "SKING_DDJ_v66" not in data["image_to_skin_models"]
@@ -349,7 +350,7 @@ def test_generation_result_update_rejects_model_version_change():
 
 
 def test_model_pipeline_mapping_is_immutable():
-    assert set(routers.generate.MODEL_PIPELINES) == {SKING_DDJ_V61B}
+    assert set(routers.generate.MODEL_PIPELINES) == {SKING_DDJ_V61B, SKING_DDJ_V104}
     pipeline = routers.generate.MODEL_PIPELINES[
         SKING_DDJ_V61B
     ]
@@ -372,7 +373,7 @@ def test_model_pipeline_mapping_is_immutable():
         ] = "replacement"
 
 
-@pytest.mark.parametrize("model_version", [SKING_DDJ_V61B])
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V61B, SKING_DDJ_V104])
 def test_identifies_sking_ddj_model_series(model_version):
     assert routers.generate.is_sking_ddj_model(model_version) is True
 
@@ -406,7 +407,7 @@ def test_recoverable_generation_keeps_rq_retry():
     assert retry.max == 99999
 
 
-@pytest.mark.parametrize("model_version", [SKING_DDJ_V61B])
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V61B, SKING_DDJ_V104])
 def test_sking_ddj_model_routes_to_real_to_render_without_retry(
     monkeypatch,
     model_version,
@@ -467,7 +468,7 @@ def test_dense_uv_model_is_rejected_for_text_to_skin(client):
             "prompt": "not a direct image pipeline",
             "mode": "aigc_text_to_skin",
             "aux_model_version": "z_image",
-            "model_version": "SKING_DDJ_v61b",
+            "model_version": SKING_DDJ_V104,
         },
     )
 
@@ -475,7 +476,7 @@ def test_dense_uv_model_is_rejected_for_text_to_skin(client):
     assert "Invalid model version combination" in response.json()["detail"]
 
 
-@pytest.mark.parametrize("model_version", [SKING_DDJ_V61B])
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V104])
 def test_sking_ddj_generation_is_unrecoverable(
     monkeypatch,
     client,
@@ -1082,7 +1083,7 @@ def test_re_enqueue_if_missing_recovers_pending_skin(monkeypatch, db):
     assert kwargs["job_id"] == "generation_recover_log_image_to_skin"
 
 
-@pytest.mark.parametrize("model_version", [SKING_DDJ_V61B])
+@pytest.mark.parametrize("model_version", [SKING_DDJ_V61B, SKING_DDJ_V104])
 @pytest.mark.parametrize("status", ["pending_skin", "processing_skin"])
 def test_re_enqueue_if_missing_recovers_dense_uv_second_stage(
     monkeypatch,
@@ -1152,7 +1153,7 @@ def test_re_enqueue_if_missing_recovers_dense_uv_second_stage(
         ).dense_uv_checkpoint_file,
         routers.generate.get_pipeline(model_version).DMR_mappings_dir,
     )
-    assert kwargs["job_timeout"] == 120
+    assert kwargs["job_timeout"] == 600
     assert kwargs["retry"].max == 5
     assert kwargs["retry"].intervals == [5, 15, 30, 60, 120]
     assert kwargs["job_id"] == "generation_unrecover_log_render_to_uv"
@@ -2001,3 +2002,11 @@ def test_generate_model_maintenance_block(client, db):
         assert "The selected model is under maintenance. Please choose another model." in response.json()["detail"]
     finally:
         backend_utils.redis_conn.delete("config:model_maintenance:sking_v73_flux_4b_000027000")
+
+
+def test_v104_preserves_stage_one_and_legacy_recovery_spec():
+    old = routers.generate.get_pipeline(SKING_DDJ_V61B).to_task_payload()
+    new = routers.generate.get_pipeline(SKING_DDJ_V104).to_task_payload()
+    assert old.pop("dense_uv_checkpoint_file") == "SKING_DDJ_v61.pt"
+    assert new.pop("dense_uv_checkpoint_file") == "SKING_DDJ_v104/parser.pt"
+    assert old == new

@@ -17,6 +17,7 @@ import licenses
 from config import settings
 from pipeline_registry import (
     MODEL_PIPELINES,
+    SKING_DDJ_V104,
     SKING_DDJ_MODEL_PREFIX,
     get_pipeline,
     is_sking_ddj_model,
@@ -47,7 +48,7 @@ TWO_STAGE_GENERATION_MODES = {
 }
 LEGACY_SKIN_MODEL_VERSION = "sking_v73_flux_4b_000027000"
 RENDER_TO_UV_JOB_TIMEOUT_SECONDS = int(
-    os.getenv("RENDER_TO_UV_JOB_TIMEOUT_SECONDS", "120")
+    os.getenv("RENDER_TO_UV_JOB_TIMEOUT_SECONDS", "600")
 )
 RENDER_TO_UV_RETRY_MAX = int(os.getenv("RENDER_TO_UV_RETRY_MAX", "5"))
 RENDER_TO_UV_RETRY_INTERVALS_SECONDS = [
@@ -448,7 +449,7 @@ def display_log_name(log):
 ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
 
 AVAILABLE_IMAGE_TO_SKIN_MODELS = [
-    *MODEL_PIPELINES,
+    SKING_DDJ_V104,
     LEGACY_SKIN_MODEL_VERSION,
 ]
 

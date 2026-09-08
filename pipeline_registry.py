@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 
+SKING_DDJ_V104 = "SKING_DDJ_v104"
 SKING_DDJ_V61B = "SKING_DDJ_v61b"
 SKING_DDJ_MODEL_PREFIX = "SKING_DDJ_"
 
@@ -44,6 +45,21 @@ MODEL_PIPELINES = MappingProxyType(
             image_size="1K",
             aspect_ratio="1:1",
             dense_uv_checkpoint_file="SKING_DDJ_v61.pt",
+            DMR_mappings_dir="mappings_256x512",
+        ),
+        SKING_DDJ_V104: SkinPipelineSpec(
+            prompt_file="real_to_render2.zh-hans.txt",
+            template_files=(
+                "template41.png",
+                "template51.png",
+                "template66.png",
+                "template67.png",
+                "template68.png",
+            ),
+            provider_model="nano-banana-pro",
+            image_size="1K",
+            aspect_ratio="1:1",
+            dense_uv_checkpoint_file="SKING_DDJ_v104/parser.pt",
             DMR_mappings_dir="mappings_256x512",
         ),
     }
