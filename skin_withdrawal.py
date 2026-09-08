@@ -37,6 +37,12 @@ def begin(db, log):
         raise HTTPException(status_code=409, detail="Legacy external assets require storage migration before withdrawal")
     # In-flight workers consult this tombstone before publishing results.
     log.is_deleted = True
+    for key in keys:
+        escaped = key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        db.query(models.User).filter(models.User.skin_url.like(f"%{escaped}%", escape="\\")).update({"skin_url": None, "skin_type": "strong"}, synchronize_session=False)
+    if log.id:
+        escaped_id = log.id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        db.query(models.User).filter(models.User.skin_url.like(f"%{escaped_id}%", escape="\\")).update({"skin_url": None, "skin_type": "strong"}, synchronize_session=False)
     _save(db, log, {"action": "delete", "public": log.is_public, "keys": keys,
                     "deleted": [], "invalidation": None})
     db.commit()
@@ -89,7 +95,7 @@ def resume(db, log):
         for key in state["keys"]:
             # Escape LIKE wildcards in object keys.
             escaped = key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            db.query(models.User).filter(models.User.skin_url.like(f"%{escaped}%", escape="\\")).update({"skin_url": None}, synchronize_session=False)
+            db.query(models.User).filter(models.User.skin_url.like(f"%{escaped}%", escape="\\")).update({"skin_url": None, "skin_type": "strong"}, synchronize_session=False)
         db.query(models.UserFeedback).filter_by(log_id=log.id).delete(synchronize_session=False)
         log.prompt = None
         log.name = "Deleted"

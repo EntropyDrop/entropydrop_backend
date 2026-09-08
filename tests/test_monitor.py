@@ -330,6 +330,58 @@ def test_delete_log_admin_success(
     app.dependency_overrides.clear()
 
 
+@patch("routers.generate.cancel_generation_jobs")
+@patch("routers.generate.BackgroundTasks.add_task")
+def test_admin_delete_log_resets_user_character(
+    mock_add_task,
+    mock_cancel_jobs,
+    client,
+    db,
+    withdrawal_storage,
+):
+    storage, cdn = withdrawal_storage
+    admin_user = models.User(
+        id="ADMIN_DEL_CHAR_01",
+        email="admin_char@entropydrop.com",
+        username="AdminChar",
+    )
+    normal_user = models.User(
+        id="USER_CHAR_0000001",
+        email="user_char@example.com",
+        username="CharUser",
+        skin_url="https://cdn.example.test/generations/test_char_skin.png",
+        skin_type="slim",
+    )
+    log = models.GenerationLog(
+        id="LOG_CHAR_DEL_0001",
+        user_id=normal_user.id,
+        prompt="character skin",
+        name="CharSkin",
+        mode="text",
+        result="generations/test_char_skin.png",
+        is_public=True,
+        status="success",
+    )
+    db.add(admin_user)
+    db.add(normal_user)
+    db.add(log)
+    db.commit()
+
+    app.dependency_overrides[get_current_admin] = lambda: admin_user
+
+    response = client.delete(f"/skin/api/monitor/logs/{log.id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["character_reset"] is True
+    assert data["reset_users_count"] == 1
+
+    db.refresh(normal_user)
+    assert normal_user.skin_url is None
+    assert normal_user.skin_type == "strong"
+
+    app.dependency_overrides.clear()
+
+
 def test_delete_log_non_admin_rejects(client, db):
     # No dependency overrides set for get_current_admin, should reject
     response = client.delete("/skin/api/monitor/logs/LOGDELADMIN00001")

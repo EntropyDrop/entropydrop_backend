@@ -354,12 +354,37 @@ def admin_delete_log(
     if not log:
         raise HTTPException(status_code=404, detail="Log not found")
         
+    from sqlalchemy import or_
     from routers.generate import cancel_generation_jobs
-    from skin_withdrawal import begin, resume
+    from skin_withdrawal import begin, resume, ASSET_FIELDS
+
+    # Check and reset any user who used this skin as their personal character
+    candidate_keys = [getattr(log, field) for field in ASSET_FIELDS if getattr(log, field)]
+    filters = []
+    for key in candidate_keys:
+        escaped = key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        filters.append(User.skin_url.like(f"%{escaped}%", escape="\\"))
+        filters.append(User.skin_url == key)
+    if log.id:
+        escaped_id = log.id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        filters.append(User.skin_url.like(f"%{escaped_id}%", escape="\\"))
+
+    users_with_this_skin = db.query(User).filter(or_(*filters)).all() if filters else []
+    reset_users_count = len(users_with_this_skin)
+    for u in users_with_this_skin:
+        u.skin_url = None
+        u.skin_type = "strong"
+    if reset_users_count > 0:
+        db.flush()
+
     begin(db, log)
     cancel_generation_jobs(log.id)
     resume(db, log)
-    return {"message": f"Creation {id} deleted and public files withdrawn by admin"}
+    return {
+        "message": f"Creation {id} deleted and public files withdrawn by admin",
+        "character_reset": reset_users_count > 0,
+        "reset_users_count": reset_users_count
+    }
 
 
 @router.delete("/failed-tasks")
