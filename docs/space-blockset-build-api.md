@@ -29,14 +29,14 @@ Content-Type: application/json
 {
   "operation_id": "9157b55e-92e9-4dc5-bc52-13b79bcc8134",
   "created_at_ms": 1788580800000,
-  "definition_base64": "<base64 InventoryResource Protobuf v5, kind blockset>",
+  "definition_base64": "<base64 InventoryResource Protobuf v6, kind blockset>",
   "position": {"x_cm": 16000, "y_cm": 5000, "z_cm": 16000},
   "yaw_quarter_turns": 0
 }
 ```
 
 Generate a fresh UUID and current Unix millisecond timestamp for a new operation; the
-example timestamp is illustrative. `definition_base64` uses the same portable v5
+example timestamp is illustrative. `definition_base64` uses the same portable v6
 InventoryResource format as Backpack exports and the Market. Publishing to the Market
 is not required. The decoded blockset contains `name` and `blocks`, for example:
 
@@ -53,7 +53,7 @@ is not required. The decoded blockset contains `name` and `blocks`, for example:
 ```
 
 - Origin coordinates are integer centimetres and must be multiples of 100 (the 1 m
-  grid). Standard block offsets are metres; optional `mx/my/mz` in 0–4 identify 20 cm
+  grid). Standard block offsets are metres; optional `mx/my/mz` in 0–7 identify 12.5 cm
   micro voxels within each local metre cell.
 - `yaw_quarter_turns` is an integer from 0 to 3, default 0, rotating about +Y around the
   origin. A standard block at local `(0,0,0)` becomes `(-1,0,-1)` after two turns because

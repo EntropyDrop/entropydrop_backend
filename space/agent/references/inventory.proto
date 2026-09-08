@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package entropydrop.space.inventory.v5;
+package entropydrop.space.inventory.v6;
 
 // Canonical binary contract for portable files, market uploads, and immutable
 // CDN objects. Derived counts and the constant block id
@@ -23,7 +23,7 @@ message Voxel {
   sint32 dx = 1;
   sint32 dy = 2;
   sint32 dz = 3;
-  // Present only for micro voxels. Value = 1 + mx + 5*my + 25*mz.
+  // Present only for micro voxels. Value = 1 + mx + 8*my + 64*mz (mx/my/mz in 0..7).
   optional uint32 micro_index = 4;
   fixed32 color = 5;
 }
@@ -86,7 +86,7 @@ message Component {
   repeated Component children = 8;
   // Parent-relative authored transform. The root omits these fields.
   // local_rotation is restricted to the 24 axis-aligned cube orientations so
-  // Stop restores every owned voxel to one shared 0.2-unit construction grid.
+  // Stop restores every owned voxel to one shared 0.125-unit construction grid.
   optional Vector3 local_position = 9;
   optional Quaternion local_rotation = 10;
   // Orientation of the mounting frame in component-local coordinates.

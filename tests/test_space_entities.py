@@ -27,7 +27,7 @@ def _user(db, user_id: str):
 def _entity(name="External Walker"):
     return {
         "type": "space-entity",
-        "version": 5,
+        "version": 6,
         "root": {
             "name": name,
             "id": "root",

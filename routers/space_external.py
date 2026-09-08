@@ -40,18 +40,18 @@ class BuildTerrainBatch(space.TerrainMutationBatchRequest):
 
 
 def _build_mutations(payload, canonical):
-    origin = [getattr(payload.position, f"{axis}_cm") // 20 for axis in "xyz"]
+    origin = [getattr(payload.position, f"{axis}_cm") * space.SPACE_MICRO_DIVISIONS // 100 for axis in "xyz"]
     mutations, micro_parents = [], set()
     for block in canonical["blocks"]:
         micro = "mx" in block
-        size = 1 if micro else 5
-        x, y, z = [block[f"d{axis}"] * 5 + block.get(f"m{axis}", 0) for axis in "xyz"]
+        size = 1 if micro else space.SPACE_MICRO_DIVISIONS
+        x, y, z = [block[f"d{axis}"] * space.SPACE_MICRO_DIVISIONS + block.get(f"m{axis}", 0) for axis in "xyz"]
         # Rotate voxel volumes around the construction origin, preserving grid alignment.
         for _ in range(payload.yaw_quarter_turns):
             x, z = z, -x - size
         x, y, z = x + origin[0], y + origin[1], z + origin[2]
         if micro:
-            parent = (x // 5, y // 5, z // 5)
+            parent = (x // space.SPACE_MICRO_DIVISIONS, y // space.SPACE_MICRO_DIVISIONS, z // space.SPACE_MICRO_DIVISIONS)
             if parent not in micro_parents:
                 micro_parents.add(parent)
                 px, py, pz = parent
@@ -61,7 +61,7 @@ def _build_mutations(payload, canonical):
                 ])
             mutations.append(space.TerrainMutation(kind="set_micro", mx=x, my=y, mz=z, color=block["color"]))
         else:
-            mutations.append(space.TerrainMutation(kind="set_standard", x=x // 5, y=y // 5, z=z // 5,
+            mutations.append(space.TerrainMutation(kind="set_standard", x=x // space.SPACE_MICRO_DIVISIONS, y=y // space.SPACE_MICRO_DIVISIONS, z=z // space.SPACE_MICRO_DIVISIONS,
                                                    block=1, color=block["color"]))
     return mutations
 

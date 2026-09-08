@@ -61,7 +61,7 @@ SPACE_MARKET_MAX_SEATS = 256
 SPACE_MARKET_MAX_COMPONENT_DEPTH = 16
 SPACE_MARKET_MAX_BOUNDS = 64
 SPACE_MARKET_MAX_COORDINATE = SPACE_MARKET_MAX_BOUNDS * 2
-SPACE_MARKET_GRID_DIVISIONS = 5
+from space.voxel_grid import MICRO_DIVISIONS as SPACE_MARKET_GRID_DIVISIONS
 SPACE_MARKET_GRID_EPSILON = 1e-6
 SPACE_MARKET_RATE_LIMIT = "120/minute; 2000/hour"
 SPACE_MARKET_OBJECT_PREFIX = "space-market/resources"
@@ -168,13 +168,13 @@ class MarketVoxel(StrictResourceModel):
         if any(value is not None for value in micro):
             if any(value is None for value in micro):
                 raise ValueError("micro coordinates mx/my/mz must be provided together")
-            if any(not 0 <= int(value) < 5 for value in micro):
-                raise ValueError("micro coordinates must be between 0 and 4")
+            if any(not 0 <= int(value) < SPACE_MARKET_GRID_DIVISIONS for value in micro):
+                raise ValueError("micro coordinates must be between 0 and 7")
         return self
 
 class BlockSetPayload(StrictResourceModel):
     type: Literal["space-blockset"]
-    version: Literal[5]
+    version: Literal[6]
     name: StrictStr = Field(min_length=1, max_length=80)
     blocks: list[MarketVoxel] = Field(min_length=1, max_length=SPACE_MARKET_MAX_BLOCKS)
 
@@ -306,7 +306,7 @@ class EntityConstraint(StrictResourceModel):
 
 class EntityPayload(StrictResourceModel):
     type: Literal["space-entity"]
-    version: Literal[5]
+    version: Literal[6]
     root: EntityComponent
     constraints: list[EntityConstraint] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_CONSTRAINTS)
 
@@ -361,7 +361,7 @@ class EntityPayload(StrictResourceModel):
 
 class ColorSetPayload(StrictResourceModel):
     type: Literal["space-colorset"]
-    version: Literal[5]
+    version: Literal[6]
     name: StrictStr = Field(min_length=1, max_length=80)
     colors: list[StrictStr] = Field(min_length=9, max_length=9)
 
@@ -488,7 +488,7 @@ def _validate_stopped_entity_grid(
                 not math.isclose(value, grid_value, rel_tol=0, abs_tol=SPACE_MARKET_GRID_EPSILON)
                 for value, grid_value in zip(fine_bounds, snapped)
             ):
-                raise ValueError("stopped entity voxels must align to the 0.2-unit construction grid")
+                raise ValueError("stopped entity voxels must align to the 0.125-unit construction grid")
             grid_boxes.append((snapped[0], snapped[1], snapped[2], snapped[3], snapped[4], snapped[5]))
 
     def visit(

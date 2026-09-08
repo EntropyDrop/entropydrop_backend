@@ -547,7 +547,7 @@ def test_space_terrain_edits_are_durable_and_visible_to_another_browser_user(cli
         "mutations": [
             {"kind": "set_standard", "x": 100, "y": 50, "z": 100, "block": 1, "color": 0x123456},
             {"kind": "set_standard", "x": 101, "y": 50, "z": 100, "block": 0, "color": 0xF2A93B},
-            {"kind": "set_micro", "mx": 506, "my": 251, "mz": 503, "color": 0xABCDEF, "part": "tip"},
+            {"kind": "set_micro", "mx": 809, "my": 401, "mz": 803, "color": 0xABCDEF, "part": "tip"},
         ],
     }
 
@@ -573,7 +573,7 @@ def test_space_terrain_edits_are_durable_and_visible_to_another_browser_user(cli
         [100, 50, 100, 1, 0x123456],
         [101, 50, 100, 0, 0xF2A93B],
     ]
-    assert chunks[0]["micro"] == [[506, 251, 503, 0xABCDEF, "tip"]]
+    assert chunks[0]["micro"] == [[809, 401, 803, 0xABCDEF, "tip"]]
 
 
 def test_space_terrain_height_is_256_metres(client, db):
@@ -587,7 +587,7 @@ def test_space_terrain_height_is_256_metres(client, db):
             "batch_id": str(uuid.uuid4()),
             "mutations": [
                 {"kind": "set_standard", "x": 1, "y": 255, "z": 1, "block": 1, "color": 1},
-                {"kind": "set_micro", "mx": 10, "my": 1279, "mz": 10, "color": 2},
+                {"kind": "set_micro", "mx": 16, "my": 2047, "mz": 16, "color": 2},
             ],
         },
     )
@@ -595,7 +595,7 @@ def test_space_terrain_height_is_256_metres(client, db):
 
     for mutation in (
         {"kind": "set_standard", "x": 1, "y": 256, "z": 1, "block": 1, "color": 1},
-        {"kind": "set_micro", "mx": 5, "my": 1280, "mz": 5, "color": 2},
+        {"kind": "set_micro", "mx": 5, "my": 2048, "mz": 5, "color": 2},
     ):
         rejected = client.post(
             f"/space/api/v2/worlds/{world_id}/terrain-edits/batches",
@@ -667,7 +667,7 @@ def test_terrain_edits_mark_their_surface_zone_snapshot_dirty(client, db):
         raw,
         space_surface.SURFACE_HEADER_BYTES + record_index * space_surface.SURFACE_RECORD_BYTES,
     ) == (
-        1280, 0x12, 0x34, 0x56
+        2048, 0x12, 0x34, 0x56
     )
 
 
@@ -756,8 +756,8 @@ def test_space_terrain_effective_quota_includes_implicit_micro_clears(client, db
         json={
             "batch_id": str(uuid.uuid4()),
             "mutations": [
-                {"kind": "set_micro", "mx": 5, "my": 400, "mz": 5, "color": 1},
-                {"kind": "set_micro", "mx": 6, "my": 400, "mz": 5, "color": 2},
+                {"kind": "set_micro", "mx": 8, "my": 640, "mz": 8, "color": 1},
+                {"kind": "set_micro", "mx": 9, "my": 640, "mz": 8, "color": 2},
             ],
         },
     )

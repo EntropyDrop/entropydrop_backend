@@ -10,7 +10,9 @@ from google.protobuf.message import DecodeError
 from space.contracts import inventory_pb2
 
 
-SCHEMA_VERSION = 5
+from space.voxel_grid import MICRO_DIVISIONS, MICRO_CELLS_PER_BLOCK
+
+SCHEMA_VERSION = 6
 InventoryKind = Literal["blockset", "entity", "colorset"]
 
 
@@ -82,8 +84,8 @@ def _encode_voxel(target, block: dict[str, Any]) -> None:
         target.micro_index = (
             1
             + int(block["mx"])
-            + 5 * int(block["my"])
-            + 25 * int(block["mz"])
+            + MICRO_DIVISIONS * int(block["my"])
+            + MICRO_DIVISIONS ** 2 * int(block["mz"])
         )
     target.color = int(block["color"])
 
@@ -98,12 +100,12 @@ def _decode_voxel(block) -> dict[str, Any]:
     }
     if block.HasField("micro_index"):
         packed = int(block.micro_index) - 1
-        if not 0 <= packed < 125:
-            raise InventoryCodecError("micro voxel index is outside 0..124")
+        if not 0 <= packed < MICRO_CELLS_PER_BLOCK:
+            raise InventoryCodecError("micro voxel index is outside 0..511")
         result.update({
-            "mx": packed % 5,
-            "my": (packed // 5) % 5,
-            "mz": packed // 25,
+            "mx": packed % MICRO_DIVISIONS,
+            "my": (packed // MICRO_DIVISIONS) % MICRO_DIVISIONS,
+            "mz": packed // MICRO_DIVISIONS ** 2,
         })
     return result
 

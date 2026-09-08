@@ -66,7 +66,7 @@ const dz = wrappedDelta(ctx.position[2], target[2], 2048);
 | `ctx.blocks` | object | Block-edit snapshot: `pressed(type?)` and `event()`; types are `'place'\|'remove'\|'color'\|'subdivide'`. |
 | `ctx.players` | array | Frozen player observations. `position` remains the eye-position compatibility alias; records also expose `eyePosition`, nullable `feetPosition`/`velocity`/pose and movement flags, riding IDs, `isLocal`, and fixed 50 kg mass. |
 | `ctx.driver` | object|null | Current local driver for this entity as `{playerId,componentId,seatIndex}`, or `null` when it is not mounted. |
-| `ctx.contacts` | array | Up to 32 frozen contacts observed since the previous submitted script frame. Kinds are `terrain\|entity\|player`; records include component IDs, point, normal, relative velocity, penetration, and impulse when available. |
+| `ctx.contacts` | array | Up to 32 frozen contacts observed since the previous submitted script frame. Kinds are `terrain\|entity\|player`; records include component IDs, point, normal, relative velocity, penetration, and impulse when available. Resting support contacts retained during physics sleep have `sleeping: true` and zero impulse/relative velocity. |
 | `ctx.world` | object | World query and mutation API described below. |
 | `ctx.selection` | object | Shared engine selection command API described below. |
 | `ctx.commands` | object | Final main-thread command results from the previous submitted frame: `get(commandId)` and `all()`. |
@@ -102,10 +102,10 @@ Every root and child receives the same top-level API. Namespaces target the curr
 | `self.voxels.clear(position)` | Queue removal of one standard voxel; returns `{ok,removed,reason}`. |
 | `self.voxels.paint(position, options?)` | Queue repainting one standard voxel; returns `{ok,painted,reason}`. |
 | `self.voxels.clearCell(position)` | Queue removal of all standard and micro voxels in one 1 m component cell. |
-| `self.voxels.subdivide(position, clearOffset?)` | Queue conversion to 125 micro voxels, optionally removing one offset atomically. |
-| `self.microVoxels.set(cell, offset, options?)` | Queue a 0.2 m voxel; each offset coordinate is an integer from 0 through 4. |
-| `self.microVoxels.clear(cell, offset)` | Queue removal of one exact 0.2 m component voxel. |
-| `self.microVoxels.paint(cell, offset, options?)` | Queue repainting one exact 0.2 m component voxel. |
+| `self.voxels.subdivide(position, clearOffset?)` | Queue conversion to 512 micro voxels, optionally removing one offset atomically. |
+| `self.microVoxels.set(cell, offset, options?)` | Queue a 0.125 m voxel; each offset coordinate is an integer from 0 through 7. |
+| `self.microVoxels.clear(cell, offset)` | Queue removal of one exact 0.125 m component voxel. |
+| `self.microVoxels.paint(cell, offset, options?)` | Queue repainting one exact 0.125 m component voxel. |
 
 > Component voxel cells are measured from the current pivot, not the entity corner. Fractional cell coordinates floor after applying the pivot.
 
@@ -159,10 +159,10 @@ Only kinematic bodies accept direct pose commands; dynamic bodies are solver-dri
 | `ctx.world.voxels.clear(position)` | Queue removal of one standard voxel without deleting micro voxels in its cell. |
 | `ctx.world.voxels.paint(position, options?)` | Queue repainting one existing standard voxel. |
 | `ctx.world.voxels.clearCell(position)` | Queue removal of all standard and micro voxels in one world cell. |
-| `ctx.world.voxels.subdivide(position, clearOffset?)` | Queue conversion of one standard voxel to 125 micro voxels. |
-| `ctx.world.microVoxels.get(cell, offset)` | Read one real 0.2 m world voxel as `{block,color}` plus the current tick overlay; offset coordinates are integers from 0 through 4. |
-| `ctx.world.microVoxels.set(cell, offset, options?)` | Queue one 0.2 m world voxel placement. |
-| `ctx.world.microVoxels.clear(cell, offset)` | Queue removal of one exact 0.2 m world voxel. |
+| `ctx.world.voxels.subdivide(position, clearOffset?)` | Queue conversion of one standard voxel to 512 micro voxels. |
+| `ctx.world.microVoxels.get(cell, offset)` | Read one real 0.125 m world voxel as `{block,color}` plus the current tick overlay; offset coordinates are integers from 0 through 7. |
+| `ctx.world.microVoxels.set(cell, offset, options?)` | Queue one 0.125 m world voxel placement. |
+| `ctx.world.microVoxels.clear(cell, offset)` | Queue removal of one exact 0.125 m world voxel. |
 | `ctx.world.microVoxels.paint(cell, offset, options?)` | Queue repainting one existing micro world voxel. |
 | `ctx.world.entities(origin, radius=16)` | Filter the prefetched 64 m nearby-entity snapshot using shortest wrapped X/Z distance. Descriptors include pose, velocities, mass, bounds, collision/ground state, physics enabled state, script status, and component count. |
 | `ctx.world.entities.get(id, chunkId?)` | Look up an entity in the frozen nearby snapshot. |
@@ -180,7 +180,7 @@ Only kinematic bodies accept direct pose commands; dynamic bodies are solver-dri
 | `ctx.selection.clear()` | Queue clearing the shared selection; returns `{ok,cleared,reason}`. |
 | `ctx.selection.cornerA(point) / cornerB(point)` | Set progressive world-box corners; accepts `{micro:true}` and returns `{ok,selected,reason}`. |
 | `ctx.selection.box(a, b)` | Set an atomic world box; accepts `{micro:true}`. |
-| `ctx.selection.cells(list) / toggle(cell)` | Replace or toggle sparse cells; micro mode uses 0.2 m cells. |
+| `ctx.selection.cells(list) / toggle(cell)` | Replace or toggle sparse cells; micro mode uses 0.125 m cells. |
 | `ctx.selection.entity(entityId, nodeId?)` | Select a component subtree. Internal component selection requires a stopped entity. |
 | `ctx.selection.entityBox(entityId, nodeId, a, b, space?)` | Select directly owned voxels intersecting a node-local or world-space box; requires stopped. |
 | `ctx.selection.delete()` | Delete the shared selection; internal entity edits require stopped. Returns removal counts and IDs. |

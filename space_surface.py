@@ -13,11 +13,12 @@ import zstandard as zstd
 from sqlalchemy import func
 
 from space import models
+from space.voxel_grid import MICRO_DIVISIONS
 from space.database import SessionLocal
 
 
 SURFACE_MAGIC = b"EDSZ"
-SURFACE_SCHEMA_VERSION = 2
+SURFACE_SCHEMA_VERSION = 3
 SURFACE_SAMPLES_PER_CHUNK_AXIS = 8
 SURFACE_RECORD_BYTES = 5
 SURFACE_HEADER_BYTES = 32
@@ -174,12 +175,12 @@ def _surface_records_for_chunk(
             local_x, local_z = world_x - chunk_x * 16, world_z - chunk_z * 16
             if 0 <= local_x < 16 and 0 <= local_z < 16 and block == 1:
                 patch = (local_x // sample_width) * axis + local_z // sample_width
-                standard_candidates.setdefault(patch, []).append(((y + 1) * 5, color))
+                standard_candidates.setdefault(patch, []).append(((y + 1) * MICRO_DIVISIONS, color))
         for edit in overlay["micro"]:
             if not isinstance(edit, list) or len(edit) < 4:
                 continue
             micro_x, micro_y, micro_z, color = map(int, edit[:4])
-            world_x, world_z = micro_x // 5, micro_z // 5
+            world_x, world_z = micro_x // MICRO_DIVISIONS, micro_z // MICRO_DIVISIONS
             local_x, local_z = world_x - chunk_x * 16, world_z - chunk_z * 16
             if 0 <= local_x < 16 and 0 <= local_z < 16:
                 patch = (local_x // sample_width) * axis + local_z // sample_width
@@ -204,7 +205,7 @@ def _surface_records_for_chunk(
             for edited_y, (block, color) in column_edits.items():
                 if block == 1 and edited_y >= top_block_y:
                     top_block_y, top_color = edited_y, color
-            height_micro = (top_block_y + 1) * 5 if top_block_y >= 0 else 0
+            height_micro = (top_block_y + 1) * MICRO_DIVISIONS if top_block_y >= 0 else 0
             patch = sample_x * axis + sample_z
             for candidate_height, candidate_color in standard_candidates.get(patch, ()):
                 if candidate_height >= height_micro:

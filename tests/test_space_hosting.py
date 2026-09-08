@@ -27,7 +27,7 @@ def setup(client, db, script="self.state.ticks = (self.state.ticks || 0) + 1;", 
     app.dependency_overrides[get_current_user] = lambda: user
     app.dependency_overrides[_entity_creator] = lambda: EntityCreator(user=user)
     world_id = client.post('/space/api/v2/bootstrap').json()['world']['id']
-    definition = {"type": "space-entity", "version": 5, "root": {"name": "Hosted Robot","id": "root", "body": {"type": "dynamic", "useGravity": False},
+    definition = {"type": "space-entity", "version": 6, "root": {"name": "Hosted Robot","id": "root", "body": {"type": "dynamic", "useGravity": False},
                  "blocks": [{"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 0x123456}],
                  "script": script, "children": [], "seats": []}, "constraints": []}
     response = client.post(f'/space/api/v2/worlds/{world_id}/entities', json={

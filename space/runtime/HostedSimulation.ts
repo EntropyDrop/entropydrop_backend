@@ -1,3 +1,4 @@
+import { MICRO_DIVISIONS, MICRO_SIZE } from '@entropydrop/space-engine/voxel/MicroGrid.ts';
 import {
   THREE, World, ContraptionManager, ContraptionPhysics,
   portableEntityToRuntime, runtimeEntityToPortable, decodeInventoryResource, encodeInventoryResource,
@@ -42,8 +43,8 @@ export class HostedSimulation {
   record(mutation: any) {
     if (!this.actor) throw new Error('hosting_actor_required');
     if (this.mutations.length >= 256) throw new Error('hosting_edit_budget');
-    const x = mutation.x ?? Math.floor(mutation.mx / 5);
-    const z = mutation.z ?? Math.floor(mutation.mz / 5);
+    const x = mutation.x ?? Math.floor(mutation.mx / MICRO_DIVISIONS);
+    const z = mutation.z ?? Math.floor(mutation.mz / MICRO_DIVISIONS);
     const key = `${Math.floor(wrapX(x) / 16)},${Math.floor(wrapZ(z) / 16)}`;
     if (!this.allowed.has(key)) throw new Error('hosting_area_limit');
     this.dirty.add(key);
@@ -97,8 +98,8 @@ export class HostedSimulation {
         const portable = decodeInventoryResource(Buffer.from(item.definition_base64, 'base64'), 'entity').portable;
         const slot = portableEntityToRuntime(portable);
         slot.blocks = slot.blocks.map(b => ({ ...b,
-          localX: b.dx + (b.mx ?? 0) / 5, localY: b.dy + (b.my ?? 0) / 5,
-          localZ: b.dz + (b.mz ?? 0) / 5, size: b.mx == null ? 1 : 0.2 }));
+          localX: b.dx + (b.mx ?? 0) / MICRO_DIVISIONS, localY: b.dy + (b.my ?? 0) / MICRO_DIVISIONS,
+          localZ: b.dz + (b.mz ?? 0) / MICRO_DIVISIONS, size: b.mx == null ? 1 : MICRO_SIZE }));
         const origin = new THREE.Vector3().fromArray(item.snapshot?.constructorOrigin || item.position);
         const c = manager.buildFromSlot(slot, origin, item.snapshot ? { ...item.snapshot, serverManaged: false } : null, false);
         if (!c) throw new Error('hosting_invalid_entity');
@@ -146,8 +147,8 @@ export class HostedSimulation {
         slot.blocks = slot.blocks.map(b => {
           const dx = Math.floor(b.localX), dy = Math.floor(b.localY), dz = Math.floor(b.localZ);
           return { ...b, dx, dy, dz, ...(b.size < 1 ? {
-            mx: Math.round((b.localX - dx) * 5), my: Math.round((b.localY - dy) * 5),
-            mz: Math.round((b.localZ - dz) * 5),
+            mx: Math.round((b.localX - dx) * MICRO_DIVISIONS), my: Math.round((b.localY - dy) * MICRO_DIVISIONS),
+            mz: Math.round((b.localZ - dz) * MICRO_DIVISIONS),
           } : {}) };
         });
         const definition = encodeInventoryResource('entity', runtimeEntityToPortable(slot));

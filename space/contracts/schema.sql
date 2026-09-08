@@ -196,7 +196,7 @@ CREATE TABLE world_event_streams (
 --
 -- A payload contains the complete player-authored overlay for one 16x256x16
 -- chunk: tri-state standard voxels (inherit/air/solid), palette-compressed
--- colors and sparse 5x5x5 micro groups. It is encoded and compressed by the
+-- colors and sparse 8x8x8 micro groups. It is encoded and compressed by the
 -- application; no individual voxel rows exist in PostgreSQL.
 -- -----------------------------------------------------------------------------
 

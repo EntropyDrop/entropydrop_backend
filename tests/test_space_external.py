@@ -24,7 +24,7 @@ def setup(client, db, *, build=True):
 
 
 def body(blocks=None, **kwargs):
-    resource = {'type': 'space-blockset', 'version': 5, 'name': 'API platform',
+    resource = {'type': 'space-blockset', 'version': 6, 'name': 'API platform',
                 'blocks': blocks or [{'dx': 0, 'dy': 0, 'dz': 0, 'block': 1, 'color': 0xABCDEF}]}
     return {'operation_id': str(uuid.uuid4()), 'created_at_ms': int(time.time() * 1000),
             'definition_base64': base64.b64encode(encode_inventory_resource('blockset', resource)).decode(),
@@ -79,12 +79,12 @@ def test_micro_build_replaces_touched_cell_and_retains_neighbors(client, db):
     assert result.status_code == 201, result.text
     decoded = space._decode_chunk_overlay(db.query(models.SpaceChunkSnapshot).one())
     assert decoded['standard'] == [[160, 50, 160, 0, 0]]
-    assert decoded['micro'] == [[801, 252, 803, 123]]
+    assert decoded['micro'] == [[1281, 402, 1283, 123]]
     rotated = post(client, world, headers, body(blocks, yaw_quarter_turns=1))
     assert rotated.status_code == 201, rotated.text
     micro = [edit for row in db.query(models.SpaceChunkSnapshot).all() for edit in space._decode_chunk_overlay(row)['micro']]
-    assert [803, 252, 798, 123] in micro
-    assert [801, 252, 803, 123] in micro
+    assert [1283, 402, 1278, 123] in micro
+    assert [1281, 402, 1283, 123] in micro
 
 
 def test_legacy_key_builds_with_membership_and_revocation_enforced(client, db):

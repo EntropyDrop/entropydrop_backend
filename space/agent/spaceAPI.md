@@ -45,7 +45,7 @@ Both position routes are self-only. All existing keys work without reissuing the
 ## Create the requested object
 
 1. Read [entity encoding and a complete request example](references/entity-create.md).
-2. Encode a canonical **InventoryResource Protobuf v5** using [inventory.proto](references/inventory.proto). Raw JSON in `definition_base64` is not accepted.
+2. Encode a canonical **InventoryResource Protobuf v6** using [inventory.proto](references/inventory.proto). Raw JSON in `definition_base64` is not accepted.
 3. For programmable parts, read the [entityAPI reference](entityAPI.md). Only use its documented methods.
 4. Read `GET /space/api/v2/worlds/{world_id}/api-usage` with the same key for current quotas and pricing.
 5. Place the object a few metres away from the player's coordinates, leaving room for its full bounds. Player Y is not a terrain-height query. Account for terrain clearance, gravity, and wrapped coordinates.
@@ -61,7 +61,7 @@ Use the entity ID returned by creation or copied from the Entity Editor. The fol
 
 | Request | Purpose |
 | --- | --- |
-| `GET /configuration` | Read `{ "entity": <metadata>, "definition": <decoded InventoryResource v5 JSON> }`, including component code and authored body defaults |
+| `GET /configuration` | Read `{ "entity": <metadata>, "definition": <decoded InventoryResource v6 JSON> }`, including component code and authored body defaults |
 | `PATCH /configuration` | Modify selected components' code, names and body defaults while stopped |
 | `PUT /run-state` | Set `desired_run_state` to `running` or `stopped` |
 
@@ -119,9 +119,9 @@ HTTP success means the backend saved the definition or desired state. It does no
 ## Geometry and physics rules
 
 - Right-handed, Y-up; +X right, -Z forward. X wraps into `[0,16384)` metres and Z into `[0,2048)`. Buildable Y is `[0,256)` metres.
-- Standard voxels are 1 metre; micro voxels are 0.2 metres. A micro voxel uses `dx/dy/dz` plus offsets `mx/my/mz` in 0–4, encoded as `micro_index = 1 + mx + 5*my + 25*mz`.
+- Standard voxels are 1 metre; micro voxels are 0.125 metres. A micro voxel uses `dx/dy/dz` plus offsets `mx/my/mz` in 0–7, encoded as `micro_index = 1 + mx + 8*my + 64*mz`.
 - Components form one tree. IDs are unique; display names belong to each component's `name`, including `root.name`.
-- Authored Stop poses must align to the 0.2-metre grid and **must not overlap between components**, even when collisions are disabled. Reserve wheel and joint clearances in the chassis.
+- Authored Stop poses must align to the 0.125-metre grid and **must not overlap between components**, even when collisions are disabled. Reserve wheel and joint clearances in the chassis.
 - Dynamic bodies use force/torque. Direct pose setters work only on kinematic bodies. Persist default body settings in the definition; script setters are runtime changes.
 - Scripts run at 20 Hz in bounded QuickJS. Only the mounted entity receives keyboard input. Add a seat for drivable vehicles; V mounts/unmounts. W/A/S/D and Space are available to scripts.
 - For suspension, the current constraints are point/hinge/weld. There is no built-in spring or prismatic constraint; use a tested force-based controller (for example, raycast spring/damper suspension) or supported articulated mechanisms.

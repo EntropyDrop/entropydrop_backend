@@ -17,6 +17,7 @@ import uuid
 from fastapi import HTTPException
 from sqlalchemy import and_, or_
 
+from space.voxel_grid import MICRO_DIVISIONS
 from space import models
 from config import settings
 from credit_balance import available_balance
@@ -251,8 +252,8 @@ def commit_result(db, world_id, instance_id, payload, result):
             raise ValueError("invalid mutation actor")
         # Commands may only touch the originating entity's reserved neighbourhood.
         allowed = region_chunks(by_id[eid], world)
-        x = mutation.get("x", mutation.get("mx", 0) // 5)
-        z = mutation.get("z", mutation.get("mz", 0) // 5)
+        x = mutation.get("x", mutation.get("mx", 0) // MICRO_DIVISIONS)
+        z = mutation.get("z", mutation.get("mz", 0) // MICRO_DIVISIONS)
         if (x // 16, z // 16) not in allowed:
             raise ValueError("hosting mutation area limit")
         grouped.setdefault(by_id[eid].owner_user_id, []).append(mutation)
