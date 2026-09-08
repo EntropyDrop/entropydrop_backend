@@ -382,6 +382,62 @@ def test_admin_delete_log_resets_user_character(
     app.dependency_overrides.clear()
 
 
+@patch("routers.generate.cancel_generation_jobs")
+@patch("routers.generate.BackgroundTasks.add_task")
+def test_delete_log_admin_succeeds_when_cdn_invalidation_is_pending(
+    mock_add_task,
+    mock_cancel_jobs,
+    client,
+    db,
+    withdrawal_storage,
+):
+    storage, cdn = withdrawal_storage
+    # Simulate real AWS CloudFront where invalidation is in progress
+    cdn.get_invalidation.return_value = {"Invalidation": {"Status": "InProgress"}}
+
+    admin_user = models.User(
+        id="ADMIN_DEL_PEND_01",
+        email="admin_del_pend@entropydrop.com",
+        username="AdminDelPend",
+    )
+    db.add(admin_user)
+
+    log = models.GenerationLog(
+        id="LOGPENDINGADMIN1",
+        prompt="Pending unfinished task",
+        user_id="USER000000000001",
+        mode="aigc_image_to_skin",
+        status="pending",
+        source="uploads/LOGPENDINGADMIN1.png",
+        result=None,
+        is_public=True
+    )
+    db.add(log)
+    db.commit()
+
+    def mock_get_current_admin():
+        return admin_user
+    app.dependency_overrides[get_current_admin] = mock_get_current_admin
+
+    response = client.delete(f"/skin/api/monitor/logs/{log.id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert "deleted and public files withdrawn" in data["message"]
+
+    db.refresh(log)
+    assert log.is_deleted is True
+    assert log.name == "Deleted"
+    assert log.status == "deleted"
+    assert log.source is None
+    assert log.withdrawal is None
+
+    # Assert S3 deletion and CloudFront invalidation were both triggered
+    assert storage.delete_object.call_count == 1
+    assert cdn.create_invalidation.call_count == 1
+
+    app.dependency_overrides.clear()
+
+
 def test_delete_log_non_admin_rejects(client, db):
     # No dependency overrides set for get_current_admin, should reject
     response = client.delete("/skin/api/monitor/logs/LOGDELADMIN00001")

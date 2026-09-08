@@ -48,7 +48,7 @@ def begin(db, log):
     db.commit()
 
 
-def resume(db, log):
+def resume(db, log, allow_pending_cdn: bool = False):
     log = db.query(models.GenerationLog).filter_by(id=log.id).with_for_update().populate_existing().one()
     state = copy.deepcopy(log.withdrawal)
     if not state:
@@ -82,7 +82,9 @@ def resume(db, log):
                 _save(db, log, state)
             result = cdn.get_invalidation(DistributionId=distribution_id, Id=state["invalidation"])
             if result["Invalidation"]["Status"] != "Completed":
-                raise HTTPException(status_code=503, detail="CDN withdrawal is pending; retry shortly")
+                if not allow_pending_cdn:
+                    raise HTTPException(status_code=503, detail="CDN withdrawal is pending; retry shortly")
+                logger.info("CDN invalidation %s is pending for %s; continuing withdrawal", state["invalidation"], log.id)
 
         # No new URL is signed while a manifest exists. References are removed
         # only after storage succeeds.

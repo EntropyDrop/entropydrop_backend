@@ -379,7 +379,8 @@ def admin_delete_log(
 
     begin(db, log)
     cancel_generation_jobs(log.id)
-    resume(db, log)
+    resume(db, log, allow_pending_cdn=True)
+
     return {
         "message": f"Creation {id} deleted and public files withdrawn by admin",
         "character_reset": reset_users_count > 0,
@@ -409,7 +410,7 @@ def admin_delete_all_failed_tasks(
     for log in failed_logs:
         begin(db, log)
         cancel_generation_jobs(log.id)
-        resume(db, log)
+        resume(db, log, allow_pending_cdn=True)
         count += 1
     return {"message": "Failed tasks deleted and public files withdrawn", "deleted_count": count}
 
@@ -559,7 +560,7 @@ def admin_delete_user_by_email(
     for log in logs:
         begin(db, log)
         cancel_generation_jobs(log.id)
-        resume(db, log)
+        resume(db, log, allow_pending_cdn=True)
 
     # 2. Delete Collection Items and Collections
     collections = db.query(Collection).filter(Collection.user_id == user_id).all()
