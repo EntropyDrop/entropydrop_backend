@@ -21,7 +21,7 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     from sqlalchemy.orm import Session
     from sqlalchemy import func
-    import models
+    import migration_reward_snapshot as models
     
     bind = op.get_bind()
     db = Session(bind=bind)

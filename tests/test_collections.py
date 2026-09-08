@@ -126,7 +126,11 @@ def test_add_collection_item(client, db):
     db.commit()
     db.refresh(col)
 
+    log = GenerationLog(user_id="1", mode="human_upload", is_public=True, status="success", result="generations/owned.png")
+    db.add(log)
+    db.commit()
     payload = {
+        "log_id": log.id,
         "collection_id": col.id,
         "name": "Item 1",
         "type": "image",
@@ -246,6 +250,7 @@ def test_get_log_public_collections(client, db):
     db.refresh(col)
 
     log_id = models.generate_base58_id()
+    db.add(GenerationLog(id=log_id, user_id="1", mode="human_upload", is_public=True, status="success"))
     item = CollectionItem(collection_id=col.id, type="image", log_id=log_id)
     db.add(item)
     db.commit()
@@ -459,7 +464,7 @@ def test_add_private_item_to_public_collection(client, db):
         id=models.generate_base58_id(),
         user_id="1",
         mode="edit",
-        is_public=False
+        is_public=False, status="success"
     )
     db.add(log)
     db.commit()

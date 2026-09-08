@@ -128,6 +128,7 @@ class GenerationLog(Base):
     result = Column(String(500), nullable=True) # Generated image key, can be null (pending)
     edited_result = Column(String(500), nullable=True) # Intermediate edited image key
     image_to_skin_edited_result = Column(String(500), nullable=True) # Image-to-skin pipeline intermediate key
+    withdrawal = Column(JSON(none_as_null=True), nullable=True) # Durable, retryable storage/CDN withdrawal manifest
     user_id = Column(String(16), index=True, nullable=True) # Associated user ID
     is_public = Column(Boolean, default=True, index=True)
     likes_count = Column(Integer, default=0)
@@ -165,22 +166,22 @@ class GenerationLog(Base):
     @property
     def result_url(self):
         from s3_utils import get_s3_url
-        return get_s3_url(self.result, self.is_public)
+        return None if self.withdrawal or self.is_deleted else get_s3_url(self.result, self.is_public)
 
     @property
     def source_url(self):
         from s3_utils import get_s3_url
-        return get_s3_url(self.source, self.is_public)
+        return None if self.withdrawal or self.is_deleted else get_s3_url(self.source, self.is_public)
 
     @property
     def edited_image_url(self):
         from s3_utils import get_s3_url
-        return get_s3_url(self.edited_result, self.is_public)
+        return None if self.withdrawal or self.is_deleted else get_s3_url(self.edited_result, self.is_public)
 
     @property
     def image_to_skin_edited_image_url(self):
         from s3_utils import get_s3_url
-        return get_s3_url(self.image_to_skin_edited_result, self.is_public)
+        return None if self.withdrawal or self.is_deleted else get_s3_url(self.image_to_skin_edited_result, self.is_public)
 
 
 class Collection(Base):
@@ -246,6 +247,10 @@ class Order(Base):
     id = Column(String(16), primary_key=True, default=generate_base58_id, index=True)
     user_id = Column(String(16), index=True, nullable=False)
     address_id = Column(String(16), index=True, nullable=True) # Shipping address ID (none for subscriptions)
+    address_snapshot = Column(JSON, nullable=True)
+    inventory_reserved = Column(Boolean, nullable=False, default=False, server_default="0")
+    inventory_reserved_until = Column(DateTime(timezone=True), nullable=True)
+    capture_started = Column(Boolean, nullable=False, default=False, server_default="0")
     
     order_type = Column(String(20), default="print") # print, subscription
 
@@ -445,6 +450,7 @@ class CreditLog(Base):
     amount = Column(Integer, nullable=False)
     action = Column(String(50), nullable=False)
     source = Column(String(100), nullable=True)
+    idempotency_key = Column(String(180), nullable=True, unique=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
 
 # Compatibility exports for monolithic development and existing integrations.

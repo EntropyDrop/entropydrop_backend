@@ -750,7 +750,7 @@ def test_get_log_private_owner(mock_presigned, mock_cdn, client, db):
 
 @patch("routers.generate.cancel_generation_jobs")
 @patch("routers.generate.BackgroundTasks.add_task")
-def test_delete_log(mock_add_task, mock_cancel_jobs, client, db):
+def test_delete_log(mock_add_task, mock_cancel_jobs, client, db, withdrawal_storage):
     log = GenerationLog(
         prompt="to_delete", 
         user_id="test_user_generate", 
@@ -782,15 +782,12 @@ def test_delete_log(mock_add_task, mock_cancel_jobs, client, db):
     assert log.image_to_skin_edited_result is None
     mock_cancel_jobs.assert_called_once_with(log.id)
 
-    # Verify S3 cleanup background task triggered
-    mock_add_task.assert_called_once()
-    args = mock_add_task.call_args[0]
-    assert args[0].__name__ == "delete_s3_files_task"
-    files_list = args[1]
-    assert ("uploads/source.png", True) in files_list
-    assert ("generations/result.png", True) in files_list
-    assert ("text_to_image_intermediate/edited.jpg", True) in files_list
-    assert ("real_to_render_intermediate/render.png", True) in files_list
+    mock_add_task.assert_not_called()
+    storage, cdn = withdrawal_storage
+    assert storage.delete_object.call_count == 4
+    assert cdn.create_invalidation.call_count == 1
+    assert log.withdrawal is None
+
 
 def test_delete_log_quota_limit(client, db):
     # Change status to non-Pro user

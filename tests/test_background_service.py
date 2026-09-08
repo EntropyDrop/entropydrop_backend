@@ -6,6 +6,7 @@ import pytest
 
 import background_service
 import space_surface
+import skin_withdrawal
 
 
 @pytest.mark.parametrize("space_url", ["", "http://space:8000"])
@@ -15,7 +16,7 @@ def test_background_jobs_respect_standalone_space_cutover(monkeypatch, space_url
 
     async def run_test():
         started, cancelled = set(), set()
-        expected = {"discovery", "results", "recovery", "ledger"}
+        expected = {"discovery", "results", "recovery", "ledger", "withdrawal", "orders"}
         if not space_url:
             expected.add("surface")
         ready = asyncio.Event()
@@ -30,6 +31,8 @@ def test_background_jobs_respect_standalone_space_cutover(monkeypatch, space_url
                 cancelled.add(name)
 
         for target, method, name in (
+            (skin_withdrawal, "start_withdrawal_job", "withdrawal"),
+            (background_service.order, "start_order_reconciliation_job", "orders"),
             (background_service.generate, "start_discovery_cache_job", "discovery"),
             (background_service.generate, "start_result_listener", "results"),
             (background_service.generate, "start_pending_recovery_job", "recovery"),

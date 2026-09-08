@@ -13,20 +13,37 @@ from config import settings
 
 router = APIRouter(prefix="/api", tags=["collections"])
 
-def resolve_item_urls(item, col_is_public, db):
-    item_data = dict(item.data) if item.data else {}
-    if item.log_id:
-        log = db.query(models.GenerationLog).filter(models.GenerationLog.id == item.log_id).first()
-        if log:
-            # Prefer log.result_url which uses log.is_public
-            url = log.result_url
-            item_data["result"] = url
-            item_data["url"] = url
-    else:
-        for key in ["result", "url", "preview", "result_render_2d"]:
-            if key in item_data and isinstance(item_data[key], str) and not item_data[key].startswith("http"):
-                item_data[key] = get_s3_url(item_data[key], col_is_public)
-    return item_data
+def visible_logs(viewer_id=None, public_only=False):
+    from sqlalchemy import or_
+    log = models.GenerationLog
+    return (
+        log.is_deleted == False,
+        log.status == "success",
+        log.withdrawal.is_(None),
+        log.is_public == True if public_only or not viewer_id else
+        or_(log.is_public == True, log.user_id == viewer_id),
+    )
+
+
+def visible_items(db, collection_id, viewer_id=None, public_only=False):
+    return db.query(models.CollectionItem).join(
+        models.GenerationLog, models.CollectionItem.log_id == models.GenerationLog.id
+    ).filter(
+        models.CollectionItem.collection_id == collection_id,
+        *visible_logs(viewer_id, public_only),
+    )
+
+
+def resolve_item_urls(item, col_is_public, db, viewer_id=None):
+    # Only database-owned resources can authorize storage URLs. Never sign or
+    # echo client-supplied URL/preview fields, including legacy unbound items.
+    log = db.query(models.GenerationLog).filter(
+        models.GenerationLog.id == item.log_id,
+        *visible_logs(viewer_id, public_only=col_is_public),
+    ).first() if item.log_id else None
+    if not log:
+        return {}
+    return {"id": log.id, "result": log.result_url, "url": log.result_url}
 
 
 @router.get("/collections", response_model=schemas.PaginatedCollections)
@@ -47,6 +64,7 @@ async def get_collections(
             models.UserLike, models.GenerationLog.id == models.UserLike.log_id
         ).filter(
             models.UserLike.user_id == current_user.id,
+            *visible_logs(current_user.id),
             models.GenerationLog.is_deleted == False,
             models.GenerationLog.status == "success"
         ).count()
@@ -77,6 +95,7 @@ async def get_collections(
             models.UserLike, models.GenerationLog.id == models.UserLike.log_id
         ).filter(
             models.UserLike.user_id == current_user.id,
+            *visible_logs(current_user.id),
             models.GenerationLog.is_deleted == False,
             models.GenerationLog.status == "success"
         ))
@@ -137,14 +156,14 @@ async def get_collections(
 
     # Count items and build list
     for col in collections:
-        count = db.query(models.CollectionItem).filter(models.CollectionItem.collection_id == col.id).count()
-        previews_items = db.query(models.CollectionItem).filter(
-            models.CollectionItem.collection_id == col.id
+        count = visible_items(db, col.id, current_user.id if current_user else None, col.is_public).count()
+        previews_items = visible_items(
+            db, col.id, current_user.id if current_user else None, col.is_public
         ).order_by(models.CollectionItem.created_at.desc()).limit(3).all()
         
         previews = []
         for i in previews_items:
-            item_data = resolve_item_urls(i, col.is_public, db)
+            item_data = resolve_item_urls(i, col.is_public, db, current_user.id if current_user else None)
             previews.append({"id": i.id, "data": item_data})
         
         results.append({
@@ -253,6 +272,7 @@ async def get_collection_items(
                 models.UserLike, models.GenerationLog.id == models.UserLike.log_id
             ).filter(
                 models.UserLike.user_id == target_id,
+                *visible_logs(current_user.id),
                 models.GenerationLog.is_deleted == False,
                 models.GenerationLog.status == "success"
             )
@@ -305,13 +325,7 @@ async def get_collection_items(
             raise HTTPException(status_code=403, detail="Permission denied")
             
     skip = (page - 1) * page_size
-    from sqlalchemy import or_
-    query = db.query(models.CollectionItem).join(
-        models.GenerationLog, models.CollectionItem.log_id == models.GenerationLog.id, isouter=True
-    ).filter(
-        models.CollectionItem.collection_id == collection_id,
-        or_(models.GenerationLog.is_deleted == False, models.CollectionItem.log_id.is_(None))
-    )
+    query = visible_items(db, collection_id, current_user.id, col.is_public)
  
     if name:
         safe_name = name.replace("%", "\\%").replace("_", "\\_")
@@ -324,7 +338,7 @@ async def get_collection_items(
 
     processed_items = []
     for item in items:
-        item_data = resolve_item_urls(item, col.is_public, db)
+        item_data = resolve_item_urls(item, col.is_public, db, current_user.id)
         item_name = "Untitled"
         item_type = item.type # Fallback
         if item.log_id:
@@ -371,22 +385,24 @@ async def add_item_to_collection(item: schemas.CollectionItemCreate, db: Session
     if item_count >= 200:
         raise HTTPException(status_code=400, detail="Collection item limit reached (200 items)")
 
-    if item.log_id:
-        log = db.query(models.GenerationLog).filter(models.GenerationLog.id == item.log_id).first()
-        if log:
-            # Permission check: must be owner or public
-            if log.user_id != current_user.id and not log.is_public:
-                raise HTTPException(status_code=403, detail="Permission denied")
-            if col.is_public and not log.is_public:
-                raise HTTPException(status_code=400, detail="Private images cannot be added to public collections")
-            if not log.name:
-                log.name = item.name
+    if not item.log_id:
+        raise HTTPException(status_code=400, detail="A valid skin log_id is required")
+    log = db.query(models.GenerationLog).filter(
+        models.GenerationLog.id == item.log_id,
+        *visible_logs(current_user.id),
+    ).first()
+    if not log:
+        raise HTTPException(status_code=403, detail="Skin not found or permission denied")
+    if col.is_public and not log.is_public:
+        raise HTTPException(status_code=400, detail="Private images cannot be added to public collections")
+    if log.user_id == current_user.id and not log.name:
+        log.name = item.name
 
     new_item = models.CollectionItem(
         collection_id=item.collection_id,
         type=item.type,
         log_id=item.log_id,
-        data=item.data
+        data={"id": log.id}
     )
     db.add(new_item)
     db.commit()
@@ -397,7 +413,7 @@ async def add_item_to_collection(item: schemas.CollectionItemCreate, db: Session
         "name": item.name[:100] if item.name else "Untitled",
         "type": new_item.type,
         "log_id": new_item.log_id,
-        "data": new_item.data
+        "data": resolve_item_urls(new_item, col.is_public, db, current_user.id)
     }
 
 @router.delete("/collections/items/{id}")
@@ -669,6 +685,10 @@ async def get_log_public_collections(
     current_user: Optional[models.User] = Depends(auth.get_current_user_optional)
 ):
     """Get all public collections containing the specified log"""
+    if not db.query(models.GenerationLog).filter(
+        models.GenerationLog.id == log_id, *visible_logs(public_only=True)
+    ).first():
+        raise HTTPException(status_code=404, detail="Skin not found")
     skip = (page - 1) * page_size
     query = db.query(models.Collection).join(
         models.CollectionItem, models.Collection.id == models.CollectionItem.collection_id
@@ -681,15 +701,15 @@ async def get_log_public_collections(
     
     results = []
     for col in collections:
-        count = db.query(models.CollectionItem).filter(models.CollectionItem.collection_id == col.id).count()
+        count = visible_items(db, col.id, current_user.id if current_user else None, col.is_public).count()
         user = db.query(models.User).filter(models.User.id == col.user_id).first()
-        previews_items = db.query(models.CollectionItem).filter(
-            models.CollectionItem.collection_id == col.id
+        previews_items = visible_items(
+            db, col.id, current_user.id if current_user else None, col.is_public
         ).order_by(models.CollectionItem.created_at.desc()).limit(3).all()
         
         previews = []
         for i in previews_items:
-            item_data = resolve_item_urls(i, col.is_public, db)
+            item_data = resolve_item_urls(i, col.is_public, db, current_user.id if current_user else None)
             previews.append({"id": i.id, "data": item_data})
         
         results.append({
@@ -757,14 +777,14 @@ async def get_user_public_collections(
     results = []
         
     for col in collections:
-        count = db.query(models.CollectionItem).filter(models.CollectionItem.collection_id == col.id).count()
-        previews_items = db.query(models.CollectionItem).filter(
-            models.CollectionItem.collection_id == col.id
+        count = visible_items(db, col.id, current_user.id if current_user else None, col.is_public).count()
+        previews_items = visible_items(
+            db, col.id, current_user.id if current_user else None, col.is_public
         ).order_by(models.CollectionItem.created_at.desc()).limit(3).all()
         
         previews = []
         for i in previews_items:
-            item_data = resolve_item_urls(i, col.is_public, db)
+            item_data = resolve_item_urls(i, col.is_public, db, current_user.id if current_user else None)
             previews.append({"id": i.id, "data": item_data})
         
         results.append({

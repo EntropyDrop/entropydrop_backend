@@ -36,7 +36,7 @@ def _validate_session_request_origin(request: Request) -> None:
 
 
 @router.post("/api/auth/google", response_model=schemas.TokenResponse)
-async def google_login(
+def google_login(
     req: schemas.GoogleAuthRequest,
     request: Request,
     response: Response,
@@ -110,7 +110,7 @@ async def google_login(
 
 
 @router.post("/api/auth/refresh", response_model=schemas.AccessTokenResponse)
-async def refresh_login_session(
+def refresh_login_session(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
@@ -136,7 +136,7 @@ async def refresh_login_session(
 
 
 @router.post("/api/auth/logout")
-async def logout_session(
+def logout_session(
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
@@ -150,7 +150,7 @@ async def logout_session(
     return {"status": "ok"}
 
 @router.get("/api/users/me", response_model=schemas.UserResponse)
-async def get_my_profile(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+def get_my_profile(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     user_res = {
         "id": current_user.id,
         "email": current_user.email,
@@ -174,7 +174,7 @@ async def get_my_profile(db: Session = Depends(get_db), current_user: models.Use
     return user_res
 
 @router.post("/api/users/agree_terms", response_model=schemas.UserResponse)
-async def agree_terms(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+def agree_terms(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     current_user.terms_agreed = True
     db.commit()
     db.refresh(current_user)
@@ -200,7 +200,7 @@ async def agree_terms(db: Session = Depends(get_db), current_user: models.User =
     }
 
 @router.post("/api/users/me/cancel_subscription")
-async def cancel_subscription(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+def cancel_subscription(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     from payment_utils import cancel_paypal_subscription_api
     
     sub_id = current_user.paypal_subscription_id
@@ -218,7 +218,7 @@ async def cancel_subscription(db: Session = Depends(get_db), current_user: model
         raise HTTPException(status_code=500, detail="Failed to cancel subscription with PayPal")
 
 @router.post("/api/users/me/username", response_model=schemas.UserResponse)
-async def update_username(
+def update_username(
     req: schemas.UpdateUsernameRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -248,7 +248,7 @@ async def update_username(
     }
 
 @router.post("/api/users/me/minecraft_skin", response_model=schemas.UserResponse)
-async def update_minecraft_skin(
+def update_minecraft_skin(
     req: schemas.UpdateMinecraftSkinRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -320,7 +320,7 @@ async def update_minecraft_skin(
     }
 
 @router.get("/api/users/me/credits/history")
-async def get_my_credit_history(
+def get_my_credit_history(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),

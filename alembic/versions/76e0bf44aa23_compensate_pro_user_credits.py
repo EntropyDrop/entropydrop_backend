@@ -23,7 +23,7 @@ def upgrade() -> None:
     from sqlalchemy import func
     import datetime
     from datetime import timezone, timedelta
-    import models
+    import migration_reward_snapshot as models
     
     bind = op.get_bind()
     db = Session(bind=bind)

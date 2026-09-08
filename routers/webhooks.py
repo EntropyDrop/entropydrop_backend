@@ -5,6 +5,8 @@ import models
 import datetime
 from config import settings
 from rate_limit import limiter
+from starlette.concurrency import run_in_threadpool
+import json
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 
@@ -19,12 +21,12 @@ def _paypal_plan_to_pro_level(plan_id: str):
 @router.post("/paypal")
 @limiter.exempt
 async def paypal_webhook(request: Request, db: Session = Depends(get_db)):
-    from payment_utils import verify_paypal_webhook_signature
-    
-    # 1. Get raw body and headers
     body = await request.body()
-    headers = dict(request.headers)
-    
+    return await run_in_threadpool(_process_paypal_webhook, body, dict(request.headers), db)
+
+
+def _process_paypal_webhook(body, headers, db):
+    from payment_utils import verify_paypal_webhook_signature
     # 2. Verify Webhook Signature
     if not settings.PAYPAL_WEBHOOK_ID:
         raise HTTPException(status_code=400, detail="PayPal webhook ID is not configured")
@@ -33,20 +35,20 @@ async def paypal_webhook(request: Request, db: Session = Depends(get_db)):
     if not is_valid:
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
         
-    payload = await request.json()
+    payload = json.loads(body)
     event_type = payload.get("event_type")
     resource = payload.get("resource", {})
     
     if event_type == "BILLING.SUBSCRIPTION.ACTIVATED":
         sub_id = resource.get("id")
-        user = db.query(models.User).filter(models.User.paypal_subscription_id == sub_id).first()
+        user = db.query(models.User).filter(models.User.paypal_subscription_id == sub_id).with_for_update().populate_existing().first()
         if user:
             user.paypal_subscription_status = "ACTIVE"
             db.commit()
             
     elif event_type == "BILLING.SUBSCRIPTION.CANCELLED":
         sub_id = resource.get("id")
-        user = db.query(models.User).filter(models.User.paypal_subscription_id == sub_id).first()
+        user = db.query(models.User).filter(models.User.paypal_subscription_id == sub_id).with_for_update().populate_existing().first()
         if user:
             user.paypal_subscription_status = "CANCELLED"
             db.commit()
@@ -63,7 +65,7 @@ async def paypal_webhook(request: Request, db: Session = Depends(get_db)):
         except ValueError:
             return {"status": "failed"}
 
-        user = db.query(models.User).filter(models.User.paypal_subscription_id == sub_id).first()
+        user = db.query(models.User).filter(models.User.paypal_subscription_id == sub_id).with_for_update().populate_existing().first()
         if not user:
             return {"status": "failed"}
 
@@ -79,12 +81,9 @@ async def paypal_webhook(request: Request, db: Session = Depends(get_db)):
                 print(f"Unknown plan ID: {actual_plan_id}")
                 return {"status": "failed"}
                 
-            next_billing_str = sub_data.get("billing_info", {}).get("next_billing_time")
-            if next_billing_str:
-                dt = datetime.datetime.fromisoformat(next_billing_str.replace("Z", "+00:00"))
-                user.pro_expires_at = dt + datetime.timedelta(days=3)
-            else:
-                raise ValueError("No next_billing_time found")
+            from subscription_billing import paid_cycle
+            paid_at, expires_at = paid_cycle(sub_data)
+            user.pro_expires_at = expires_at
         except Exception as e:
             raise HTTPException(status_code=400, detail="Failed to validate subscription payment")
             
@@ -123,7 +122,7 @@ async def paypal_webhook(request: Request, db: Session = Depends(get_db)):
             
             # Award monthly credits immediately
             import backend_utils
-            backend_utils.award_subscription_credits(db, user, pro_level, sub_id, is_webhook=True)
+            backend_utils.award_subscription_credits(db, user, pro_level, sub_id, is_webhook=True, paid_at=paid_at)
         
         db.commit()
         print(f"Granted 31 days to user {user.id} and recorded order for sale {sale_id}")

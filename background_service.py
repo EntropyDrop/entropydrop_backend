@@ -63,7 +63,10 @@ async def keep_lock_renewed(redis_conn: Redis, token: str) -> None:
 async def run_background_tasks() -> None:
     await order.repair_unhandled_orders()
 
+    from skin_withdrawal import start_withdrawal_job
     tasks = [
+        asyncio.create_task(start_withdrawal_job(), name="skin-withdrawal-job"),
+        asyncio.create_task(order.start_order_reconciliation_job(), name="order-reconciliation-job"),
         asyncio.create_task(generate.start_discovery_cache_job(), name="discovery-cache-job"),
         asyncio.create_task(generate.start_result_listener(), name="generate-result-listener"),
         asyncio.create_task(generate.start_pending_recovery_job(), name="pending-recovery-job"),

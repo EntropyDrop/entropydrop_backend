@@ -343,7 +343,7 @@ async def get_unfinished_logs(
 
 @router.delete("/logs/{id}")
 @limiter.exempt
-async def admin_delete_log(
+def admin_delete_log(
     id: str,
     background_tasks: BackgroundTasks,
     admin: User = Depends(get_current_admin),
@@ -354,52 +354,17 @@ async def admin_delete_log(
     if not log:
         raise HTTPException(status_code=404, detail="Log not found")
         
-    # 1. Collect S3 files that need cleaning
-    files_to_delete = []
-    if log.source:
-        files_to_delete.append((log.source, log.is_public))
-    if log.result:
-        files_to_delete.append((log.result, log.is_public))
-    if log.edited_result:
-        files_to_delete.append((log.edited_result, log.is_public))
-    if log.image_to_skin_edited_result:
-        files_to_delete.append(
-            (log.image_to_skin_edited_result, log.is_public)
-        )
-
-    # 2. Trigger background cleaning task
-    from routers.generate import cancel_generation_jobs, delete_s3_files_task
+    from routers.generate import cancel_generation_jobs
+    from skin_withdrawal import begin, resume
+    begin(db, log)
     cancel_generation_jobs(log.id)
-    if files_to_delete:
-        background_tasks.add_task(delete_s3_files_task, files_to_delete)
-
-    # 3. Clean database attributes (soft delete)
-    log.is_deleted = True
-    log.prompt = None
-    log.name = "Deleted"
-    log.source = None
-    log.result = None
-    log.edited_result = None
-    log.image_to_skin_edited_result = None
-    log.status = "deleted"
-
-    # 4. Delete associated collection items
-    db.query(CollectionItem).filter(CollectionItem.log_id == id).delete()
-    
-    # 5. Delete associated likes
-    db.query(UserLike).filter(UserLike.log_id == id).delete()
-    
-    # 6. Delete associated feedback
-    db.query(UserFeedback).filter(UserFeedback.log_id == id).delete()
-    
-    db.commit()
-    
-    return {"message": f"Creation {id} soft-deleted, properties cleared, and files queued for S3 deletion by admin"}
+    resume(db, log)
+    return {"message": f"Creation {id} deleted and public files withdrawn by admin"}
 
 
 @router.delete("/failed-tasks")
 @limiter.exempt
-async def admin_delete_all_failed_tasks(
+def admin_delete_all_failed_tasks(
     background_tasks: BackgroundTasks,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
@@ -413,59 +378,23 @@ async def admin_delete_all_failed_tasks(
     if not failed_logs:
         return {"message": "No failed tasks to delete", "deleted_count": 0}
         
-    from routers.generate import cancel_generation_jobs, delete_s3_files_task
-    
-    files_to_delete = []
-    log_ids = []
-    
+    from routers.generate import cancel_generation_jobs
+    from skin_withdrawal import begin, resume
+    count = 0
     for log in failed_logs:
-        log_ids.append(log.id)
-        # Collect S3 files that need cleaning
-        if log.source:
-            files_to_delete.append((log.source, log.is_public))
-        if log.result:
-            files_to_delete.append((log.result, log.is_public))
-        if log.edited_result:
-            files_to_delete.append((log.edited_result, log.is_public))
-        if log.image_to_skin_edited_result:
-            files_to_delete.append((log.image_to_skin_edited_result, log.is_public))
-            
-        # Cancel generation jobs
+        begin(db, log)
         cancel_generation_jobs(log.id)
-        
-        # Clean database attributes (soft delete)
-        log.is_deleted = True
-        log.prompt = None
-        log.name = "Deleted"
-        log.source = None
-        log.result = None
-        log.edited_result = None
-        log.image_to_skin_edited_result = None
-        log.status = "deleted"
-        
-    if files_to_delete:
-        background_tasks.add_task(delete_s3_files_task, files_to_delete)
-        
-    # Delete associated relations in bulk
-    db.query(CollectionItem).filter(CollectionItem.log_id.in_(log_ids)).delete(synchronize_session=False)
-    db.query(UserLike).filter(UserLike.log_id.in_(log_ids)).delete(synchronize_session=False)
-    db.query(UserFeedback).filter(UserFeedback.log_id.in_(log_ids)).delete(synchronize_session=False)
-        
-    db.commit()
-    
-    return {
-        "message": f"Successfully soft-deleted {len(failed_logs)} failed tasks",
-        "deleted_count": len(failed_logs)
-    }
-
+        resume(db, log)
+        count += 1
+    return {"message": "Failed tasks deleted and public files withdrawn", "deleted_count": count}
 
 
 from pydantic import BaseModel
 
 
-
 class ModeMaintenanceToggleRequest(BaseModel):
     enabled: bool
+
 
 @router.get("/mode_status")
 @limiter.exempt
@@ -582,7 +511,7 @@ async def set_model_price_endpoint(
 
 @router.delete("/users/by-email")
 @limiter.exempt
-async def admin_delete_user_by_email(
+def admin_delete_user_by_email(
     email: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -601,23 +530,11 @@ async def admin_delete_user_by_email(
     log_ids = [log.id for log in logs]
     
     from routers.generate import cancel_generation_jobs
-    files_to_delete = []
+    from skin_withdrawal import begin, resume
     for log in logs:
+        begin(db, log)
         cancel_generation_jobs(log.id)
-        if log.source:
-            files_to_delete.append((log.source, log.is_public))
-        if log.result:
-            files_to_delete.append((log.result, log.is_public))
-        if log.edited_result:
-            files_to_delete.append((log.edited_result, log.is_public))
-        if log.image_to_skin_edited_result:
-            files_to_delete.append(
-                (log.image_to_skin_edited_result, log.is_public)
-            )
-
-    if files_to_delete:
-        from routers.generate import delete_s3_files_task
-        background_tasks.add_task(delete_s3_files_task, files_to_delete)
+        resume(db, log)
 
     # 2. Delete Collection Items and Collections
     collections = db.query(Collection).filter(Collection.user_id == user_id).all()

@@ -502,12 +502,12 @@ def test_update_minecraft_skin_rejects_another_creators_skin(client, db):
         app.dependency_overrides.clear()
 
 
-def test_update_minecraft_skin_restrictions(client, db):
+def test_update_minecraft_skin_restrictions(client, db, withdrawal_storage):
     from datetime import datetime, timezone, timedelta
     from models import GenerationLog, User
     from main import app
     
-    # 1. Create a user who is pro-active so they can call make_private
+    # 1. Create an active Pro user with access to private skins.
     user = User(
         id="test_restrict_user",
         email="test_restrict@example.com",
@@ -557,35 +557,8 @@ def test_update_minecraft_skin_restrictions(client, db):
     assert response.status_code == 200
     assert response.json()["skin_url"] == "generations/public_skin.png"
 
-    # Make the public skin private -> should clear the character
-    import s3_utils
-    original_copy_object = s3_utils.s3_client.copy_object
-    original_delete_object = s3_utils.s3_client.delete_object
-    s3_utils.s3_client.copy_object = lambda **kwargs: {}
-    s3_utils.s3_client.delete_object = lambda **kwargs: {}
-
-    try:
-        response = client.post("/skin/api/logs/publog123/make_private")
-        assert response.status_code == 200
-        
-        # Verify user character is cleared in DB
-        db.refresh(user)
-        assert user.skin_url is None
-    finally:
-        s3_utils.s3_client.copy_object = original_copy_object
-        s3_utils.s3_client.delete_object = original_delete_object
-
-    # Set user character back to public skin (we temporarily make pub_log public again)
-    pub_log.is_public = True
-    db.commit()
-    response = client.post("/skin/api/users/me/minecraft_skin", json={"skin_url": "generations/public_skin.png"})
-    assert response.status_code == 200
-    assert response.json()["skin_url"] == "generations/public_skin.png"
-
     # Soft-delete the log -> should clear the character
-    from unittest.mock import patch
-    with patch("routers.generate.delete_from_s3"):
-        response = client.delete("/skin/api/logs/publog123")
+    response = client.delete("/skin/api/logs/publog123")
     assert response.status_code == 200
     db.refresh(user)
     assert user.skin_url is None

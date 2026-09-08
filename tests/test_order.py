@@ -559,7 +559,7 @@ def test_activate_subscription_rejects_other_user_email(mock_get_subscription, m
         "status": "ACTIVE",
         "plan_id": "P-PLUS",
         "subscriber": {"email_address": "someone_else@example.com"},
-        "billing_info": {"next_billing_time": "2026-06-24T08:30:00Z"},
+        "billing_info": {"last_payment": {"time": "2026-05-25T00:00:00Z", "amount": {"value": "20.00", "currency_code": "USD"}}, "next_billing_time": "2026-06-24T08:30:00Z"},
     }
 
     response = client.post("/skin/api/orders/subscription/activate", json={"paypal_order_id": "SUB-2"})
@@ -576,7 +576,7 @@ def test_activate_subscription_accepts_matching_custom_id_with_different_paypal_
         "plan_id": "P-PLUS",
         "custom_id": "1",
         "subscriber": {"email_address": "paypal_buyer@example.com"},
-        "billing_info": {"next_billing_time": "2026-06-24T08:30:00Z"},
+        "billing_info": {"last_payment": {"time": "2026-05-25T00:00:00Z", "amount": {"value": "20.00", "currency_code": "USD"}}, "next_billing_time": "2026-06-24T08:30:00Z"},
     }
 
     response = client.post("/skin/api/orders/subscription/activate", json={"paypal_order_id": "SUB-CUSTOM"})
@@ -594,7 +594,7 @@ def test_activate_subscription_rejects_mismatched_custom_id(mock_get_subscriptio
         "plan_id": "P-PLUS",
         "custom_id": "OTHERUSER000000",
         "subscriber": {"email_address": "test_order@example.com"},
-        "billing_info": {"next_billing_time": "2026-06-24T08:30:00Z"},
+        "billing_info": {"last_payment": {"time": "2026-05-25T00:00:00Z", "amount": {"value": "20.00", "currency_code": "USD"}}, "next_billing_time": "2026-06-24T08:30:00Z"},
     }
 
     response = client.post("/skin/api/orders/subscription/activate", json={"paypal_order_id": "SUB-CUSTOM-BAD"})
@@ -610,7 +610,7 @@ def test_activate_subscription_success(mock_get_subscription, monkeypatch, clien
         "status": "ACTIVE",
         "plan_id": "P-PLUS",
         "subscriber": {"email_address": "test_order@example.com"},
-        "billing_info": {"next_billing_time": "2026-06-24T08:30:00Z"},
+        "billing_info": {"last_payment": {"time": "2026-05-25T00:00:00Z", "amount": {"value": "20.00", "currency_code": "USD"}}, "next_billing_time": "2026-06-24T08:30:00Z"},
     }
 
     response = client.post("/skin/api/orders/subscription/activate", json={"paypal_order_id": "SUB-3"})
@@ -628,7 +628,7 @@ def test_activate_subscription_deduplication(mock_get_subscription, monkeypatch,
         "status": "ACTIVE",
         "plan_id": "P-PLUS",
         "subscriber": {"email_address": "test_order@example.com"},
-        "billing_info": {"next_billing_time": "2026-06-24T08:30:00Z"},
+        "billing_info": {"last_payment": {"time": "2026-05-25T00:00:00Z", "amount": {"value": "20.00", "currency_code": "USD"}}, "next_billing_time": "2026-06-24T08:30:00Z"},
     }
 
     # 1. First activation
@@ -640,13 +640,13 @@ def test_activate_subscription_deduplication(mock_get_subscription, monkeypatch,
 
     # 2. Simulate webhook for the same subscription (should be skipped/deduplicated)
     import backend_utils
-    backend_utils.award_subscription_credits(db, user, "pro-plus", "SUB-3", is_webhook=True)
+    backend_utils.award_subscription_credits(db, user, "pro-plus", "SUB-3", is_webhook=True, paid_at=__import__("datetime").datetime(2026, 5, 25, tzinfo=__import__("datetime").timezone.utc))
     db.commit()
     db.refresh(user)
     assert user.credits == 80
 
     # 3. Simulate webhook for a different subscription (should be granted, e.g. resubscribed)
-    backend_utils.award_subscription_credits(db, user, "pro-plus", "SUB-DIFF", is_webhook=True)
+    backend_utils.award_subscription_credits(db, user, "pro-plus", "SUB-DIFF", is_webhook=True, paid_at=__import__("datetime").datetime(2026, 5, 25, tzinfo=__import__("datetime").timezone.utc))
     db.commit()
     db.refresh(user)
     assert user.credits == 160

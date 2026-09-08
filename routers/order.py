@@ -21,6 +21,7 @@ from payment_utils import (
     revise_paypal_subscription_api,
 )
 import backend_utils
+from order_inventory import lock_order, reserve_inventory, release_inventory, expire_inventory_holds
 
 PAYPAL_CURRENCY_CODE = "USD"
 
@@ -91,7 +92,7 @@ def _paypal_payload_is_completed(payload: dict) -> bool:
         return False
 
 
-def confirm_paypal_payment(order: models.Order, paypal_order_id: Optional[str]) -> dict:
+def confirm_paypal_payment(order: models.Order, paypal_order_id: Optional[str], *, verified_payload=None) -> dict:
     if not paypal_order_id:
         raise HTTPException(status_code=400, detail="PayPal order ID is required")
     _validate_paypal_id(paypal_order_id, "PayPal order ID")
@@ -100,7 +101,7 @@ def confirm_paypal_payment(order: models.Order, paypal_order_id: Optional[str]) 
     if paypal_order_id != order.paypal_order_id:
         raise HTTPException(status_code=400, detail="Payment voucher mismatch")
 
-    paypal_order = get_paypal_order_api(paypal_order_id)
+    paypal_order = verified_payload if verified_payload is not None else get_paypal_order_api(paypal_order_id)
     _validate_paypal_payload_for_order(order, paypal_order)
     status = paypal_order.get("status")
 
@@ -157,10 +158,21 @@ def clone_skin_for_order(log_entry, order_id, item_id):
 
 def presign_order_items(items):
     from s3_utils import generate_presigned_url_get
+    results = []
     for item in items:
-        if getattr(item, 'skin_url', None):
-            item.skin_url = generate_presigned_url_get(item.skin_url, bucket=settings.AWS_PRIVATE_BUCKET_NAME)
-    return items
+        data = schemas.OrderItemResponse.model_validate(item)
+        if data.skin_url:
+            data.skin_url = generate_presigned_url_get(data.skin_url, bucket=settings.AWS_PRIVATE_BUCKET_NAME)
+        results.append(data)
+    return results
+
+
+def order_response(db, order):
+    data = schemas.OrderResponse.model_validate(order)
+    data.address = schemas.ShippingAddressResponse.model_validate(order.address_snapshot) if order.address_snapshot else None
+    data.items = presign_order_items(db.query(models.OrderItem).filter_by(order_id=order.id).all())
+    return data
+
 
 def _activate_order_benefits(order, db: Session, current_user):
     if order.order_type == "subscription":
@@ -191,46 +203,90 @@ def _activate_order_benefits(order, db: Session, current_user):
     elif order.order_type == "print":
         order.goods_status = "preparing"
 
-async def repair_unhandled_orders(db: Optional[Session] = None):
-    """Automatically check for unhandled PayPal orders from the last 3 days on startup"""
-    from database import SessionLocal
-    should_close = False
-    if db is None:
-        db = SessionLocal()
-        should_close = True
-        
+def complete_order_payment(db, order, paypal_order_id):
+    """The caller holds the order lock. Repeated confirmation is a no-op."""
+    if not paypal_order_id or paypal_order_id != order.paypal_order_id:
+        raise HTTPException(status_code=400, detail="Payment voucher mismatch")
+    _validate_paypal_id(paypal_order_id)
+    if order.status in ("paid", "shipping", "completed"):
+        return order
+    if order.status != "pending_payment":
+        raise HTTPException(status_code=400, detail="Order is not in pending payment status")
+
+    payload = get_paypal_order_api(paypal_order_id)
+    _validate_paypal_payload_for_order(order, payload)
+    if payload.get("status") not in ("APPROVED", "COMPLETED"):
+        raise HTTPException(status_code=400, detail="PayPal payment is not approved")
+    backordered = False
     try:
-        # Expand time range to 3 days to avoid missing orders after long downtime
-        three_days_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=3)
-        stuck_orders = db.query(models.Order).filter(
-            models.Order.status == "pending_payment",
-            models.Order.paypal_order_id.isnot(None),
-            models.Order.created_at >= three_days_ago
-        ).all()
+        reserve_inventory(db, order)
+    except HTTPException as exc:
+        if payload.get("status") != "COMPLETED" or exc.status_code != 409:
+            raise
+        # Historical captures may predate holds. Record the received payment
+        # for fulfillment review without making stock negative or charging again.
+        backordered = True
 
-        for order in stuck_orders:
+    order.capture_started = True
+    order.inventory_reserved_until = None
+    order_id = order.id
+    db.commit()  # Survives a timeout/crash after PayPal actually captures.
+    order = lock_order(db, order_id)
+    if order.status in ("paid", "shipping", "completed"):
+        return order
+    confirm_paypal_payment(order, paypal_order_id, verified_payload=payload)
+    order.status = "paid"
+    order.paid_at = datetime.datetime.now(timezone.utc)
+    user = db.query(models.User).filter_by(id=order.user_id).with_for_update().first()
+    _activate_order_benefits(order, db, user)
+    if backordered:
+        order.goods_status = "awaiting_stock"
+    order.inventory_reserved = False  # Hold is consumed, never released.
+    db.commit()
+    return order
+
+
+def _repair_unhandled_orders(db=None):
+    from database import SessionLocal
+    should_close = db is None
+    db = db if db is not None else SessionLocal()
+    try:
+        expire_inventory_holds(db)
+        from sqlalchemy import or_
+        cutoff = datetime.datetime.now(timezone.utc) - datetime.timedelta(days=3)
+        ids = [row.id for row in db.query(models.Order.id).filter(
+            models.Order.status == "pending_payment", models.Order.paypal_order_id.isnot(None),
+            or_(models.Order.capture_started == True, models.Order.created_at >= cutoff),
+        )]
+        db.commit()
+        for order_id in ids:
             try:
-                confirm_paypal_payment(order, order.paypal_order_id)
-                order.status = "paid"
-                order.paid_at = datetime.datetime.now(datetime.timezone.utc)
-
-                user = db.query(models.User).filter(models.User.id == order.user_id).first()
-                if not user:
-                    raise ValueError(f"User {order.user_id} not found")
-                _activate_order_benefits(order, db, user)
-                db.commit()
-                print(f"Auto-repaired order {order.id} to paid status.")
-            except Exception as e:
+                order = lock_order(db, order_id)
+                complete_order_payment(db, order, order.paypal_order_id)
+            except Exception as exc:
                 db.rollback()
-                print(f"Failed to auto-repair order {order.id}: {e}")
+                print(f"Payment reconciliation pending for {order_id}: {exc}")
     finally:
         if should_close:
             db.close()
 
+
+async def repair_unhandled_orders(db=None):
+    import asyncio
+    await asyncio.to_thread(_repair_unhandled_orders, db)
+
+
+async def start_order_reconciliation_job():
+    import asyncio
+    while True:
+        await asyncio.sleep(60)
+        await repair_unhandled_orders()
+
+
 router = APIRouter(prefix="/api/orders", tags=["order"])
 
 @router.get("", response_model=schemas.PaginatedOrders)
-async def get_orders(
+def get_orders(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -244,14 +300,10 @@ async def get_orders(
     total = query.count()
     orders = query.offset((page - 1) * page_size).limit(page_size).all()
     
-    for o in orders:
-        o.address = db.query(models.ShippingAddress).filter(models.ShippingAddress.id == o.address_id).first()
-        o.items = presign_order_items(db.query(models.OrderItem).filter(models.OrderItem.order_id == o.id).all())
-    
-    return backend_utils.paginate_response(orders, total, page, page_size)
+    return backend_utils.paginate_response([order_response(db, o) for o in orders], total, page, page_size)
 
 @router.get("/model-stock")
-async def get_model_stock(order_type: Optional[str] = None, db: Session = Depends(get_db)):
+def get_model_stock(order_type: Optional[str] = None, db: Session = Depends(get_db)):
     """Get model stock status"""
     query = db.query(models.ModelSalesLimit)
     if order_type:
@@ -269,7 +321,7 @@ async def get_model_stock(order_type: Optional[str] = None, db: Session = Depend
 
 @router.post("", response_model=schemas.OrderResponse)
 
-async def create_order(
+def create_order(
     req: schemas.OrderCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -365,8 +417,9 @@ async def create_order(
             models.Order.user_id == current_user.id,
             models.Order.address_id == req.address_id,
             models.Order.status == "pending_payment",
-            models.Order.order_type == "print"
-        ).first()
+            models.Order.order_type == "print",
+            models.Order.capture_started == False,
+        ).with_for_update().populate_existing().first()
 
         if existing_order:
             current_count = db.query(models.OrderItem).filter(models.OrderItem.order_id == existing_order.id).count()
@@ -379,6 +432,8 @@ async def create_order(
 
         if existing_order:
             order = existing_order
+            release_inventory(db, order)
+            order.address_snapshot = schemas.ShippingAddressResponse.model_validate(address).model_dump(mode="json")
             order.price += added_price
             order.total_price += added_price
             order.paypal_order_id = None
@@ -386,6 +441,7 @@ async def create_order(
             order = models.Order(
                 user_id=current_user.id,
                 address_id=req.address_id,
+                address_snapshot=schemas.ShippingAddressResponse.model_validate(address).model_dump(mode="json"),
                 order_type="print",
                 status="pending_payment", 
                 price=added_price,
@@ -421,37 +477,28 @@ async def create_order(
     
     db.commit()
     db.refresh(order)
-    order.items = presign_order_items([item]) 
-    return order
+    return order_response(db, order)
 
 @router.get("/{id}", response_model=schemas.OrderResponse)
-async def get_order(
+def get_order(
     id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """Get order details"""
-    order = db.query(models.Order).filter(
-        models.Order.id == id,
-        models.Order.user_id == current_user.id
-    ).first()
+    order = lock_order(db, id, current_user.id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    order.address = db.query(models.ShippingAddress).filter(models.ShippingAddress.id == order.address_id).first()
-    order.items = presign_order_items(db.query(models.OrderItem).filter(models.OrderItem.order_id == id).all())
-    return order
+    return order_response(db, order)
 
 @router.put("/{id}/cancel", response_model=schemas.OrderResponse)
-async def cancel_order(
+def cancel_order(
     id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """Cancel order"""
-    order = db.query(models.Order).filter(
-        models.Order.id == id,
-        models.Order.user_id == current_user.id
-    ).first()
+    order = lock_order(db, id, current_user.id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
@@ -461,22 +508,20 @@ async def cancel_order(
     if order.status not in ["pending_payment"]:
          raise HTTPException(status_code=400, detail="Current order status cannot be cancelled")
 
+    release_inventory(db, order)
     order.status = "cancelled"
     db.commit()
     db.refresh(order)
     return order
 
 @router.delete("/{id}")
-async def delete_order(
+def delete_order(
     id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """Delete cancelled order and S3 data"""
-    order = db.query(models.Order).filter(
-        models.Order.id == id,
-        models.Order.user_id == current_user.id
-    ).first()
+    order = lock_order(db, id, current_user.id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
@@ -505,53 +550,29 @@ async def delete_order(
     return {"status": "success", "message": f"Order deleted"}
 
 @router.post("/{id}/pay", response_model=schemas.OrderResponse)
-async def pay_order(
+def pay_order(
     id: str,
     req: schemas.PayRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """Confirm PayPal payment for an order."""
-    order = db.query(models.Order).filter(
-        models.Order.id == id,
-        models.Order.user_id == current_user.id
-    ).first()
+    order = lock_order(db, id, current_user.id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    if order.status != "pending_payment":
-         raise HTTPException(status_code=400, detail="Order is not in pending payment status")
-
     try:
-        confirm_paypal_payment(order, req.paypal_order_id)
+        order = complete_order_payment(db, order, req.paypal_order_id)
     except HTTPException:
+        db.rollback()
         raise
-    except Exception as e:
-        print(f"Error processing PayPal order: {e}")
-        raise HTTPException(status_code=500, detail="Payment confirmation failed")
-
-    order.status = "paid"
-    order.paid_at = datetime.datetime.now(datetime.timezone.utc)
-    _activate_order_benefits(order, db, current_user)
-    
-    # Deduct model static stock
-    if order.order_type == "print":
-        items = db.query(models.OrderItem).filter(models.OrderItem.order_id == id).all()
-        for it in items:
-            limit_cfg = db.query(models.ModelSalesLimit).filter(
-                models.ModelSalesLimit.model_type == it.model_type
-            ).first()
-            if limit_cfg:
-                limit_cfg.stock -= 1
-
-    db.commit()
-
-    db.refresh(order)
-    order.items = presign_order_items(db.query(models.OrderItem).filter(models.OrderItem.order_id == id).all())
-    return order
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Payment confirmation pending; retry without creating another order")
+    return order_response(db, order)
 
 @router.delete("/items/{item_id}")
-async def delete_order_item(
+def delete_order_item(
     item_id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -561,13 +582,15 @@ async def delete_order_item(
     if not item:
          raise HTTPException(status_code=404, detail="Order item not found")
          
-    order = db.query(models.Order).filter(models.Order.id == item.order_id, models.Order.user_id == current_user.id).first()
+    order = lock_order(db, item.order_id, current_user.id)
     if not order:
          raise HTTPException(status_code=404, detail="Order not found or unauthorized access")
          
     if order.status != "pending_payment":
          raise HTTPException(status_code=400, detail="Items can only be deleted from pending payment orders")
          
+    release_inventory(db, order)
+
     # Deduct amount, clamped to zero
     order.price = max(0.0, order.price - item.price)
     order.total_price = max(0.0, order.total_price - item.price)
@@ -594,22 +617,25 @@ async def delete_order_item(
     return {"status": "success", "message": "Item deleted"}
 
 @router.post("/{id}/create-paypal-order")
-async def create_paypal_order(
+def create_paypal_order(
     id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """Create PayPal order"""
-    order = db.query(models.Order).filter(
-        models.Order.id == id,
-        models.Order.user_id == current_user.id
-    ).first()
+    order = lock_order(db, id, current_user.id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     
     if order.status != "pending_payment":
         raise HTTPException(status_code=400, detail="Order is not in pending payment status")
         
+    if order.capture_started:
+        raise HTTPException(status_code=409, detail="Payment confirmation is pending")
+    reserve_inventory(db, order)
+    if order.paypal_order_id:
+        db.commit()
+        return {"id": order.paypal_order_id}
     try:
         # Pass order.id for bidirectional binding
         paypal_order = create_paypal_order_api(order.total_price, order.id)
@@ -623,7 +649,7 @@ async def create_paypal_order(
 
 
 @router.get("/paypal/config")
-async def get_paypal_config():
+def get_paypal_config():
     """Get PayPal Client ID and Plan IDs"""
     return {
         "client_id": settings.PAYPAL_CLIENT_ID,
@@ -632,7 +658,7 @@ async def get_paypal_config():
     }
 
 @router.post("/subscription/create")
-async def create_subscription(
+def create_subscription(
     req: schemas.SubscriptionCreateRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -675,7 +701,7 @@ async def create_subscription(
 
 
 @router.post("/subscription/activate")
-async def activate_subscription(
+def activate_subscription(
     req: schemas.PayRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -684,6 +710,7 @@ async def activate_subscription(
     if not req.paypal_order_id:
         raise HTTPException(status_code=400, detail="Subscription ID required")
 
+    current_user = db.query(models.User).filter_by(id=current_user.id).with_for_update().populate_existing().one()
     sub_id = req.paypal_order_id # We reuse paypal_order_id field for subscription ID in PayRequest
     _validate_paypal_id(sub_id, "Subscription ID")
     
@@ -720,23 +747,21 @@ async def activate_subscription(
         current_user.paypal_subscription_id = sub_id
         current_user.paypal_subscription_status = "ACTIVE"
 
-        billing_info = sub_data.get("billing_info", {})
-        next_billing_time_str = billing_info.get("next_billing_time")
-        if next_billing_time_str:
-            # Add a 3 day grace period to the exact next billing cycle.
-            dt = datetime.datetime.fromisoformat(next_billing_time_str.replace("Z", "+00:00"))
-            current_user.pro_expires_at = dt + datetime.timedelta(days=3)
-        else:
-            now = datetime.datetime.now(datetime.timezone.utc)
-            if not current_user.pro_expires_at or current_user.pro_expires_at < now:
-                current_user.pro_expires_at = now + datetime.timedelta(days=31)
-            else:
-                current_user.pro_expires_at = current_user.pro_expires_at + datetime.timedelta(days=31)
+        from subscription_billing import paid_cycle
+        try:
+            paid_at, expires_at = paid_cycle(sub_data)
+        except HTTPException:
+            # ACTIVE can precede PayPal's first successful payment. Preserve
+            # the verified owner binding so its later webhook can find the
+            # account, without awarding credits or extending Pro yet.
+            db.commit()
+            raise
+        current_user.pro_expires_at = expires_at
 
         current_user.pro_level = pro_level
         
         # Award monthly credits immediately
-        backend_utils.award_subscription_credits(db, current_user, pro_level, sub_id, is_webhook=False)
+        backend_utils.award_subscription_credits(db, current_user, pro_level, sub_id, is_webhook=False, paid_at=paid_at)
                  
         db.commit()
         db.refresh(current_user)

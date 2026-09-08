@@ -19,22 +19,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    from sqlalchemy.orm import Session
-    import models
-
-    bind = op.get_bind()
-    db = Session(bind=bind)
-
-    try:
-        updated = db.query(models.GenerationLog).filter(
-            models.GenerationLog.status == "processing",
-            models.GenerationLog.provider_submission_state == "unknown"
-        ).update({"status": "failed"}, synchronize_session=False)
-        db.commit()
-        print(f"[*] Set {updated} processing generation log(s) with unknown provider_submission_state to failed.")
-    except Exception as e:
-        db.rollback()
-        raise e
+    logs = sa.table("generation_logs", sa.column("status"), sa.column("provider_submission_state"))
+    op.get_bind().execute(logs.update().where(
+        logs.c.status == "processing", logs.c.provider_submission_state == "unknown"
+    ).values(status="failed"))
 
 
 def downgrade() -> None:

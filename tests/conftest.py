@@ -64,6 +64,20 @@ engine = create_engine(
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+@pytest.fixture
+def withdrawal_storage(monkeypatch):
+    """Storage boundary for explicit withdrawal tests; never access real AWS."""
+    import skin_withdrawal
+    storage = MagicMock()
+    cdn = MagicMock()
+    cdn.create_invalidation.return_value = {"Invalidation": {"Id": "invalidation-test"}}
+    cdn.get_invalidation.return_value = {"Invalidation": {"Status": "Completed"}}
+    monkeypatch.setattr(skin_withdrawal, "s3_client", storage)
+    monkeypatch.setattr(skin_withdrawal, "cloudfront_client", lambda: cdn)
+    monkeypatch.setattr(skin_withdrawal.settings, "AWS_CDN_DOMAIN", "cdn.example.test")
+    monkeypatch.setattr(skin_withdrawal.settings, "AWS_CLOUDFRONT_DISTRIBUTION_ID", "distribution-test")
+    return storage, cdn
+
 @pytest.fixture(scope="function")
 def db():
     # Create tables before each test

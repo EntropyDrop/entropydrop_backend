@@ -27,7 +27,7 @@ class CreditCaptureRequest(BaseModel):
 
 
 @router.get("/packages")
-async def get_credit_packages():
+def get_credit_packages():
     """Return reference credit packages for the frontend."""
     return [
         {"dollars": 1, "credits": 10},
@@ -38,7 +38,7 @@ async def get_credit_packages():
 
 
 @router.post("/purchase")
-async def purchase_credits(
+def purchase_credits(
     req: CreditPurchaseRequest,
     current_user: models.User = Depends(auth.get_current_user),
 ):
@@ -78,7 +78,7 @@ async def purchase_credits(
 
 
 @router.post("/capture")
-async def capture_credits(
+def capture_credits(
     req: CreditCaptureRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),

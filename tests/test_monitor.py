@@ -5,6 +5,8 @@ from main import app
 from auth import get_current_admin
 import models
 
+pytestmark = pytest.mark.usefixtures("withdrawal_storage")
+
 
 def test_monitor_stats_includes_seven_day_active_users(client, db):
     admin_user = models.User(
@@ -245,6 +247,7 @@ def test_delete_log_admin_success(
     mock_cancel_jobs,
     client,
     db,
+    withdrawal_storage,
 ):
     # 1. Create mock admin user
     admin_user = models.User(
@@ -302,7 +305,7 @@ def test_delete_log_admin_success(
     # 6. Execute delete request
     response = client.delete(f"/skin/api/monitor/logs/{log.id}")
     assert response.status_code == 200
-    assert "soft-deleted" in response.json()["message"]
+    assert "withdrawn" in response.json()["message"]
 
     # 7. Verify soft deletion & cleared attributes in DB
     db.refresh(log)
@@ -314,13 +317,10 @@ def test_delete_log_admin_success(
     assert log.result is None
     mock_cancel_jobs.assert_called_once_with(log.id)
 
-    # 8. Verify S3 cleanup background task was scheduled
-    mock_add_task.assert_called_once()
-    args = mock_add_task.call_args[0]
-    assert args[0].__name__ == "delete_s3_files_task"
-    files_list = args[1]
-    assert ("uploads/source.png", True) in files_list
-    assert ("generations/result.png", True) in files_list
+    mock_add_task.assert_not_called()
+    storage, cdn = withdrawal_storage
+    assert storage.delete_object.call_count == 2
+    assert cdn.create_invalidation.call_count == 1
 
     # 9. Verify relations are deleted
     assert db.query(models.CollectionItem).filter(models.CollectionItem.log_id == log.id).count() == 0
@@ -343,6 +343,7 @@ def test_delete_all_failed_tasks_admin_success(
     mock_cancel_jobs,
     client,
     db,
+    withdrawal_storage,
 ):
     # 1. Create mock admin user
     admin_user = models.User(
@@ -452,17 +453,11 @@ def test_delete_all_failed_tasks_admin_success(
     # Verify cancel jobs was called for log1 and log2
     assert mock_cancel_jobs.call_count == 2
 
-    # 8. Verify S3 cleanup background task was scheduled
-    mock_add_task.assert_called_once()
-    args = mock_add_task.call_args[0]
-    assert args[0].__name__ == "delete_s3_files_task"
-    files_list = args[1]
-    # S3 files for log1 and log2 should be queued
-    assert ("uploads/source1.png", True) in files_list
-    assert ("generations/result1.png", True) in files_list
-    assert ("uploads/source2.png", True) in files_list
-    # Pending log S3 file should not be in deletion list
-    assert ("uploads/source3.png", True) not in files_list
+    mock_add_task.assert_not_called()
+    storage, cdn = withdrawal_storage
+    deleted_keys = {call.kwargs["Key"] for call in storage.delete_object.call_args_list}
+    assert deleted_keys == {"uploads/source1.png", "generations/result1.png", "uploads/source2.png"}
+    assert cdn.create_invalidation.call_count == 2
 
     # 9. Verify relations are deleted
     assert db.query(models.CollectionItem).filter(models.CollectionItem.log_id.in_([log1.id, log2.id])).count() == 0
@@ -622,7 +617,7 @@ def test_delete_user_by_email_admin_success(mock_add_task, client, db):
     assert db.query(models.OrderItem).filter(models.OrderItem.id == order_item_id).count() == 0
 
     # 8. Verify S3 cleanup task was called
-    mock_add_task.assert_called_once()
+    mock_add_task.assert_not_called()
     
     app.dependency_overrides.clear()
 

@@ -200,27 +200,31 @@ def award_daily_login_credits(db: Session, user: models.User):
 
 
 
-def award_subscription_credits(db: Session, user: models.User, pro_level: str, subscription_id: str, is_webhook: bool):
-    """
-    Award monthly credits immediately to Pro users upon successful subscription activation or renewal payment.
-    Includes a 3-day deduplication window matching the subscription ID to prevent duplicate credits from concurrent activation and webhooks.
-    """
-    import datetime
-    from datetime import timezone
-    three_days_ago = datetime.datetime.now(timezone.utc) - timedelta(days=3)
-    
+def award_subscription_credits(db: Session, user: models.User, pro_level: str,
+                               subscription_id: str, is_webhook: bool, *, paid_at):
+    """Grant once per verified payment, shared by activation and webhook."""
+    paid_at = paid_at.astimezone(timezone.utc)
+    key = f"subscription:{subscription_id}:{paid_at.isoformat()}"
     lock_balance(db, user)
-    existing_grant = db.query(models.CreditLog).filter(
+    if db.query(models.CreditLog).filter(models.CreditLog.idempotency_key == key).first():
+        return False
+    # Adopt a historical grant from this paid period on first encounter. Old
+    # rows have no payment identity; never give a second reward during rollout.
+    legacy = db.query(models.CreditLog).filter(
         models.CreditLog.user_id == user.id,
         models.CreditLog.action == "subscription_grant",
-        models.CreditLog.created_at >= three_days_ago,
-        models.CreditLog.source.like(f"%{subscription_id}%")
-    ).first()
-    
-    if existing_grant:
-        print(f"Skipping subscription credits grant for user {user.id}: already awarded for subscription {subscription_id} in the last 3 days (Reference: {existing_grant.source})")
-        return
-        
+        models.CreditLog.idempotency_key.is_(None),
+        models.CreditLog.created_at >= paid_at,
+        models.CreditLog.source.in_([
+            f"Subscription Activation Grant: {subscription_id}",
+            f"Subscription Webhook Grant: {subscription_id}",
+        ]),
+    ).order_by(models.CreditLog.created_at).first()
+    if legacy:
+        legacy.idempotency_key = key
+        db.flush()
+        return False
+
     monthly_credits = 200 if pro_level == "pro-max" else 80
     user.credits = (user.credits or 0) + monthly_credits
     
@@ -230,7 +234,8 @@ def award_subscription_credits(db: Session, user: models.User, pro_level: str, s
         user_id=user.id,
         amount=monthly_credits,
         action="subscription_grant",
-        source=source_str
+        source=source_str,
+        idempotency_key=key,
     )
     db.add(credit_log)
     

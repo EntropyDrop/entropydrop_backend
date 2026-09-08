@@ -1401,21 +1401,21 @@ async def get_derived_logs(
     return {"items": results}
 
 @router.delete("/logs/{id}")
-async def delete_log(
+def delete_log(
     id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    """Delete user generation records and associated data (soft delete + S3 cleaning)"""
-    log = db.query(models.GenerationLog).filter(models.GenerationLog.id == id).first()
+    from skin_withdrawal import begin, resume
+    log = db.query(models.GenerationLog).filter_by(id=id).with_for_update().populate_existing().first()
     if not log:
         raise HTTPException(status_code=404, detail="Log not found")
-        
     if log.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Permission denied")
-
-    if not current_user.is_pro_active:
+    if log.is_deleted and not log.withdrawal:
+        return {"message": "Creation deleted"}
+    if not current_user.is_pro_active and not log.withdrawal and not log.is_deleted:
         import datetime
         now = datetime.datetime.now()
         day_key = f"delete_quota:{current_user.id}:{now.date()}"
@@ -1428,69 +1428,10 @@ async def delete_log(
         if not count:
             redis_conn.expire(day_key, 2 * 24 * 3600)
 
-    # Signal an in-flight worker first and remove queued/scheduled retries
-    # before deleting the task's source objects.
+    begin(db, log)
     cancel_generation_jobs(log.id)
-        
-    # 1. Collect S3 files that need cleaning
-    files_to_delete = []
-    if log.source:
-        files_to_delete.append((log.source, log.is_public))
-    if log.result:
-        files_to_delete.append((log.result, log.is_public))
-    if log.edited_result:
-        files_to_delete.append((log.edited_result, log.is_public))
-    if log.image_to_skin_edited_result:
-        files_to_delete.append(
-            (log.image_to_skin_edited_result, log.is_public)
-        )
-
-    # 2. Trigger background cleaning task
-    if files_to_delete:
-        background_tasks.add_task(delete_s3_files_task, files_to_delete)
-
-    # Clear user character settings if they set this skin as their character
-    if log.result or log.edited_result or log.image_to_skin_edited_result:
-        from sqlalchemy import or_
-        filters = []
-        if log.result:
-            filters.append(models.User.skin_url.like(f"%{log.result}%"))
-        if log.edited_result:
-            filters.append(models.User.skin_url.like(f"%{log.edited_result}%"))
-        if log.image_to_skin_edited_result:
-            filters.append(
-                models.User.skin_url.like(
-                    f"%{log.image_to_skin_edited_result}%"
-                )
-            )
-        if filters:
-            db.query(models.User).filter(or_(*filters)).update(
-                {"skin_url": None},
-                synchronize_session=False
-            )
-
-    # 3. Clean database attributes (soft delete)
-    log.is_deleted = True
-    log.prompt = None
-    log.name = "Deleted"
-    log.source = None
-    log.result = None
-    log.edited_result = None
-    log.image_to_skin_edited_result = None
-    log.status = "deleted"
-
-    # 4. Delete associated collection items
-    db.query(models.CollectionItem).filter(models.CollectionItem.log_id == id).delete()
-    
-    # 5. Delete associated likes
-    db.query(models.UserLike).filter(models.UserLike.log_id == id).delete()
-    
-    # 6. Delete associated feedback
-    db.query(models.UserFeedback).filter(models.UserFeedback.log_id == id).delete()
-    
-    db.commit()
-    
-    return {"message": "Creation soft-deleted, properties cleared, and files queued for S3 deletion"}
+    resume(db, log)
+    return {"message": "Creation deleted and public files withdrawn"}
 
 @router.patch("/logs/{id}/name")
 async def update_log_name(
@@ -1508,93 +1449,6 @@ async def update_log_name(
     log.name = request.name
     db.commit()
     return {"message": "Name updated successfully"}
-
-@router.post("/logs/{id}/make_private")
-async def make_log_private(
-    id: str,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(auth.get_current_user)
-):
-    log = db.query(models.GenerationLog).filter(models.GenerationLog.id == id).first()
-    if not log:
-        raise HTTPException(status_code=404, detail="Log not found")
-        
-    if log.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Permission denied")
-
-    if not current_user.is_pro_active:
-        raise HTTPException(status_code=403, detail="Pro subscription required to make skins private")
-
-    if not log.is_public:
-        return {"message": "Already private"}
-
-    from s3_utils import s3_client
-    from config import settings
-    public_bucket = settings.AWS_BUCKET_NAME
-    private_bucket = settings.AWS_PRIVATE_BUCKET_NAME
-
-    def move_file(key):
-        if not key or key.startswith("http"):
-            return
-        try:
-            s3_client.copy_object(
-                Bucket=private_bucket,
-                CopySource={'Bucket': public_bucket, 'Key': key},
-                Key=key
-            )
-            s3_client.delete_object(Bucket=public_bucket, Key=key)
-        except Exception as e:
-            print(f"Failed to move S3 object {key} to private bucket: {e}")
-
-    move_file(log.source)
-    move_file(log.result)
-    move_file(log.edited_result)
-    move_file(log.image_to_skin_edited_result)
-
-    # Remove from any public collections since private skins cannot be in public collections
-    public_col_items = db.query(models.CollectionItem).join(
-        models.Collection, models.CollectionItem.collection_id == models.Collection.id
-    ).filter(
-        models.CollectionItem.log_id == id,
-        models.Collection.is_public == True
-    ).all()
-
-    for item in public_col_items:
-        db.delete(item)
-
-    # Clear parent reference from any skins derived from this one
-    # so that the relationship is completely severed and not confusing
-    db.query(models.GenerationLog).filter(
-        models.GenerationLog.parent == id
-    ).update({"parent": None}, synchronize_session=False)
-
-    # Also clear the parent of this skin itself
-    log.parent = None
-
-    # Clear user character settings if they set this skin as their character
-    if log.result or log.edited_result or log.image_to_skin_edited_result:
-        from sqlalchemy import or_
-        filters = []
-        if log.result:
-            filters.append(models.User.skin_url.like(f"%{log.result}%"))
-        if log.edited_result:
-            filters.append(models.User.skin_url.like(f"%{log.edited_result}%"))
-        if log.image_to_skin_edited_result:
-            filters.append(
-                models.User.skin_url.like(
-                    f"%{log.image_to_skin_edited_result}%"
-                )
-            )
-        if filters:
-            db.query(models.User).filter(or_(*filters)).update(
-                {"skin_url": None},
-                synchronize_session=False
-            )
-
-    log.is_public = False
-    db.commit()
-
-    return {"message": "Skin made private successfully"}
 
 @router.post("/logs/{id}/feedback")
 async def create_log_feedback(
