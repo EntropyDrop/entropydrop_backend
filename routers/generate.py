@@ -17,7 +17,7 @@ import licenses
 from config import settings
 from pipeline_registry import (
     MODEL_PIPELINES,
-    SKING_DDJ_V104,
+    SKING_DDJ_V104B,
     SKING_DDJ_MODEL_PREFIX,
     get_pipeline,
     is_sking_ddj_model,
@@ -449,7 +449,7 @@ def display_log_name(log):
 ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
 
 AVAILABLE_IMAGE_TO_SKIN_MODELS = [
-    SKING_DDJ_V104,
+    SKING_DDJ_V104B,
     LEGACY_SKIN_MODEL_VERSION,
 ]
 
