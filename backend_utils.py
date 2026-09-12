@@ -43,14 +43,20 @@ def is_image_edit_to_skin_enabled() -> bool:
 
 
 
-def get_daily_free_credits():
-    try:
-        val = redis_conn.get("config:daily_free_credits")
-        if val is not None:
-            return int(val.decode("utf-8"))
-    except Exception as e:
-        print(f"Failed to read daily free credits config from redis: {e}")
+def get_daily_login_credits(user: models.User) -> int:
+    """
+    Fixed daily login credits:
+    - Free user and pro-plus: 1 credit
+    - Pro-max: 4 credits
+    """
+    if getattr(user, "is_pro", False) and getattr(user, "pro_level", None) == "pro-max":
+        return 4
     return 1
+
+
+def get_daily_free_credits():
+    return 1
+
 
 
 def get_generation_credit_cost():
@@ -164,9 +170,9 @@ def award_daily_login_credits(db: Session, user: models.User):
             )
             db.add(monthly_notif)
 
-        # 2. Daily Reward Check (All users get get_daily_free_credits() - defaults to 1 credit)
+        # 2. Daily Reward Check (Free and pro-plus users get 1 credit, pro-max gets 4 credits)
         if user.last_login_date != today_utc:
-            daily_awarded = get_daily_free_credits()
+            daily_awarded = get_daily_login_credits(user)
             user.credits = (user.credits or 0) + daily_awarded
             user.last_login_date = today_utc
             

@@ -582,48 +582,84 @@ def test_delete_all_failed_tasks_non_admin_rejects(client, db):
 
 
 
-def test_daily_free_credits_endpoints(client, db):
-    admin_user = models.User(
-        id="ADMIN_FREE_CREDITS_001",
-        email="admin-free-credits@entropydrop.com",
-        username="AdminFreeCredits",
+def test_daily_login_credits_tier_rewards(client, db):
+    from backend_utils import get_daily_login_credits, award_daily_login_credits
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime.now(timezone.utc)
+    future = now + timedelta(days=30)
+    past = now - timedelta(days=1)
+
+    # 1. Free user
+    free_user = models.User(
+        id="FREE_USER_001",
+        email="free@entropydrop.com",
+        pro_level="free",
+        credits=0
     )
-    db.add(admin_user)
+    db.add(free_user)
+
+    # 2. Pro-plus user (active)
+    pro_plus_user = models.User(
+        id="PRO_PLUS_USER_001",
+        email="proplus@entropydrop.com",
+        pro_level="pro-plus",
+        pro_expires_at=future,
+        credits=0
+    )
+    db.add(pro_plus_user)
+
+    # 3. Pro-max user (active)
+    pro_max_user = models.User(
+        id="PRO_MAX_USER_001",
+        email="promax@entropydrop.com",
+        pro_level="pro-max",
+        pro_expires_at=future,
+        credits=0
+    )
+    db.add(pro_max_user)
+
+    # 4. Expired Pro-max user
+    expired_promax_user = models.User(
+        id="EXPIRED_MAX_USER_001",
+        email="expiredmax@entropydrop.com",
+        pro_level="pro-max",
+        pro_expires_at=past,
+        credits=0
+    )
+    db.add(expired_promax_user)
     db.commit()
 
-    # 1. Non-admin get should be rejected
-    response = client.get("/skin/api/monitor/daily_free_credits")
-    assert response.status_code in (401, 403)
+    # Test get_daily_login_credits
+    assert get_daily_login_credits(free_user) == 1
+    assert get_daily_login_credits(pro_plus_user) == 1
+    assert get_daily_login_credits(pro_max_user) == 4
+    assert get_daily_login_credits(expired_promax_user) == 1
 
-    # 2. Non-admin post should be rejected
-    response = client.post("/skin/api/monitor/daily_free_credits", json={"credits": 10})
-    assert response.status_code in (401, 403)
+    # Test award_daily_login_credits execution
+    award_daily_login_credits(db, free_user)
+    award_daily_login_credits(db, pro_max_user)
 
-    # 3. Admin authentication override
-    def mock_get_current_admin():
-        return admin_user
-    app.dependency_overrides[get_current_admin] = mock_get_current_admin
+    # Re-fetch users
+    db.refresh(free_user)
+    db.refresh(pro_max_user)
 
-    # 4. Admin GET (should default to 1)
-    response = client.get("/skin/api/monitor/daily_free_credits")
-    assert response.status_code == 200
-    assert response.json() == {"credits": 1}
+    # Check daily credits awarded: free gets 1 (+10 monthly login on first day of month if fresh),
+    # but specifically check the daily_login CreditLog amount
+    free_daily_log = db.query(models.CreditLog).filter(
+        models.CreditLog.user_id == free_user.id,
+        models.CreditLog.action == "daily_login"
+    ).first()
+    assert free_daily_log is not None
+    assert free_daily_log.amount == 1
 
-    # 5. Admin POST update to 12
-    response = client.post("/skin/api/monitor/daily_free_credits", json={"credits": 12})
-    assert response.status_code == 200
-    assert response.json() == {"credits": 12}
+    max_daily_log = db.query(models.CreditLog).filter(
+        models.CreditLog.user_id == pro_max_user.id,
+        models.CreditLog.action == "daily_login"
+    ).first()
+    assert max_daily_log is not None
+    assert max_daily_log.amount == 4
 
-    # 6. Admin GET (should now be 12)
-    response = client.get("/skin/api/monitor/daily_free_credits")
-    assert response.status_code == 200
-    assert response.json() == {"credits": 12}
-
-    # 7. Admin POST negative credits should be rejected
-    response = client.post("/skin/api/monitor/daily_free_credits", json={"credits": -1})
-    assert response.status_code == 400
-
-    app.dependency_overrides.clear()
 
 
 

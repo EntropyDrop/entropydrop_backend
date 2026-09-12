@@ -451,8 +451,6 @@ async def toggle_mode_status(
 
 
 
-class DailyFreeCreditsRequest(BaseModel):
-    credits: int
 
 
 class SetModelPriceRequest(BaseModel):
@@ -460,28 +458,6 @@ class SetModelPriceRequest(BaseModel):
     credits: int
     is_pro: bool = False
     under_maintenance: bool = False
-
-@router.get("/daily_free_credits")
-@limiter.exempt
-async def get_daily_free_credits_endpoint(
-    admin: User = Depends(get_current_admin)
-):
-    from backend_utils import get_daily_free_credits
-    return {"credits": get_daily_free_credits()}
-
-@router.post("/daily_free_credits")
-@limiter.exempt
-async def set_daily_free_credits_endpoint(
-    req: DailyFreeCreditsRequest,
-    admin: User = Depends(get_current_admin)
-):
-    if req.credits < 0:
-        raise HTTPException(status_code=400, detail="Credits cannot be negative")
-    try:
-        redis_conn.set("config:daily_free_credits", str(req.credits))
-        return {"credits": req.credits}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")
 
 
 @router.get("/model_prices")
