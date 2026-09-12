@@ -36,7 +36,6 @@ MODEL_PIPELINES = MappingProxyType(
         SKING_DDJ_V104B: SkinPipelineSpec(
             prompt_file="real_to_render3.zh-hans.txt",
             template_files=(
-                "template41.png",
                 "template51.png",
                 "template66.png",
                 "template67.png",
