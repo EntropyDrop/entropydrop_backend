@@ -7,7 +7,7 @@ import secrets
 from sqlalchemy import Column, Integer, BigInteger, SmallInteger, String, DateTime, Text, JSON, Boolean, Float, Index, UniqueConstraint, CheckConstraint, Date, ForeignKey, Uuid, LargeBinary
 from database import Base
 
-from space.ids import generate_base58_id
+from ids import generate_base58_id
 
 class User(Base):
     """User model"""
@@ -453,20 +453,5 @@ class CreditLog(Base):
     idempotency_key = Column(String(180), nullable=True, unique=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
 
-# Compatibility exports for monolithic development and existing integrations.
+# Account-owned reservations remain local; world ORM models live in entropydrop_space.
 from space.account_models import SpaceCreditAuthorization, SpaceCreditReservation
-from space.models import (
-    SpaceWorld,
-    SpaceWorldPlayerProfile,
-    SpaceWorldEventStream,
-    SpacePlayerSnapshot,
-    SpaceWorldEntity,
-    SpaceHostingOperation,
-    SpaceHostingWorker,
-    SpaceChunkSnapshot,
-    SpaceSurfaceZoneSnapshot,
-    SpaceTerrainMutationBatch,
-    SpaceUsageBucket,
-    SpaceMarketResource,
-    SpaceMarketResourceLike
-)

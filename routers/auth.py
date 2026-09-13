@@ -27,6 +27,7 @@ def _validate_session_request_origin(request: Request) -> None:
     } or {
         "https://entropydrop.com",
         "https://www.entropydrop.com",
+        "https://space.entropydrop.com",
         "http://localhost:5173",
         "http://localhost:3000",
     }

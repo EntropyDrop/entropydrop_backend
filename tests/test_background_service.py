@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 import background_service
-import space_surface
 import skin_withdrawal
 
 
@@ -17,8 +16,6 @@ def test_background_jobs_respect_standalone_space_cutover(monkeypatch, space_url
     async def run_test():
         started, cancelled = set(), set()
         expected = {"discovery", "results", "recovery", "ledger", "withdrawal", "orders"}
-        if not space_url:
-            expected.add("surface")
         ready = asyncio.Event()
 
         async def job(name):
@@ -37,7 +34,6 @@ def test_background_jobs_respect_standalone_space_cutover(monkeypatch, space_url
             (background_service.generate, "start_result_listener", "results"),
             (background_service.generate, "start_pending_recovery_job", "recovery"),
             (background_service.ledger, "start_ledger_sync_job", "ledger"),
-            (space_surface, "start_surface_snapshot_job", "surface"),
         ):
             monkeypatch.setattr(target, method, lambda name=name: job(name))
         supervisor = asyncio.create_task(background_service.run_background_tasks())
@@ -119,23 +115,3 @@ def test_run_with_lock_cancels_workers_when_lock_is_lost(monkeypatch):
         assert worker_cancelled.is_set()
 
     asyncio.run(run_test())
-
-
-def test_surface_manifest_warmup_starts_only_one_daemon(monkeypatch):
-    started = threading.Event()
-    release = threading.Event()
-
-    def fake_backfill():
-        started.set()
-        release.wait(timeout=2)
-
-    monkeypatch.setattr(space_surface, "_generation_thread", None)
-    monkeypatch.setattr(space_surface, "_run_surface_generation_until_current", fake_backfill)
-
-    assert space_surface.ensure_surface_generation_started() is True
-    assert started.wait(timeout=1)
-    assert space_surface.ensure_surface_generation_started() is False
-
-    release.set()
-    space_surface._generation_thread.join(timeout=1)
-    assert space_surface._generation_thread.is_alive() is False

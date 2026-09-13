@@ -24,6 +24,14 @@ from config import settings
 from models import Base
 target_metadata = Base.metadata
 
+def include_object(obj, name, type_, reflected, compare_to):
+    # Historical Space tables may remain as a rollback archive. Their lifecycle
+    # is no longer managed by the account service's ORM/autogeneration.
+    if type_ == "table" and reflected and compare_to is None:
+        return name in target_metadata.tables
+    return True
+
+
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
@@ -46,6 +54,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=url,
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -71,7 +80,7 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection, target_metadata=target_metadata, include_object=include_object
         )
 
         with context.begin_transaction():

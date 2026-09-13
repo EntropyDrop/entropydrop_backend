@@ -20,14 +20,8 @@ from routers import (
     ledger,
     monitor,
     order,
-    space,
-    space_entities,
-    space_hosting,
-    space_external,
-    space_agent,
-    space_market,
-    space_realtime,
     space_billing,
+    space_accounts,
     webhooks,
 )
 from config import settings
@@ -245,6 +239,7 @@ async def unhandled_exception_handler(request, exc):
 _default_origins = [
     "https://entropydrop.com",
     "https://www.entropydrop.com",
+    "https://space.entropydrop.com",
     "http://localhost:5173",
     "http://localhost:3000",
 ]
@@ -280,21 +275,10 @@ app.include_router(ledger.legacy_open_router, prefix="/skin")
 app.include_router(forum.router, prefix="/skin")
 app.include_router(credit.router, prefix="/skin")
 app.include_router(space_billing.router)
-# API credentials remain in the account database, including after Space cutover.
-app.include_router(space_entities.api_key_router)
-app.include_router(space_agent.public_router)
-if settings.SPACE_SERVICE_URL:
-    from space.proxy import router as space_proxy_router
-    app.include_router(space_proxy_router)
-else:
-    app.include_router(space.router)
-    app.include_router(space_entities.router)
-    app.include_router(space_hosting.router)
-    app.include_router(space_external.router)
-    app.include_router(space_agent.router)
-    app.include_router(space_market.router)
-    app.include_router(space_realtime.api_router)
-    app.include_router(space_realtime.realtime_router)
+# Account-owned API keys and billing stay here; world requests always cross the gateway.
+app.include_router(space_accounts.api_key_router)
+from space.proxy import router as space_proxy_router
+app.include_router(space_proxy_router)
 
 
 

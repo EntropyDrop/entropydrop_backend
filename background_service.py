@@ -7,7 +7,6 @@ from redis import Redis
 
 from config import settings
 from routers import generate, order, ledger
-import space_surface
 
 
 LOCK_KEY = os.getenv("BACKGROUND_LOCK_KEY", "ed:background:singleton")
@@ -72,12 +71,6 @@ async def run_background_tasks() -> None:
         asyncio.create_task(generate.start_pending_recovery_job(), name="pending-recovery-job"),
         asyncio.create_task(ledger.start_ledger_sync_job(), name="ledger-sync-job"),
     ]
-    # World state belongs to the standalone Space service after cutover.
-    # Keep the local snapshot job only for monolithic installations.
-    if not settings.SPACE_SERVICE_URL:
-        tasks.append(asyncio.create_task(
-            space_surface.start_surface_snapshot_job(), name="space-surface-snapshot-job"
-        ))
 
     try:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

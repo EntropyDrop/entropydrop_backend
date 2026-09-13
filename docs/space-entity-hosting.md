@@ -121,14 +121,15 @@ display identifies server hosting and its hourly price.
 ## Run locally
 
 The Node worker source belongs to the backend under `space/runtime/`. Its build imports
-`@entropydrop/space-engine` from the sibling `entropydrop_space_engine` repository and bundles it
+`@entropydrop/space-engine` from the `engine/` package in the sibling Space workspace and bundles it
 into `space/runtime/dist/hosting-runtime.mjs`. There is no separate copy of the engine.
 The running worker needs only this bundle, the runtime's production npm dependencies
 (including QuickJS/WASM), Node **24+**, and the normal Python backend dependencies.
 It does not need a frontend checkout, a browser, or a renderer at runtime.
 
-For a local build, keep the backend and `entropydrop_space_engine` repositories under
-the same parent. Run `npm ci` in the engine repository first, then from the backend
+For a local build, keep the backend and `entropydrop_space` repositories under
+the same parent. Run `npm ci --workspace @entropydrop/space-engine --include-workspace-root`
+in the Space workspace first, then from the backend
 directory run (no frontend checkout or frontend dependencies are required):
 
 ```sh
