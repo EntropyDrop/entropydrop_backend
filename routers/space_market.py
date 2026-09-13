@@ -141,6 +141,24 @@ def _validate_quaternion(value: Quaternion | None, label: str) -> tuple[float, f
     return tuple(_finite_number(component, label, -1, 1) for component in value)
 
 
+def _validate_free_quaternion(
+    value: Quaternion | None,
+    label: str,
+) -> tuple[float, float, float, float] | None:
+    """Validate a rotation that is not restricted to the 24 stopped-grid orientations.
+
+    Seat rider orientation is authored inside a component frame, so any unit
+    quaternion is meaningful; only finiteness and unit length are enforced.
+    """
+    if value is None:
+        return None
+    components = tuple(_finite_number(component, label, -1, 1) for component in value)
+    length_sq = sum(component * component for component in components)
+    if abs(length_sq - 1) > 1e-3:
+        raise ValueError(f"{label} must be a unit quaternion")
+    return components
+
+
 def _valid_component_id(value: str) -> bool:
     return bool(COMPONENT_ID_PATTERN.fullmatch(value))
 
@@ -209,6 +227,8 @@ class ComponentBody(StrictResourceModel):
 
 class ComponentSeat(StrictResourceModel):
     position: Vector3
+    rotation: Quaternion | None = None
+    fixedOrientation: StrictBool = False
 
     @model_validator(mode="after")
     def validate_position(self):
@@ -217,6 +237,7 @@ class ComponentSeat(StrictResourceModel):
             "seat position",
             SPACE_MARKET_MAX_COORDINATE,
         )
+        self.rotation = _validate_free_quaternion(self.rotation, "seat rotation")
         return self
 
 

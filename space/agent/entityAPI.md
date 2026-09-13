@@ -96,8 +96,8 @@ Every root and child receives the same top-level API. Namespaces target the curr
 | `self.localToWorldDirection(dir)` | Convert a component-local direction to world space. |
 | `self.getPivot()` | Return the rotation pivot in entity-local coordinates. |
 | `self.getBounds()` | Return entity-local block bounds `{min,max,size,center}`, or `null` when empty. |
-| `self.setSeats(points)` | Replace this component's pivot-relative driver seats. An entity is mountable when any component has a seat. |
-| `self.getSeats()` | Return this component's pivot-relative seat positions. |
+| `self.setSeats(seats)` | Replace this component's pivot-relative driver seats. Each entry is `[x,y,z]` or `{position,rotation?,fixedOrientation?}`; `rotation` is a `[x,y,z,w]` rider orientation in the pivot frame (default identity, facing the component's -Z forward) and `fixedOrientation:true` makes a mounted rider's yaw follow the seat's solved world orientation so the view swings with the vehicle. Invalid positions or degenerate quaternions drop that seat. An entity is mountable when any component has a seat. |
+| `self.getSeats()` | Return this component's pivot-relative driver seats as `{position,rotation,fixedOrientation}` records. |
 | `self.voxels.set(position, options?)` | Queue one pivot-relative standard voxel placement; returns `{ok,placed,reason}`. |
 | `self.voxels.clear(position)` | Queue removal of one standard voxel; returns `{ok,removed,reason}`. |
 | `self.voxels.paint(position, options?)` | Queue repainting one standard voxel; returns `{ok,painted,reason}`. |

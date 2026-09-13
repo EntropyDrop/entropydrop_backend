@@ -85,6 +85,13 @@ message BodyConfig {
 
 message Seat {
   Vector3 position = 1;
+  // Rider orientation in the owning component's pivot frame; identity means the
+  // rider faces the component's own forward axis (-Z). Absent is identical to
+  // identity and keeps every pre-orientation file byte-compatible.
+  optional Quaternion rotation = 2;
+  // When true a mounted rider's yaw follows this seat's solved world orientation
+  // instead of free mouse look. Absent means false (free look).
+  optional bool fixed_orientation = 3;
 }
 
 // Entity.root and Component.children alone determine root/child hierarchy;

@@ -201,7 +201,15 @@ def _encode_component(message, component: dict[str, Any], include_name: bool) ->
         message.script = str(component["script"])
     message.script_disabled = bool(component.get("scriptDisabled", False))
     for seat in component.get("seats", []):
-        _set_vector(message.seats.add().position, seat["position"])
+        encoded_seat = message.seats.add()
+        _set_vector(encoded_seat.position, seat["position"])
+        # Identity rider orientation and free look are implicit defaults, so
+        # omitting them keeps every pre-orientation seat byte-identical.
+        rotation = seat.get("rotation")
+        if rotation is not None and list(rotation) != [0.0, 0.0, 0.0, 1.0]:
+            _set_quaternion(encoded_seat.rotation, rotation)
+        if seat.get("fixedOrientation") is True:
+            encoded_seat.fixed_orientation = True
     for child in sorted(component.get("children", []), key=lambda value: str(value["id"])):
         _encode_component(message.children.add(), child, include_name)
     if component.get("localPosition") is not None:
@@ -212,18 +220,26 @@ def _encode_component(message, component: dict[str, Any], include_name: bool) ->
         _set_quaternion(message.anchor_rotation, component["anchorRotation"])
 
 
+def _decode_seat(component_id: str, seat) -> dict[str, Any]:
+    if not seat.HasField("position"):
+        raise InventoryCodecError(f'component "{component_id}" contains a seat without a position')
+    decoded: dict[str, Any] = {"position": _vector(seat.position)}
+    if seat.HasField("rotation"):
+        decoded["rotation"] = _quaternion(seat.rotation)
+    if seat.fixed_orientation:
+        decoded["fixedOrientation"] = True
+    return decoded
+
+
 def _decode_component(message) -> dict[str, Any]:
     if not message.HasField("body"):
         raise InventoryCodecError(f'component "{message.id}" is missing its body configuration')
-    for seat in message.seats:
-        if not seat.HasField("position"):
-            raise InventoryCodecError(f'component "{message.id}" contains a seat without a position')
     result: dict[str, Any] = {
         "id": message.id,
         "name": message.name,
         "body": _decode_body(message.body),
         "blocks": [_decode_voxel(block) for block in message.blocks],
-        "seats": [{"position": _vector(seat.position)} for seat in message.seats],
+        "seats": [_decode_seat(message.id, seat) for seat in message.seats],
         "children": [
             _decode_component(child)
             for child in sorted(message.children, key=lambda value: str(value.id))

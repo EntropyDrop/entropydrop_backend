@@ -253,6 +253,48 @@ def test_recursive_entity_round_trip_keeps_component_local_body_script_and_seats
     assert decoded == canonical
 
 
+def test_seat_rider_orientation_round_trips_and_identity_stays_implicit():
+    canonical = {
+        "type": "space-entity",
+        "version": 7,
+        "root": {
+            "name": "Rover",
+            "id": "root",
+            "body": {"type": "dynamic"},
+            "blocks": [{"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 1}],
+            "seats": [
+                {"position": [0, 1, 0]},
+                {
+                    "position": [0, 1, 1],
+                    "rotation": [0, math.sqrt(0.5), 0, math.sqrt(0.5)],
+                    "fixedOrientation": True,
+                },
+            ],
+            "children": [],
+        },
+        "constraints": [],
+    }
+    encoded = encode_inventory_resource("entity", canonical)
+    decoded = decode_inventory_resource(encoded)[1]
+    assert decoded == canonical
+    # Re-encoding canonical output is byte-stable, so the optional field only
+    # appears when a seat actually carries an orientation or the lock flag.
+    assert encode_inventory_resource("entity", decoded) == encoded
+
+    # An explicit identity rotation is the documented implicit default and is
+    # dropped, while the lock flag survives on its own.
+    identity = {
+        **canonical,
+        "root": {
+            **canonical["root"],
+            "seats": [{"position": [0, 1, 0], "rotation": [0, 0, 0, 1], "fixedOrientation": True}],
+        },
+    }
+    assert decode_inventory_resource(encode_inventory_resource("entity", identity))[1]["root"]["seats"] == [
+        {"position": [0.0, 1.0, 0.0], "fixedOrientation": True}
+    ]
+
+
 def test_inventory_digest_includes_component_transforms():
     canonical = {
         "type": "space-entity",

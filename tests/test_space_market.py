@@ -459,6 +459,33 @@ def test_market_rejects_invalid_component_transforms(client, db):
     assert _publish(client, "entity", off_grid_anchor).status_code == 422
 
 
+def test_market_accepts_free_seat_rider_orientation_but_requires_a_unit_quaternion(client, db):
+    user = _user(db)
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    # Seats are authored in a component frame, so unlike component local/anchor
+    # rotations any unit quaternion is meaningful, including a 45-degree yaw.
+    entity = _entity("Oriented seat")
+    entity["root"]["seats"][0] = {
+        "position": [0, 1, 0],
+        "rotation": [0, 0, math.sin(math.pi / 8), math.cos(math.pi / 8)],
+        "fixedOrientation": True,
+    }
+    assert _publish(client, "entity", entity).status_code == 201
+
+    degenerate = _entity("Degenerate seat")
+    degenerate["root"]["seats"][0] = {"position": [0, 1, 0], "rotation": [0, 0, 0, 0]}
+    assert _publish(client, "entity", degenerate).status_code == 422
+
+    unnormalized = _entity("Unnormalized seat")
+    unnormalized["root"]["seats"][0] = {"position": [0, 1, 0], "rotation": [0, 0, 0, 2]}
+    assert _publish(client, "entity", unnormalized).status_code == 422
+
+    non_boolean_flag = _entity("Non-boolean flag")
+    non_boolean_flag["root"]["seats"][0] = {"position": [0, 1, 0], "fixedOrientation": "yes"}
+    assert _publish(client, "entity", non_boolean_flag).status_code == 422
+
+
 def test_market_rejects_off_grid_and_overlapping_stopped_entity_pose(client, db):
     user = _user(db)
     app.dependency_overrides[get_current_user] = lambda: user
