@@ -24,7 +24,7 @@ def setup(client, db, *, build=True):
 
 
 def body(blocks=None, **kwargs):
-    resource = {'type': 'space-blockset', 'version': 6, 'name': 'API platform',
+    resource = {'type': 'space-blockset', 'version': 7, 'name': 'API platform',
                 'blocks': blocks or [{'dx': 0, 'dy': 0, 'dz': 0, 'block': 1, 'color': 0xABCDEF}]}
     return {'operation_id': str(uuid.uuid4()), 'created_at_ms': int(time.time() * 1000),
             'definition_base64': base64.b64encode(encode_inventory_resource('blockset', resource)).decode(),

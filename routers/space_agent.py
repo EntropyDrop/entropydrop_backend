@@ -101,6 +101,7 @@ PUBLIC_FILES = {
     "spaceAPI.md": ("spaceAPI.md", "text/markdown"),
     "entityAPI.md": ("entityAPI.md", "text/markdown"),
     "references/inventory.proto": ("references/inventory.proto", "text/plain"),
+    "references/space_api.proto": ("references/space_api.proto", "text/plain"),
     "references/entity-create.md": ("references/entity-create.md", "text/markdown"),
 }
 

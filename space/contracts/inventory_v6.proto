@@ -1,0 +1,117 @@
+syntax = "proto3";
+
+package entropydrop.space.inventory.v6;
+
+// Legacy v6 portable resource schema, kept only so the space_0004 data migration
+// can read definitions written before inventory v7. New code must use
+// entropydrop_space_engine/proto/inventory.proto (v7); this file is not served
+// publicly and is never used by the running API. Do not add features here.
+
+message InventoryResource {
+  uint32 schema_version = 1;
+
+  oneof content {
+    BlockSet block_set = 10;
+    Entity entity = 11;
+    ColorSet color_set = 12;
+  }
+}
+
+message Voxel {
+  sint32 dx = 1;
+  sint32 dy = 2;
+  sint32 dz = 3;
+  // Present only for micro voxels. Value = 1 + mx + 8*my + 64*mz (mx/my/mz in 0..7).
+  optional uint32 micro_index = 4;
+  fixed32 color = 5;
+}
+
+message BlockSet {
+  string name = 1;
+  repeated Voxel blocks = 2;
+}
+
+message ColorSet {
+  string name = 1;
+  repeated fixed32 colors = 2 [packed = true];
+}
+
+message Vector3 {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+}
+
+message Quaternion {
+  double x = 1;
+  double y = 2;
+  double z = 3;
+  double w = 4;
+}
+
+enum BodyType {
+  BODY_TYPE_DYNAMIC = 0;
+  BODY_TYPE_KINEMATIC = 1;
+}
+
+message BodyConfig {
+  BodyType type = 1;
+  optional double mass = 2;
+  optional double restitution = 3;
+  optional double friction = 4;
+  optional bool use_gravity = 5;
+  optional bool collision_enabled = 6;
+}
+
+message Seat {
+  Vector3 position = 1;
+}
+
+message Component {
+  string id = 1;
+  optional Vector3 pivot = 2;
+  BodyConfig body = 3;
+  repeated Voxel blocks = 4;
+  optional string script = 5;
+  bool script_disabled = 6;
+  repeated Seat seats = 7;
+  repeated Component children = 8;
+  optional Vector3 local_position = 9;
+  optional Quaternion local_rotation = 10;
+  optional Quaternion anchor_rotation = 11;
+  string name = 12;
+}
+
+enum ConstraintType {
+  CONSTRAINT_TYPE_POINT = 0;
+  CONSTRAINT_TYPE_HINGE = 1;
+  CONSTRAINT_TYPE_WELD = 2;
+}
+
+message ConstraintLimits {
+  double min = 1;
+  double max = 2;
+}
+
+message EntityConstraint {
+  string id = 1;
+  ConstraintType type = 2;
+  optional string body_a_component_id = 3;
+  string body_b_component_id = 4;
+  optional Vector3 anchor_a = 5;
+  optional Vector3 anchor_b = 6;
+  optional Vector3 axis_a = 7;
+  optional Vector3 axis_b = 8;
+  optional Vector3 reference_a = 9;
+  optional Vector3 reference_b = 10;
+  optional ConstraintLimits limits = 11;
+  double stiffness = 12;
+  bool collide_connected = 13;
+}
+
+message Entity {
+  reserved 1;
+  reserved "name";
+  Component root = 2;
+  repeated EntityConstraint constraints = 3;
+}

@@ -40,6 +40,7 @@ MODEL_PIPELINES = MappingProxyType(
                 "template66.png",
                 "template67.png",
                 "template68.png",
+                "template73.png",
             ),
             provider_model="nano-banana-pro",
             image_size="1K",

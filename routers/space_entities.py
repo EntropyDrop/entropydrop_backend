@@ -10,8 +10,10 @@ import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, Security
+from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, model_validator
+from google.protobuf.message import DecodeError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr, ValidationError, model_validator
 from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -19,6 +21,7 @@ from sqlalchemy.orm import Session
 from space import auth
 from space import models
 from config import settings
+from space.contracts import space_api_pb2
 from space.database import get_db
 from rate_limit import limiter
 from routers.space import (
@@ -117,6 +120,132 @@ class SetWorldEntityRunStateRequest(StrictEntityModel):
     operation_id: uuid.UUID
     desired_run_state: Literal["running", "stopped"]
     expected_revision: StrictInt | None = Field(default=None, ge=1)
+
+
+PROTOBUF_CONTENT_TYPE = "application/x-protobuf"
+
+
+def parse_json_model(model_type, raw: bytes):
+    """Validate a JSON request body and surface FastAPI-style 422 errors.
+
+    Reading the body inside a dependency means Pydantic errors no longer pass
+    through FastAPI's request parser, so re-raise them as validation errors.
+    """
+    try:
+        return model_type.model_validate_json(raw)
+    except ValidationError as error:
+        raise RequestValidationError(error.errors()) from error
+
+
+async def _protobuf_request_body(request: Request) -> bytes | None:
+    """Return the raw body only for the binary resource content type.
+
+    JSON requests keep working unchanged; `application/x-protobuf` bodies decode
+    an `entropydrop.space.api.v2` envelope whose `definition` field is the raw
+    canonical InventoryResource, so the resource no longer travels as a base64
+    JSON string.
+    """
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type != PROTOBUF_CONTENT_TYPE:
+        return None
+    return await request.body()
+
+
+def _parse_protobuf_envelope(message_type, raw: bytes):
+    envelope = message_type()
+    try:
+        envelope.ParseFromString(raw)
+    except DecodeError as error:
+        raise HTTPException(422, detail={"code": "ENTITY_PROTOBUF_INVALID"}) from error
+    return envelope
+
+
+def _envelope_operation_id(value: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError) as error:
+        raise HTTPException(422, detail={"code": "ENTITY_OPERATION_ID_INVALID"}) from error
+
+
+def _envelope_position(envelope) -> EntityPosition:
+    if not envelope.HasField("position"):
+        raise HTTPException(422, detail={"code": "ENTITY_POSITION_REQUIRED"})
+    return EntityPosition(
+        x_cm=envelope.position.x_cm,
+        y_cm=envelope.position.y_cm,
+        z_cm=envelope.position.z_cm,
+    )
+
+
+def _envelope_run_state(value: int) -> Literal["running", "stopped"]:
+    if value == space_api_pb2.ENTITY_RUN_STATE_RUNNING:
+        return "running"
+    return "stopped"
+
+
+def _envelope_snapshot(raw: bytes) -> dict[str, Any]:
+    if not raw:
+        raise HTTPException(422, detail={"code": "ENTITY_SNAPSHOT_REQUIRED"})
+    try:
+        snapshot = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise HTTPException(422, detail={"code": "ENTITY_SNAPSHOT_INVALID"}) from error
+    if not isinstance(snapshot, dict):
+        raise HTTPException(422, detail={"code": "ENTITY_SNAPSHOT_INVALID"})
+    return snapshot
+
+
+def _envelope_definition_base64(raw: bytes) -> str:
+    if not raw:
+        raise HTTPException(422, detail={"code": "ENTITY_DEFINITION_REQUIRED"})
+    if len(raw) > SPACE_ENTITY_MAX_DEFINITION_BYTES:
+        raise HTTPException(413, detail={"code": "ENTITY_DEFINITION_TOO_LARGE"})
+    return base64.b64encode(raw).decode("ascii")
+
+
+async def create_world_entity_request(request: Request) -> CreateWorldEntityRequest:
+    raw = await _protobuf_request_body(request)
+    if raw is None:
+        return parse_json_model(CreateWorldEntityRequest, await request.body())
+    envelope = _parse_protobuf_envelope(space_api_pb2.CreateEntityRequest, raw)
+    return CreateWorldEntityRequest(
+        operation_id=_envelope_operation_id(envelope.operation_id),
+        definition_base64=_envelope_definition_base64(envelope.definition),
+        position=_envelope_position(envelope),
+        yaw_quarter_turns=envelope.yaw_quarter_turns,
+        desired_run_state=_envelope_run_state(envelope.desired_run_state),
+    )
+
+
+async def create_browser_world_entity_request(request: Request) -> CreateBrowserWorldEntityRequest:
+    raw = await _protobuf_request_body(request)
+    if raw is None:
+        return parse_json_model(CreateBrowserWorldEntityRequest, await request.body())
+    envelope = _parse_protobuf_envelope(space_api_pb2.CreateEntityRequest, raw)
+    return CreateBrowserWorldEntityRequest(
+        operation_id=_envelope_operation_id(envelope.operation_id),
+        definition_base64=_envelope_definition_base64(envelope.definition),
+        snapshot=_envelope_snapshot(envelope.snapshot_json),
+        position=_envelope_position(envelope),
+        desired_run_state=_envelope_run_state(envelope.desired_run_state),
+    )
+
+
+async def checkpoint_browser_world_entity_request(request: Request) -> CheckpointBrowserWorldEntityRequest:
+    raw = await _protobuf_request_body(request)
+    if raw is None:
+        return parse_json_model(CheckpointBrowserWorldEntityRequest, await request.body())
+    envelope = _parse_protobuf_envelope(space_api_pb2.CheckpointEntityRequest, raw)
+    return CheckpointBrowserWorldEntityRequest(
+        operation_id=_envelope_operation_id(envelope.operation_id),
+        expected_revision=envelope.expected_revision,
+        definition_base64=(
+            _envelope_definition_base64(envelope.definition) if envelope.definition else None
+        ),
+        snapshot=_envelope_snapshot(envelope.snapshot_json),
+        position=_envelope_position(envelope),
+        desired_run_state=_envelope_run_state(envelope.desired_run_state),
+    )
 
 
 
@@ -573,7 +702,7 @@ def _wrapped_delta(value: int, center: int, extent: int) -> int:
 def create_world_entity(
     request: Request,
     world_id: str,
-    payload: CreateWorldEntityRequest,
+    payload: CreateWorldEntityRequest = Depends(create_world_entity_request),
     db: Session = Depends(get_db),
     creator: EntityCreator = Depends(_entity_creator),
 ):
@@ -655,7 +784,7 @@ def create_world_entity(
 def create_browser_world_entity(
     request: Request,
     world_id: str,
-    payload: CreateBrowserWorldEntityRequest,
+    payload: CreateBrowserWorldEntityRequest = Depends(create_browser_world_entity_request),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
@@ -983,7 +1112,7 @@ def checkpoint_browser_world_entity(
     request: Request,
     world_id: str,
     entity_id: str,
-    payload: CheckpointBrowserWorldEntityRequest,
+    payload: CheckpointBrowserWorldEntityRequest = Depends(checkpoint_browser_world_entity_request),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):

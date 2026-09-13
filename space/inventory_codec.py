@@ -10,9 +10,9 @@ from google.protobuf.message import DecodeError
 from space.contracts import inventory_pb2
 
 
-from space.voxel_grid import MICRO_DIVISIONS, MICRO_CELLS_PER_BLOCK
+from space.voxel_grid import MICRO_DIVISIONS
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 InventoryKind = Literal["blockset", "entity", "colorset"]
 
 
@@ -76,18 +76,25 @@ def _quaternion(value) -> list[float]:
     ]
 
 
+def _micro_offset(value: Any, axis: str) -> int:
+    offset = int(value)
+    if not 0 <= offset < MICRO_DIVISIONS:
+        raise InventoryCodecError(
+            f"micro voxel {axis} offset must be an integer in 0..{MICRO_DIVISIONS - 1}"
+        )
+    return offset
+
+
 def _encode_voxel(target, block: dict[str, Any]) -> None:
     target.dx = int(block["dx"])
     target.dy = int(block["dy"])
     target.dz = int(block["dz"])
     if block.get("mx") is not None:
-        target.micro_index = (
-            1
-            + int(block["mx"])
-            + MICRO_DIVISIONS * int(block["my"])
-            + MICRO_DIVISIONS ** 2 * int(block["mz"])
-        )
-    target.color = int(block["color"])
+        target.is_micro = True
+        target.micro_x = _micro_offset(block["mx"], "x")
+        target.micro_y = _micro_offset(block["my"], "y")
+        target.micro_z = _micro_offset(block["mz"], "z")
+    target.color_rgb = int(block["color"])
 
 
 def _decode_voxel(block) -> dict[str, Any]:
@@ -96,16 +103,13 @@ def _decode_voxel(block) -> dict[str, Any]:
         "dy": int(block.dy),
         "dz": int(block.dz),
         "block": 1,
-        "color": int(block.color),
+        "color": int(block.color_rgb),
     }
-    if block.HasField("micro_index"):
-        packed = int(block.micro_index) - 1
-        if not 0 <= packed < MICRO_CELLS_PER_BLOCK:
-            raise InventoryCodecError("micro voxel index is outside 0..511")
+    if block.is_micro:
         result.update({
-            "mx": packed % MICRO_DIVISIONS,
-            "my": (packed // MICRO_DIVISIONS) % MICRO_DIVISIONS,
-            "mz": packed // MICRO_DIVISIONS ** 2,
+            "mx": _micro_offset(block.micro_x, "x"),
+            "my": _micro_offset(block.micro_y, "y"),
+            "mz": _micro_offset(block.micro_z, "z"),
         })
     return result
 

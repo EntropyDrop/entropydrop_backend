@@ -4,16 +4,25 @@ from copy import deepcopy
 import pytest
 
 from space.contracts import inventory_pb2
+from space.contracts import inventory_v6_pb2
 from space.inventory_codec import (
     InventoryCodecError,
     decode_inventory_resource,
     encode_inventory_resource,
     inventory_content_digest,
 )
+from space.inventory_v6 import convert_v6_inventory_resource
 
 
-CROSS_LANGUAGE_BLOCKSET_HEX = "080652150a0543726f7373120c08011004209d012d34ab1200"
+CROSS_LANGUAGE_BLOCKSET_HEX = "080752190a0543726f7373121008011004200128043003380240b4d64a"
 CROSS_LANGUAGE_CANONICAL_ENTITY_HEX = (
+    "08075a5712290a05776f726c641a002202400142070a01421a020801"
+    "420a0a04726f6f741a02080162054f726465721a0f0a014122014261cdccccccccccec3f1a190a017a1a05776f"
+    "726c642204726f6f7461cdccccccccccec3f"
+)
+# The same resources as written by the previous inventory v6 release.
+LEGACY_V6_BLOCKSET_HEX = "080652150a0543726f7373120c08011004209d012d34ab1200"
+LEGACY_V6_CANONICAL_ENTITY_HEX = (
     "08065a5a122c0a05776f726c641a0022052d0100000042070a01421a020801"
     "420a0a04726f6f741a02080162054f726465721a0f0a014122014261cdccccccccccec3f1a190a017a1a05776f"
     "726c642204726f6f7461cdccccccccccec3f"
@@ -23,7 +32,7 @@ CROSS_LANGUAGE_CANONICAL_ENTITY_HEX = (
 def test_inventory_protobuf_matches_the_frontend_deterministic_wire_fixture():
     canonical = {
         "type": "space-blockset",
-        "version": 6,
+        "version": 7,
         "name": "Cross",
         "blocks": [{
             "dx": -1,
@@ -46,7 +55,7 @@ def test_inventory_protobuf_matches_the_frontend_deterministic_wire_fixture():
 def test_inventory_entity_matches_the_frontend_canonical_order_fixture():
     canonical = {
         "type": "space-entity",
-        "version": 6,
+        "version": 7,
         "root": {
             "name": "Order",
             "id": "world",
@@ -92,7 +101,7 @@ def test_inventory_entity_matches_the_frontend_canonical_order_fixture():
 
 
 def test_inventory_decoder_normalizes_component_and_constraint_order_by_id():
-    resource = inventory_pb2.InventoryResource(schema_version=6)
+    resource = inventory_pb2.InventoryResource(schema_version=7)
     resource.entity.root.name = "Wire order"
     resource.entity.root.id = "root"
     resource.entity.root.body.SetInParent()
@@ -111,7 +120,7 @@ def test_inventory_decoder_normalizes_component_and_constraint_order_by_id():
 
 
 def test_inventory_decoder_treats_root_and_world_as_ordinary_component_ids():
-    resource = inventory_pb2.InventoryResource(schema_version=6)
+    resource = inventory_pb2.InventoryResource(schema_version=7)
     resource.entity.root.name = "Opaque component ids"
     resource.entity.root.id = "world"
     resource.entity.root.body.SetInParent()
@@ -128,11 +137,15 @@ def test_inventory_decoder_treats_root_and_world_as_ordinary_component_ids():
 def test_shared_inventory_schema_excludes_browser_backpack_state():
     assert not hasattr(inventory_pb2, "Backpack")
     assert not hasattr(inventory_pb2, "InventorySlot")
-    assert "micro_index" in inventory_pb2.Voxel.DESCRIPTOR.fields_by_name
+    voxel_fields = inventory_pb2.Voxel.DESCRIPTOR.fields_by_name
+    for field in ("is_micro", "micro_x", "micro_y", "micro_z", "color_rgb"):
+        assert field in voxel_fields
+    assert "micro_index" not in voxel_fields
+    assert "color" not in voxel_fields
 
 
-def test_inventory_v6_constraint_references_use_presence_instead_of_string_sentinels():
-    assert inventory_pb2.DESCRIPTOR.package == "entropydrop.space.inventory.v6"
+def test_inventory_v7_constraint_references_use_presence_instead_of_string_sentinels():
+    assert inventory_pb2.DESCRIPTOR.package == "entropydrop.space.inventory.v7"
     fields = inventory_pb2.EntityConstraint.DESCRIPTOR.fields_by_name
     assert {name: field.number for name, field in fields.items()} == {
         "id": 1,
@@ -156,7 +169,7 @@ def test_inventory_v6_constraint_references_use_presence_instead_of_string_senti
 def test_inventory_codec_sorts_voxels_at_the_encoding_boundary():
     unsorted = {
         "type": "space-blockset",
-        "version": 6,
+        "version": 7,
         "name": "Order",
         "blocks": [
             {"dx": 1, "dy": 0, "dz": 0, "block": 1, "color": 2},
@@ -172,18 +185,18 @@ def test_inventory_codec_sorts_voxels_at_the_encoding_boundary():
 
 def test_inventory_decoder_uses_standard_oneof_merge_and_invalid_wire_semantics():
     kind, color_set = decode_inventory_resource(bytes.fromhex(
-        "080652030a014262090a0143120456341200"
+        "080752030a0142080762080a01431203d6e848"
     ))
     assert kind == "colorset"
     assert color_set == {
         "type": "space-colorset",
-        "version": 6,
+        "version": 7,
         "name": "C",
         "colors": ["#123456"],
     }
 
     kind, block_set = decode_inventory_resource(bytes.fromhex(
-        "080652030a0142520412020801"
+        "080752030a0142520412020801"
     ))
     assert kind == "blockset"
     assert block_set["name"] == "B"
@@ -196,12 +209,12 @@ def test_inventory_decoder_uses_standard_oneof_merge_and_invalid_wire_semantics(
 
     with pytest.raises(InventoryCodecError, match="schema version"):
         decode_inventory_resource(bytes.fromhex("090352050a01781200"))
-    kind, empty_block_set = decode_inventory_resource(bytes.fromhex("080652005001"))
+    kind, empty_block_set = decode_inventory_resource(bytes.fromhex("080752005001"))
     assert kind == "blockset"
     assert empty_block_set["blocks"] == []
 
     kind, bom_entity = decode_inventory_resource(bytes.fromhex(
-        "08065a120a0178120d0a07efbbbf726f6f741a002200"
+        "08075a120a0178120d0a07efbbbf726f6f741a002200"
     ))
     assert kind == "entity"
     assert bom_entity["root"]["id"] == "\ufeffroot"
@@ -210,7 +223,7 @@ def test_inventory_decoder_uses_standard_oneof_merge_and_invalid_wire_semantics(
 def test_recursive_entity_round_trip_keeps_component_local_body_script_and_seats():
     canonical = {
         "type": "space-entity",
-        "version": 6,
+        "version": 7,
         "root": {
             "name": "Rover",
             "id": "root",
@@ -243,7 +256,7 @@ def test_recursive_entity_round_trip_keeps_component_local_body_script_and_seats
 def test_inventory_digest_includes_component_transforms():
     canonical = {
         "type": "space-entity",
-        "version": 6,
+        "version": 7,
         "root": {
             "name": "Arm",
             "id": "root",
@@ -277,7 +290,7 @@ def test_inventory_digest_includes_component_transforms():
 def test_inventory_digest_ignores_display_name_but_not_content():
     first = {
         "type": "space-colorset",
-        "version": 6,
+        "version": 7,
         "name": "First",
         "colors": ["#123456"] * 9,
     }
@@ -292,11 +305,11 @@ def test_component_names_round_trip_at_every_depth_but_never_affect_content_dige
         return {"id": component_id, "name": name, "body": {"type": "dynamic"},
                 "blocks": [], "seats": [], "children": children}
 
-    entity = {"type": "space-entity", "version": 6, "constraints": [],
+    entity = {"type": "space-entity", "version": 7, "constraints": [],
               "root": component("world", "机体", [component("root", "模块", [component("tip", "末端", [])])])}
     encoded = encode_inventory_resource("entity", entity)
-    assert encoded.hex() == "08065a3612340a05776f726c641a0042210a04726f6f741a00420f0a037469701a006206e69cabe7abaf6206e6a8a1e59d976206e69cbae4bd93"
-    assert inventory_content_digest("entity", entity).hex() == "959abbbdffb9b58f6d2685922de0513259647bb83faf2d39a92829468eb52ac9"
+    assert encoded.hex() == "08075a3612340a05776f726c641a0042210a04726f6f741a00420f0a037469701a006206e69cabe7abaf6206e6a8a1e59d976206e69cbae4bd93"
+    assert inventory_content_digest("entity", entity).hex() == "3aa9f6f2d1a424d0f63d1fb4fe85d927eac86db793c6afa5d4095391b994f4c8"
     assert decode_inventory_resource(encoded)[1] == entity
     assert "name" not in inventory_pb2.Entity.DESCRIPTOR.fields_by_name
     renamed = deepcopy(entity)
@@ -309,17 +322,17 @@ def test_component_names_round_trip_at_every_depth_but_never_affect_content_dige
     assert inventory_content_digest("entity", renamed) != inventory_content_digest("entity", entity)
 
 
-def test_inventory_decoder_rejects_non_v6_and_missing_content_messages():
-    with pytest.raises(InventoryCodecError, match="schema version 6"):
+def test_inventory_decoder_rejects_non_v7_and_missing_content_messages():
+    with pytest.raises(InventoryCodecError, match="schema version 7"):
         decode_inventory_resource(b"\x08\x04")
     with pytest.raises(InventoryCodecError, match="root.name"):
         encode_inventory_resource("entity", {"name": "obsolete", "root": {}})
     with pytest.raises(InventoryCodecError, match="does not contain"):
-        decode_inventory_resource(b"\x08\x06")
+        decode_inventory_resource(b"\x08\x07")
 
 
 def test_inventory_decoder_rejects_missing_recursive_entity_messages():
-    resource = inventory_pb2.InventoryResource(schema_version=6)
+    resource = inventory_pb2.InventoryResource(schema_version=7)
     resource.entity.SetInParent()
     with pytest.raises(InventoryCodecError, match="missing its root component"):
         decode_inventory_resource(resource.SerializeToString())
@@ -337,7 +350,7 @@ def test_inventory_decoder_rejects_missing_recursive_entity_messages():
 def test_inventory_codec_canonicalizes_signed_zero_for_every_double_field():
     negative_zero = {
         "type": "space-entity",
-        "version": 6,
+        "version": 7,
         "root": {
             "name": "Signed zero",
             "id": "root",
@@ -406,15 +419,46 @@ def test_inventory_codec_canonicalizes_signed_zero_for_every_double_field():
     assert_no_negative_zero(decoded)
 
 
-def test_inventory_v6_preserves_all_512_micro_offsets():
+def test_inventory_v7_preserves_all_512_micro_offsets():
     blocks = [{"dx": -1, "dy": 255, "dz": 0, "block": 1,
                "mx": x, "my": y, "mz": z, "color": x + 8*y + 64*z}
               for x in range(8) for y in range(8) for z in range(8)]
     encoded = encode_inventory_resource("blockset", {
-        "type": "space-blockset", "version": 6, "name": "Grid", "blocks": blocks})
+        "type": "space-blockset", "version": 7, "name": "Grid", "blocks": blocks})
     kind, decoded = decode_inventory_resource(encoded)
     assert kind == "blockset"
     assert len(decoded["blocks"]) == 512
     assert len({(b["mx"], b["my"], b["mz"]) for b in decoded["blocks"]}) == 512
     wire = inventory_pb2.InventoryResource.FromString(encoded)
-    assert max(b.micro_index for b in wire.block_set.blocks) == 512
+    assert all(b.is_micro for b in wire.block_set.blocks)
+    assert max(b.micro_x for b in wire.block_set.blocks) == 7
+    assert max(b.micro_y for b in wire.block_set.blocks) == 7
+    assert max(b.micro_z for b in wire.block_set.blocks) == 7
+    assert max(b.color_rgb for b in wire.block_set.blocks) == 511
+
+
+def test_legacy_v6_definitions_convert_to_canonical_v7():
+    for legacy, expected in (
+        (LEGACY_V6_BLOCKSET_HEX, CROSS_LANGUAGE_BLOCKSET_HEX),
+        (LEGACY_V6_CANONICAL_ENTITY_HEX, CROSS_LANGUAGE_CANONICAL_ENTITY_HEX),
+    ):
+        kind, portable, canonical, digest = convert_v6_inventory_resource(bytes.fromhex(legacy))
+        assert canonical.hex() == expected
+        assert portable["version"] == 7
+        assert digest == inventory_content_digest(kind, portable)
+
+    legacy_colorset = inventory_v6_pb2.InventoryResource(schema_version=6)
+    legacy_colorset.color_set.name = "Old"
+    legacy_colorset.color_set.colors.append(0x123456)
+    kind, portable, canonical, digest = convert_v6_inventory_resource(
+        legacy_colorset.SerializeToString(deterministic=True)
+    )
+    assert kind == "colorset"
+    assert portable["colors"] == ["#123456"]
+    assert decode_inventory_resource(canonical) == ("colorset", portable)
+
+
+def test_legacy_v6_conversion_rejects_other_schema_versions():
+    resource = inventory_v6_pb2.InventoryResource(schema_version=5)
+    with pytest.raises(InventoryCodecError, match="expected legacy schema version 6"):
+        convert_v6_inventory_resource(resource.SerializeToString(deterministic=True))

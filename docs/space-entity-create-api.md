@@ -76,10 +76,15 @@ DELETE /space/api/v2/api-keys/{api_key_id}
 
 ## 2. Create an entity directly
 
-`definition_base64` is a base64-encoded canonical `InventoryResource` Protobuf v5 whose
+`definition_base64` is a base64-encoded canonical `InventoryResource` Protobuf v7 whose
 kind is `entity`. Coordinates are integer centimetres. X and Z must be inside the world's
 canonical wrapped coordinate range; Y uses the Space vertical bounds. `yaw_quarter_turns`
 is 0 through 3. The position is the entity construction origin.
+
+The preferred transport sends `Content-Type: application/x-protobuf` with an
+`entropydrop.space.api.v2.CreateEntityRequest` envelope (`space_api.proto`), carrying the
+raw canonical definition in `definition`. The JSON form below is equivalent and remains
+accepted.
 
 The display name belongs to `Component.name` at every level. `Entity` contains only
 `root` and `constraints`; API list metadata derives its name from `root.name` or, when
@@ -92,7 +97,7 @@ Content-Type: application/json
 
 {
   "operation_id": "a9b3593c-e029-4a9f-a021-d9534709db9e",
-  "definition_base64": "CAMaLi4u",
+  "definition_base64": "CAdaChIICgRyb290GgA=",
   "position": {"x_cm": 12050, "y_cm": 3400, "z_cm": 8290},
   "yaw_quarter_turns": 1,
   "desired_run_state": "stopped"

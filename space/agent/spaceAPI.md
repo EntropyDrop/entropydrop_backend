@@ -45,11 +45,16 @@ Both position routes are self-only. All existing keys work without reissuing the
 ## Create the requested object
 
 1. Read [entity encoding and a complete request example](references/entity-create.md).
-2. Encode a canonical **InventoryResource Protobuf v6** using [inventory.proto](references/inventory.proto). Raw JSON in `definition_base64` is not accepted.
-3. For programmable parts, read the [entityAPI reference](entityAPI.md). Only use its documented methods.
-4. Read `GET /space/api/v2/worlds/{world_id}/api-usage` with the same key for current quotas and pricing.
-5. Place the object a few metres away from the player's coordinates, leaving room for its full bounds. Player Y is not a terrain-height query. Account for terrain clearance, gravity, and wrapped coordinates.
-6. Submit `POST /space/api/v2/worlds/{world_id}/entities`. Retain the request and `operation_id`; retry an uncertain submission with exactly the same body. A successful response includes the entity ID, requested run state and execution mode.
+2. Encode a canonical **InventoryResource Protobuf v7** using [inventory.proto](references/inventory.proto). Raw JSON in `definition_base64` is not accepted.
+3. Preferred transport: send the request body as `application/x-protobuf` using the
+   `entropydrop.space.api.v2.CreateEntityRequest` envelope from
+   [space_api.proto](references/space_api.proto), whose `definition` field holds the raw
+   canonical resource bytes. The JSON form with `definition_base64` (base64 of the same
+   bytes) remains accepted for existing clients; both produce identical stored content.
+4. For programmable parts, read the [entityAPI reference](entityAPI.md). Only use its documented methods.
+5. Read `GET /space/api/v2/worlds/{world_id}/api-usage` with the same key for current quotas and pricing.
+6. Place the object a few metres away from the player's coordinates, leaving room for its full bounds. Player Y is not a terrain-height query. Account for terrain clearance, gravity, and wrapped coordinates.
+7. Submit `POST /space/api/v2/worlds/{world_id}/entities`. Retain the request and `operation_id`; retry an uncertain submission with exactly the same body. A successful response includes the entity ID, requested run state and execution mode.
 
 All keys can create entities (stopped or running), read their owner's position, read and edit owned entity configurations, start/stop entities, and stamp blocksets through `POST /space/api/v2/worlds/{world_id}/blocksets/build`.
 
@@ -61,7 +66,7 @@ Use the entity ID returned by creation or copied from the Entity Editor. The fol
 
 | Request | Purpose |
 | --- | --- |
-| `GET /configuration` | Read `{ "entity": <metadata>, "definition": <decoded InventoryResource v6 JSON> }`, including component code and authored body defaults |
+| `GET /configuration` | Read `{ "entity": <metadata>, "definition": <decoded InventoryResource v7 JSON> }`, including component code and authored body defaults |
 | `PATCH /configuration` | Modify selected components' code, names and body defaults while stopped |
 | `PUT /run-state` | Set `desired_run_state` to `running` or `stopped` |
 
@@ -119,7 +124,7 @@ HTTP success means the backend saved the definition or desired state. It does no
 ## Geometry and physics rules
 
 - Right-handed, Y-up; +X right, -Z forward. X wraps into `[0,16384)` metres and Z into `[0,2048)`. Buildable Y is `[0,256)` metres.
-- Standard voxels are 1 metre; micro voxels are 0.125 metres. A micro voxel uses `dx/dy/dz` plus offsets `mx/my/mz` in 0–7, encoded as `micro_index = 1 + mx + 8*my + 64*mz`.
+- Standard voxels are 1 metre; micro voxels are 0.125 metres. A micro voxel uses `dx/dy/dz` plus offsets `micro_x`/`micro_y`/`micro_z` in 0–7, guarded by the boolean `is_micro`; color is the varint `color_rgb` (0xRRGGBB). This matches the realtime `VoxelMutation` encoding; the v6 packed `micro_index` and `fixed32 color` are rejected.
 - Components form one tree. IDs are unique; display names belong to each component's `name`, including `root.name`.
 - Authored Stop poses must align to the 0.125-metre grid and **must not overlap between components**, even when collisions are disabled. Reserve wheel and joint clearances in the chassis.
 - Dynamic bodies use force/torque. Direct pose setters work only on kinematic bodies. Persist default body settings in the definition; script setters are runtime changes.

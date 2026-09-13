@@ -27,7 +27,7 @@ def _user(db, user_id: str):
 def _entity(name="External Walker"):
     return {
         "type": "space-entity",
-        "version": 6,
+        "version": 7,
         "root": {
             "name": name,
             "id": "root",
@@ -646,3 +646,59 @@ def test_world_entity_checkpoint_budget_is_idempotent(client, db, monkeypatch):
     assert blocked.json()["detail"]["code"] == "WORLD_ENTITY_CHECKPOINT_QUOTA_REACHED"
     stored = db.query(SpaceWorldEntity).filter_by(id=record["id"]).one()
     assert stored.revision == 2
+
+
+def test_external_create_accepts_binary_protobuf_envelope(client, db):
+    from space.contracts import space_api_pb2
+
+    owner = _user(db, "envelope-owner")
+    app.dependency_overrides[get_current_user] = lambda: owner
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    _key_id, api_key = _create_api_key(client)
+    app.dependency_overrides.pop(get_current_user)
+
+    definition = encode_inventory_resource("entity", _entity("Envelope Bot"))
+    envelope = space_api_pb2.CreateEntityRequest(
+        operation_id=str(uuid.uuid4()),
+        definition=definition,
+        position=space_api_pb2.PositionCm(x_cm=100, y_cm=3200, z_cm=100),
+        desired_run_state=space_api_pb2.ENTITY_RUN_STATE_STOPPED,
+    )
+    response = client.post(
+        f"/space/api/v2/worlds/{world_id}/entities",
+        content=envelope.SerializeToString(),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/x-protobuf",
+        },
+    )
+    assert response.status_code == 201, response.text
+    stored = db.query(SpaceWorldEntity).filter_by(id=response.json()["id"]).one()
+    assert stored.definition == definition
+    assert stored.schema_version == 7
+
+
+def test_binary_protobuf_envelope_rejects_invalid_definition(client, db):
+    from space.contracts import space_api_pb2
+
+    owner = _user(db, "envelope-invalid-owner")
+    app.dependency_overrides[get_current_user] = lambda: owner
+    world_id = client.post("/space/api/v2/bootstrap").json()["world"]["id"]
+    _key_id, api_key = _create_api_key(client)
+    app.dependency_overrides.pop(get_current_user)
+
+    envelope = space_api_pb2.CreateEntityRequest(
+        operation_id=str(uuid.uuid4()),
+        definition=b"not-an-inventory-resource",
+        position=space_api_pb2.PositionCm(x_cm=100, y_cm=3200, z_cm=100),
+    )
+    response = client.post(
+        f"/space/api/v2/worlds/{world_id}/entities",
+        content=envelope.SerializeToString(),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/x-protobuf",
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "ENTITY_DEFINITION_INVALID"

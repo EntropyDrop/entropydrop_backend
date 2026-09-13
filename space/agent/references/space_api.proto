@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package entropydrop.space.api.v2;
+
+// Binary request envelopes for spaceAPI resource mutations. `definition` always
+// carries canonical `entropydrop.space.inventory.v7.InventoryResource` bytes, so
+// the resource itself uses the same raw `application/x-protobuf` encoding on
+// upload and download instead of a base64 JSON field. Keeping the resource as
+// opaque bytes also mirrors `space.multiplayer.v2.LocalBuildPlacement.payload`
+// and avoids a cross-file import, so the Python binding keeps the existing
+// `space/contracts/*_pb2` descriptor identity.
+//
+// The opaque engine runtime snapshot stays UTF-8 JSON in `snapshot_json` until a
+// typed snapshot schema exists. These are request envelopes only; they never
+// cross the realtime WebSocket boundary.
+
+enum EntityRunState {
+  ENTITY_RUN_STATE_STOPPED = 0;
+  ENTITY_RUN_STATE_RUNNING = 1;
+}
+
+// Absolute world position in centimetres, not zone-relative. X and Z are
+// wrapped torus coordinates in [0, 1638400) and [0, 204800); Y is bounded to
+// [-100000, 1000000] by the backend (see routers/space.py MIN/MAX_PLAYER_Y_CM).
+message PositionCm {
+  sint32 x_cm = 1;
+  sint32 y_cm = 2;
+  sint32 z_cm = 3;
+}
+
+// Used by both `POST /entities` and `POST /entities/browser`; `snapshot_json`
+// is empty for the plain create path.
+message CreateEntityRequest {
+  string operation_id = 1;
+  bytes definition = 2;
+  PositionCm position = 3;
+  uint32 yaw_quarter_turns = 4;
+  EntityRunState desired_run_state = 5;
+  bytes snapshot_json = 6;
+}
+
+message CheckpointEntityRequest {
+  string operation_id = 1;
+  uint64 expected_revision = 2;
+  // Absent when the canonical definition is unchanged since the last checkpoint.
+  bytes definition = 3;
+  PositionCm position = 4;
+  EntityRunState desired_run_state = 5;
+  bytes snapshot_json = 6;
+}
+
+message BuildBlocksetRequest {
+  string operation_id = 1;
+  uint64 created_at_ms = 2;
+  bytes definition = 3;
+  PositionCm position = 4;
+  uint32 yaw_quarter_turns = 5;
+}

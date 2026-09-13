@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1fspace/contracts/inventory.proto\x12\x1e\x65ntropydrop.space.inventory.v6\"\xee\x01\n\x11InventoryResource\x12\x16\n\x0eschema_version\x18\x01 \x01(\r\x12=\n\tblock_set\x18\n \x01(\x0b\x32(.entropydrop.space.inventory.v6.BlockSetH\x00\x12\x38\n\x06\x65ntity\x18\x0b \x01(\x0b\x32&.entropydrop.space.inventory.v6.EntityH\x00\x12=\n\tcolor_set\x18\x0c \x01(\x0b\x32(.entropydrop.space.inventory.v6.ColorSetH\x00\x42\t\n\x07\x63ontent\"d\n\x05Voxel\x12\n\n\x02\x64x\x18\x01 \x01(\x11\x12\n\n\x02\x64y\x18\x02 \x01(\x11\x12\n\n\x02\x64z\x18\x03 \x01(\x11\x12\x18\n\x0bmicro_index\x18\x04 \x01(\rH\x00\x88\x01\x01\x12\r\n\x05\x63olor\x18\x05 \x01(\x07\x42\x0e\n\x0c_micro_index\"O\n\x08\x42lockSet\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x35\n\x06\x62locks\x18\x02 \x03(\x0b\x32%.entropydrop.space.inventory.v6.Voxel\",\n\x08\x43olorSet\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x12\n\x06\x63olors\x18\x02 \x03(\x07\x42\x02\x10\x01\"*\n\x07Vector3\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\x12\t\n\x01z\x18\x03 \x01(\x01\"8\n\nQuaternion\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\x12\t\n\x01z\x18\x03 \x01(\x01\x12\t\n\x01w\x18\x04 \x01(\x01\"\x8e\x02\n\nBodyConfig\x12\x36\n\x04type\x18\x01 \x01(\x0e\x32(.entropydrop.space.inventory.v6.BodyType\x12\x11\n\x04mass\x18\x02 \x01(\x01H\x00\x88\x01\x01\x12\x18\n\x0brestitution\x18\x03 \x01(\x01H\x01\x88\x01\x01\x12\x15\n\x08\x66riction\x18\x04 \x01(\x01H\x02\x88\x01\x01\x12\x18\n\x0buse_gravity\x18\x05 \x01(\x08H\x03\x88\x01\x01\x12\x1e\n\x11\x63ollision_enabled\x18\x06 \x01(\x08H\x04\x88\x01\x01\x42\x07\n\x05_massB\x0e\n\x0c_restitutionB\x0b\n\t_frictionB\x0e\n\x0c_use_gravityB\x14\n\x12_collision_enabled\"A\n\x04Seat\x12\x39\n\x08position\x18\x01 \x01(\x0b\x32\'.entropydrop.space.inventory.v6.Vector3\"\x9b\x05\n\tComponent\x12\n\n\x02id\x18\x01 \x01(\t\x12;\n\x05pivot\x18\x02 \x01(\x0b\x32\'.entropydrop.space.inventory.v6.Vector3H\x00\x88\x01\x01\x12\x38\n\x04\x62ody\x18\x03 \x01(\x0b\x32*.entropydrop.space.inventory.v6.BodyConfig\x12\x35\n\x06\x62locks\x18\x04 \x03(\x0b\x32%.entropydrop.space.inventory.v6.Voxel\x12\x13\n\x06script\x18\x05 \x01(\tH\x01\x88\x01\x01\x12\x17\n\x0fscript_disabled\x18\x06 \x01(\x08\x12\x33\n\x05seats\x18\x07 \x03(\x0b\x32$.entropydrop.space.inventory.v6.Seat\x12;\n\x08\x63hildren\x18\x08 \x03(\x0b\x32).entropydrop.space.inventory.v6.Component\x12\x44\n\x0elocal_position\x18\t \x01(\x0b\x32\'.entropydrop.space.inventory.v6.Vector3H\x02\x88\x01\x01\x12G\n\x0elocal_rotation\x18\n \x01(\x0b\x32*.entropydrop.space.inventory.v6.QuaternionH\x03\x88\x01\x01\x12H\n\x0f\x61nchor_rotation\x18\x0b \x01(\x0b\x32*.entropydrop.space.inventory.v6.QuaternionH\x04\x88\x01\x01\x12\x0c\n\x04name\x18\x0c \x01(\tB\x08\n\x06_pivotB\t\n\x07_scriptB\x11\n\x0f_local_positionB\x11\n\x0f_local_rotationB\x12\n\x10_anchor_rotation\",\n\x10\x43onstraintLimits\x12\x0b\n\x03min\x18\x01 \x01(\x01\x12\x0b\n\x03max\x18\x02 \x01(\x01\"\x85\x06\n\x10\x45ntityConstraint\x12\n\n\x02id\x18\x01 \x01(\t\x12<\n\x04type\x18\x02 \x01(\x0e\x32..entropydrop.space.inventory.v6.ConstraintType\x12 \n\x13\x62ody_a_component_id\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x1b\n\x13\x62ody_b_component_id\x18\x04 \x01(\t\x12>\n\x08\x61nchor_a\x18\x05 \x01(\x0b\x32\'.entropydrop.space.inventory.v6.Vector3H\x01\x88\x01\x01\x12>\n\x08\x61nchor_b\x18\x06 \x01(\x0b\x32\'.entropydrop.space.inventory.v6.Vector3H\x02\x88\x01\x01\x12<\n\x06\x61xis_a\x18\x07 \x01(\x0b\x32\'.entropydrop.space.inventory.v6.Vector3H\x03\x88\x01\x01\x12<\n\x06\x61xis_b\x18\x08 \x01(\x0b\x32\'.entropydrop.space.inventory.v6.Vector3H\x04\x88\x01\x01\x12\x41\n\x0breference_a\x18\t \x01(\x0b\x32\'.entropydrop.space.inventory.v6.Vector3H\x05\x88\x01\x01\x12\x41\n\x0breference_b\x18\n \x01(\x0b\x32\'.entropydrop.space.inventory.v6.Vector3H\x06\x88\x01\x01\x12\x45\n\x06limits\x18\x0b \x01(\x0b\x32\x30.entropydrop.space.inventory.v6.ConstraintLimitsH\x07\x88\x01\x01\x12\x11\n\tstiffness\x18\x0c \x01(\x01\x12\x19\n\x11\x63ollide_connected\x18\r \x01(\x08\x42\x16\n\x14_body_a_component_idB\x0b\n\t_anchor_aB\x0b\n\t_anchor_bB\t\n\x07_axis_aB\t\n\x07_axis_bB\x0e\n\x0c_reference_aB\x0e\n\x0c_reference_bB\t\n\x07_limits\"\x94\x01\n\x06\x45ntity\x12\x37\n\x04root\x18\x02 \x01(\x0b\x32).entropydrop.space.inventory.v6.Component\x12\x45\n\x0b\x63onstraints\x18\x03 \x03(\x0b\x32\x30.entropydrop.space.inventory.v6.EntityConstraintJ\x04\x08\x01\x10\x02R\x04name*:\n\x08\x42odyType\x12\x15\n\x11\x42ODY_TYPE_DYNAMIC\x10\x00\x12\x17\n\x13\x42ODY_TYPE_KINEMATIC\x10\x01*`\n\x0e\x43onstraintType\x12\x19\n\x15\x43ONSTRAINT_TYPE_POINT\x10\x00\x12\x19\n\x15\x43ONSTRAINT_TYPE_HINGE\x10\x01\x12\x18\n\x14\x43ONSTRAINT_TYPE_WELD\x10\x02\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1fspace/contracts/inventory.proto\x12\x1e\x65ntropydrop.space.inventory.v7\"\xee\x01\n\x11InventoryResource\x12\x16\n\x0eschema_version\x18\x01 \x01(\r\x12=\n\tblock_set\x18\n \x01(\x0b\x32(.entropydrop.space.inventory.v7.BlockSetH\x00\x12\x38\n\x06\x65ntity\x18\x0b \x01(\x0b\x32&.entropydrop.space.inventory.v7.EntityH\x00\x12=\n\tcolor_set\x18\x0c \x01(\x0b\x32(.entropydrop.space.inventory.v7.ColorSetH\x00\x42\t\n\x07\x63ontent\"\x83\x01\n\x05Voxel\x12\n\n\x02\x64x\x18\x01 \x01(\x11\x12\n\n\x02\x64y\x18\x02 \x01(\x11\x12\n\n\x02\x64z\x18\x03 \x01(\x11\x12\x10\n\x08is_micro\x18\x04 \x01(\x08\x12\x0f\n\x07micro_x\x18\x05 \x01(\r\x12\x0f\n\x07micro_y\x18\x06 \x01(\r\x12\x0f\n\x07micro_z\x18\x07 \x01(\r\x12\x11\n\tcolor_rgb\x18\x08 \x01(\r\"O\n\x08\x42lockSet\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x35\n\x06\x62locks\x18\x02 \x03(\x0b\x32%.entropydrop.space.inventory.v7.Voxel\",\n\x08\x43olorSet\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x12\n\x06\x63olors\x18\x02 \x03(\rB\x02\x10\x01\"*\n\x07Vector3\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\x12\t\n\x01z\x18\x03 \x01(\x01\"8\n\nQuaternion\x12\t\n\x01x\x18\x01 \x01(\x01\x12\t\n\x01y\x18\x02 \x01(\x01\x12\t\n\x01z\x18\x03 \x01(\x01\x12\t\n\x01w\x18\x04 \x01(\x01\"\x8e\x02\n\nBodyConfig\x12\x36\n\x04type\x18\x01 \x01(\x0e\x32(.entropydrop.space.inventory.v7.BodyType\x12\x11\n\x04mass\x18\x02 \x01(\x01H\x00\x88\x01\x01\x12\x18\n\x0brestitution\x18\x03 \x01(\x01H\x01\x88\x01\x01\x12\x15\n\x08\x66riction\x18\x04 \x01(\x01H\x02\x88\x01\x01\x12\x18\n\x0buse_gravity\x18\x05 \x01(\x08H\x03\x88\x01\x01\x12\x1e\n\x11\x63ollision_enabled\x18\x06 \x01(\x08H\x04\x88\x01\x01\x42\x07\n\x05_massB\x0e\n\x0c_restitutionB\x0b\n\t_frictionB\x0e\n\x0c_use_gravityB\x14\n\x12_collision_enabled\"A\n\x04Seat\x12\x39\n\x08position\x18\x01 \x01(\x0b\x32\'.entropydrop.space.inventory.v7.Vector3\"\x9b\x05\n\tComponent\x12\n\n\x02id\x18\x01 \x01(\t\x12;\n\x05pivot\x18\x02 \x01(\x0b\x32\'.entropydrop.space.inventory.v7.Vector3H\x00\x88\x01\x01\x12\x38\n\x04\x62ody\x18\x03 \x01(\x0b\x32*.entropydrop.space.inventory.v7.BodyConfig\x12\x35\n\x06\x62locks\x18\x04 \x03(\x0b\x32%.entropydrop.space.inventory.v7.Voxel\x12\x13\n\x06script\x18\x05 \x01(\tH\x01\x88\x01\x01\x12\x17\n\x0fscript_disabled\x18\x06 \x01(\x08\x12\x33\n\x05seats\x18\x07 \x03(\x0b\x32$.entropydrop.space.inventory.v7.Seat\x12;\n\x08\x63hildren\x18\x08 \x03(\x0b\x32).entropydrop.space.inventory.v7.Component\x12\x44\n\x0elocal_position\x18\t \x01(\x0b\x32\'.entropydrop.space.inventory.v7.Vector3H\x02\x88\x01\x01\x12G\n\x0elocal_rotation\x18\n \x01(\x0b\x32*.entropydrop.space.inventory.v7.QuaternionH\x03\x88\x01\x01\x12H\n\x0f\x61nchor_rotation\x18\x0b \x01(\x0b\x32*.entropydrop.space.inventory.v7.QuaternionH\x04\x88\x01\x01\x12\x0c\n\x04name\x18\x0c \x01(\tB\x08\n\x06_pivotB\t\n\x07_scriptB\x11\n\x0f_local_positionB\x11\n\x0f_local_rotationB\x12\n\x10_anchor_rotation\",\n\x10\x43onstraintLimits\x12\x0b\n\x03min\x18\x01 \x01(\x01\x12\x0b\n\x03max\x18\x02 \x01(\x01\"\x85\x06\n\x10\x45ntityConstraint\x12\n\n\x02id\x18\x01 \x01(\t\x12<\n\x04type\x18\x02 \x01(\x0e\x32..entropydrop.space.inventory.v7.ConstraintType\x12 \n\x13\x62ody_a_component_id\x18\x03 \x01(\tH\x00\x88\x01\x01\x12\x1b\n\x13\x62ody_b_component_id\x18\x04 \x01(\t\x12>\n\x08\x61nchor_a\x18\x05 \x01(\x0b\x32\'.entropydrop.space.inventory.v7.Vector3H\x01\x88\x01\x01\x12>\n\x08\x61nchor_b\x18\x06 \x01(\x0b\x32\'.entropydrop.space.inventory.v7.Vector3H\x02\x88\x01\x01\x12<\n\x06\x61xis_a\x18\x07 \x01(\x0b\x32\'.entropydrop.space.inventory.v7.Vector3H\x03\x88\x01\x01\x12<\n\x06\x61xis_b\x18\x08 \x01(\x0b\x32\'.entropydrop.space.inventory.v7.Vector3H\x04\x88\x01\x01\x12\x41\n\x0breference_a\x18\t \x01(\x0b\x32\'.entropydrop.space.inventory.v7.Vector3H\x05\x88\x01\x01\x12\x41\n\x0breference_b\x18\n \x01(\x0b\x32\'.entropydrop.space.inventory.v7.Vector3H\x06\x88\x01\x01\x12\x45\n\x06limits\x18\x0b \x01(\x0b\x32\x30.entropydrop.space.inventory.v7.ConstraintLimitsH\x07\x88\x01\x01\x12\x11\n\tstiffness\x18\x0c \x01(\x01\x12\x19\n\x11\x63ollide_connected\x18\r \x01(\x08\x42\x16\n\x14_body_a_component_idB\x0b\n\t_anchor_aB\x0b\n\t_anchor_bB\t\n\x07_axis_aB\t\n\x07_axis_bB\x0e\n\x0c_reference_aB\x0e\n\x0c_reference_bB\t\n\x07_limits\"\x94\x01\n\x06\x45ntity\x12\x37\n\x04root\x18\x02 \x01(\x0b\x32).entropydrop.space.inventory.v7.Component\x12\x45\n\x0b\x63onstraints\x18\x03 \x03(\x0b\x32\x30.entropydrop.space.inventory.v7.EntityConstraintJ\x04\x08\x01\x10\x02R\x04name*:\n\x08\x42odyType\x12\x15\n\x11\x42ODY_TYPE_DYNAMIC\x10\x00\x12\x17\n\x13\x42ODY_TYPE_KINEMATIC\x10\x01*`\n\x0e\x43onstraintType\x12\x19\n\x15\x43ONSTRAINT_TYPE_POINT\x10\x00\x12\x19\n\x15\x43ONSTRAINT_TYPE_HINGE\x10\x01\x12\x18\n\x14\x43ONSTRAINT_TYPE_WELD\x10\x02\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,32 +33,32 @@ if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_COLORSET'].fields_by_name['colors']._loaded_options = None
   _globals['_COLORSET'].fields_by_name['colors']._serialized_options = b'\020\001'
-  _globals['_BODYTYPE']._serialized_start=2622
-  _globals['_BODYTYPE']._serialized_end=2680
-  _globals['_CONSTRAINTTYPE']._serialized_start=2682
-  _globals['_CONSTRAINTTYPE']._serialized_end=2778
+  _globals['_BODYTYPE']._serialized_start=2654
+  _globals['_BODYTYPE']._serialized_end=2712
+  _globals['_CONSTRAINTTYPE']._serialized_start=2714
+  _globals['_CONSTRAINTTYPE']._serialized_end=2810
   _globals['_INVENTORYRESOURCE']._serialized_start=68
   _globals['_INVENTORYRESOURCE']._serialized_end=306
-  _globals['_VOXEL']._serialized_start=308
-  _globals['_VOXEL']._serialized_end=408
-  _globals['_BLOCKSET']._serialized_start=410
-  _globals['_BLOCKSET']._serialized_end=489
-  _globals['_COLORSET']._serialized_start=491
-  _globals['_COLORSET']._serialized_end=535
-  _globals['_VECTOR3']._serialized_start=537
-  _globals['_VECTOR3']._serialized_end=579
-  _globals['_QUATERNION']._serialized_start=581
-  _globals['_QUATERNION']._serialized_end=637
-  _globals['_BODYCONFIG']._serialized_start=640
-  _globals['_BODYCONFIG']._serialized_end=910
-  _globals['_SEAT']._serialized_start=912
-  _globals['_SEAT']._serialized_end=977
-  _globals['_COMPONENT']._serialized_start=980
-  _globals['_COMPONENT']._serialized_end=1647
-  _globals['_CONSTRAINTLIMITS']._serialized_start=1649
-  _globals['_CONSTRAINTLIMITS']._serialized_end=1693
-  _globals['_ENTITYCONSTRAINT']._serialized_start=1696
-  _globals['_ENTITYCONSTRAINT']._serialized_end=2469
-  _globals['_ENTITY']._serialized_start=2472
-  _globals['_ENTITY']._serialized_end=2620
+  _globals['_VOXEL']._serialized_start=309
+  _globals['_VOXEL']._serialized_end=440
+  _globals['_BLOCKSET']._serialized_start=442
+  _globals['_BLOCKSET']._serialized_end=521
+  _globals['_COLORSET']._serialized_start=523
+  _globals['_COLORSET']._serialized_end=567
+  _globals['_VECTOR3']._serialized_start=569
+  _globals['_VECTOR3']._serialized_end=611
+  _globals['_QUATERNION']._serialized_start=613
+  _globals['_QUATERNION']._serialized_end=669
+  _globals['_BODYCONFIG']._serialized_start=672
+  _globals['_BODYCONFIG']._serialized_end=942
+  _globals['_SEAT']._serialized_start=944
+  _globals['_SEAT']._serialized_end=1009
+  _globals['_COMPONENT']._serialized_start=1012
+  _globals['_COMPONENT']._serialized_end=1679
+  _globals['_CONSTRAINTLIMITS']._serialized_start=1681
+  _globals['_CONSTRAINTLIMITS']._serialized_end=1725
+  _globals['_ENTITYCONSTRAINT']._serialized_start=1728
+  _globals['_ENTITYCONSTRAINT']._serialized_end=2501
+  _globals['_ENTITY']._serialized_start=2504
+  _globals['_ENTITY']._serialized_end=2652
 # @@protoc_insertion_point(module_scope)

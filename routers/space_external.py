@@ -7,11 +7,13 @@ import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from google.protobuf.message import DecodeError
 from pydantic import Field, StrictInt, StrictStr
 from sqlalchemy.orm import Session
 
 from space import models
 from config import settings
+from space.contracts import space_api_pb2
 from space.database import get_db
 from rate_limit import limiter
 from routers import space, space_entities as entities
@@ -32,6 +34,25 @@ class BuildBlocksetRequest(entities.StrictEntityModel):
     definition_base64: StrictStr = Field(min_length=1, max_length=((MAX_BUILD_BYTES + 2) // 3) * 4)
     position: entities.EntityPosition
     yaw_quarter_turns: StrictInt = Field(default=0, ge=0, le=3)
+
+
+async def build_blockset_request(request: Request) -> BuildBlocksetRequest:
+    """Accept a JSON model or an `entropydrop.space.api.v2.BuildBlocksetRequest`.
+
+    The binary envelope carries the canonical InventoryResource bytes directly,
+    matching the entity create/checkpoint envelopes and the CDN download format.
+    """
+    raw = await entities._protobuf_request_body(request)
+    if raw is None:
+        return entities.parse_json_model(BuildBlocksetRequest, await request.body())
+    envelope = entities._parse_protobuf_envelope(space_api_pb2.BuildBlocksetRequest, raw)
+    return BuildBlocksetRequest(
+        operation_id=entities._envelope_operation_id(envelope.operation_id),
+        created_at_ms=envelope.created_at_ms,
+        definition_base64=entities._envelope_definition_base64(envelope.definition),
+        position=entities._envelope_position(envelope),
+        yaw_quarter_turns=envelope.yaw_quarter_turns,
+    )
 
 
 class BuildTerrainBatch(space.TerrainMutationBatchRequest):
@@ -68,7 +89,8 @@ def _build_mutations(payload, canonical):
 
 @router.post("/blocksets/build", status_code=201)
 @limiter.limit(BUILD_RATE_LIMIT)
-def build_blockset(request: Request, world_id: uuid.UUID, payload: BuildBlocksetRequest,
+def build_blockset(request: Request, world_id: uuid.UUID,
+                   payload: BuildBlocksetRequest = Depends(build_blockset_request),
                    db: Session = Depends(get_db), creator: entities.EntityCreator = Depends(entities._entity_creator)):
     world = space._require_world_membership(db, str(world_id), creator.user)
     entities._validate_position(world, payload.position, require_buildable_height=True)

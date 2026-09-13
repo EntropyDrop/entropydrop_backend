@@ -174,7 +174,7 @@ class MarketVoxel(StrictResourceModel):
 
 class BlockSetPayload(StrictResourceModel):
     type: Literal["space-blockset"]
-    version: Literal[6]
+    version: Literal[7]
     name: StrictStr = Field(min_length=1, max_length=80)
     blocks: list[MarketVoxel] = Field(min_length=1, max_length=SPACE_MARKET_MAX_BLOCKS)
 
@@ -306,7 +306,7 @@ class EntityConstraint(StrictResourceModel):
 
 class EntityPayload(StrictResourceModel):
     type: Literal["space-entity"]
-    version: Literal[6]
+    version: Literal[7]
     root: EntityComponent
     constraints: list[EntityConstraint] = Field(default_factory=list, max_length=SPACE_MARKET_MAX_CONSTRAINTS)
 
@@ -361,7 +361,7 @@ class EntityPayload(StrictResourceModel):
 
 class ColorSetPayload(StrictResourceModel):
     type: Literal["space-colorset"]
-    version: Literal[6]
+    version: Literal[7]
     name: StrictStr = Field(min_length=1, max_length=80)
     colors: list[StrictStr] = Field(min_length=9, max_length=9)
 
@@ -734,7 +734,12 @@ def list_market_resources(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    filters = []
+    filters = [
+        # Legacy inventory v6 rows are retained in the database but cannot be
+        # decoded by current clients, so they stay out of listings until the
+        # publisher re-uploads them as v7.
+        models.SpaceMarketResource.schema_version == INVENTORY_SCHEMA_VERSION,
+    ]
     if kind:
         filters.append(models.SpaceMarketResource.kind == kind)
     if mine:
@@ -960,6 +965,15 @@ def download_market_resource(
     ).first()
     if resource is None:
         raise HTTPException(status_code=404, detail={"code": "MARKET_RESOURCE_NOT_FOUND"})
+
+    if int(resource.schema_version) != INVENTORY_SCHEMA_VERSION:
+        raise HTTPException(status_code=410, detail={
+            "code": "MARKET_RESOURCE_LEGACY_SCHEMA",
+            "message": (
+                "This resource was published with the retired inventory v6 schema. "
+                "It is retained but cannot be downloaded; re-publish it as v7."
+            ),
+        })
 
     if not resource.object_key:
         raise _market_storage_error("load")

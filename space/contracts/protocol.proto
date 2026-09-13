@@ -28,11 +28,11 @@ enum CommandStatus {
 }
 
 enum VoxelMutationKind {
-  VOXEL_MUTATION_UNSPECIFIED = 0;
-  VOXEL_SET_STANDARD = 1;
-  VOXEL_CLEAR_STANDARD = 2;
-  VOXEL_SET_MICRO = 3;
-  VOXEL_CLEAR_MICRO = 4;
+  VOXEL_MUTATION_KIND_UNSPECIFIED = 0;
+  VOXEL_MUTATION_KIND_SET_STANDARD = 1;
+  VOXEL_MUTATION_KIND_CLEAR_STANDARD = 2;
+  VOXEL_MUTATION_KIND_SET_MICRO = 3;
+  VOXEL_MUTATION_KIND_CLEAR_MICRO = 4;
 }
 
 enum QueueState {
@@ -52,64 +52,67 @@ enum PlayerPose {
 }
 
 enum LocalBuildKind {
-  LOCAL_BUILD_UNSPECIFIED = 0;
-  LOCAL_BUILD_ENTITY = 1;
-  LOCAL_BUILD_BLOCK_SET = 2;
+  LOCAL_BUILD_KIND_UNSPECIFIED = 0;
+  LOCAL_BUILD_KIND_ENTITY = 1;
+  LOCAL_BUILD_KIND_BLOCK_SET = 2;
 }
 
 enum DisconnectCode {
   DISCONNECT_CODE_UNSPECIFIED = 0;
-  DISCONNECT_PROTOCOL_MISMATCH = 1;
-  DISCONNECT_INVALID_JOIN_TICKET = 2;
-  DISCONNECT_ALREADY_CONNECTED = 3;
-  DISCONNECT_QUEUE_EXPIRED = 4;
-  DISCONNECT_SESSION_EXPIRED = 5;
-  DISCONNECT_SLOW_CLIENT = 6;
-  DISCONNECT_RATE_LIMITED = 7;
-  DISCONNECT_SERVER_MAINTENANCE = 8;
-  DISCONNECT_SERVER_OVERLOADED = 9;
+  DISCONNECT_CODE_PROTOCOL_MISMATCH = 1;
+  DISCONNECT_CODE_INVALID_JOIN_TICKET = 2;
+  DISCONNECT_CODE_ALREADY_CONNECTED = 3;
+  DISCONNECT_CODE_QUEUE_EXPIRED = 4;
+  DISCONNECT_CODE_SESSION_EXPIRED = 5;
+  DISCONNECT_CODE_SLOW_CLIENT = 6;
+  DISCONNECT_CODE_RATE_LIMITED = 7;
+  DISCONNECT_CODE_SERVER_MAINTENANCE = 8;
+  DISCONNECT_CODE_SERVER_OVERLOADED = 9;
 }
 
 enum PlayerPresenceKind {
-  PLAYER_PRESENCE_UNSPECIFIED = 0;
-  PLAYER_ENTER_AOI = 1;
-  PLAYER_LEAVE_AOI = 2;
-  PLAYER_IDENTITY_CHANGED = 3;
+  PLAYER_PRESENCE_KIND_UNSPECIFIED = 0;
+  PLAYER_PRESENCE_KIND_ENTER_AOI = 1;
+  PLAYER_PRESENCE_KIND_LEAVE_AOI = 2;
+  PLAYER_PRESENCE_KIND_IDENTITY_CHANGED = 3;
 }
 
 enum EntityPresenceKind {
-  ENTITY_PRESENCE_UNSPECIFIED = 0;
-  ENTITY_ENTER_AOI = 1;
-  ENTITY_LEAVE_AOI = 2;
-  ENTITY_DEFINITION_CHANGED = 3;
-  ENTITY_RUN_STATE_CHANGED = 4;
+  ENTITY_PRESENCE_KIND_UNSPECIFIED = 0;
+  ENTITY_PRESENCE_KIND_ENTER_AOI = 1;
+  ENTITY_PRESENCE_KIND_LEAVE_AOI = 2;
+  ENTITY_PRESENCE_KIND_DEFINITION_CHANGED = 3;
+  ENTITY_PRESENCE_KIND_RUN_STATE_CHANGED = 4;
 }
 
 enum EntityDesiredRunState {
-  ENTITY_RUN_DISABLED = 0;
-  ENTITY_RUN_ENABLED = 1;
+  ENTITY_DESIRED_RUN_STATE_DISABLED = 0;
+  ENTITY_DESIRED_RUN_STATE_ENABLED = 1;
 }
 
 enum EntityRuntimeHealth {
-  ENTITY_HEALTHY = 0;
-  ENTITY_RETRYABLE_FAULT = 1;
-  ENTITY_SCRIPTS_DISABLED = 2;
-  ENTITY_QUARANTINED = 3;
+  ENTITY_RUNTIME_HEALTH_HEALTHY = 0;
+  ENTITY_RUNTIME_HEALTH_RETRYABLE_FAULT = 1;
+  ENTITY_RUNTIME_HEALTH_SCRIPTS_DISABLED = 2;
+  ENTITY_RUNTIME_HEALTH_QUARANTINED = 3;
 }
 
 // Power-of-two values used in RemotePlayerDelta.changed_mask.
 enum RemotePlayerChangedField {
-  REMOTE_PLAYER_CHANGED_NONE = 0;
-  REMOTE_PLAYER_CHANGED_POSITION = 1;
-  REMOTE_PLAYER_CHANGED_VELOCITY = 2;
-  REMOTE_PLAYER_CHANGED_BODY_ROTATION = 4;
-  REMOTE_PLAYER_CHANGED_LOOK = 8;
-  REMOTE_PLAYER_CHANGED_POSE = 16;
-  REMOTE_PLAYER_CHANGED_ANIMATION = 32;
-  REMOTE_PLAYER_CHANGED_SKIN = 64;
+  REMOTE_PLAYER_CHANGED_FIELD_NONE = 0;
+  REMOTE_PLAYER_CHANGED_FIELD_POSITION = 1;
+  REMOTE_PLAYER_CHANGED_FIELD_VELOCITY = 2;
+  REMOTE_PLAYER_CHANGED_FIELD_BODY_ROTATION = 4;
+  REMOTE_PLAYER_CHANGED_FIELD_LOOK = 8;
+  REMOTE_PLAYER_CHANGED_FIELD_POSE = 16;
+  REMOTE_PLAYER_CHANGED_FIELD_ANIMATION = 32;
+  REMOTE_PLAYER_CHANGED_FIELD_SKIN = 64;
 }
 
 message ClientPacket {
+  // Current target value is 2, matching the package space.multiplayer.v2. A
+  // gateway rejects any ClientHello carrying another value with
+  // Disconnect(DISCONNECT_CODE_PROTOCOL_MISMATCH) before admission.
   uint32 protocol_version = 1;
   uint64 packet_sequence = 2;
   oneof body {
@@ -124,6 +127,8 @@ message ClientPacket {
 }
 
 message ServerPacket {
+  // Carries the same value as ClientPacket.protocol_version for the duration
+  // of the connection (currently 2).
   uint32 protocol_version = 1;
   uint64 packet_sequence = 2;
   uint64 server_tick = 3;
@@ -199,6 +204,11 @@ message InputBatch {
 message InputFrame {
   uint64 input_sequence = 1;
   uint64 client_tick = 2;
+  // Discrete input bits. Bit 0: jump request. Bit 1: crouch toggle.
+  // Bits 2..31: reserved, must be zero; servers ignore unknown bits.
+  // Continuous locomotion uses move_x_q15/move_z_q15, aiming uses
+  // look_yaw_q15/look_pitch_q15, and block/entity mutations are WorldCommands,
+  // never input buttons.
   uint32 buttons = 3;
   sint32 move_x_q15 = 4;
   sint32 move_z_q15 = 5;
@@ -237,6 +247,7 @@ message WorldCommand {
     ScriptCommand script = 12;
     LocalBuildPlacement local_build = 13;
   }
+  // Reserved when this contract was first drafted; never shipped. Do not reuse.
   reserved 14;
 }
 
@@ -253,6 +264,7 @@ message LocalBuildPlacement {
   sint32 target_x_cm = 7;
   sint32 target_y_cm = 8;
   sint32 target_z_cm = 9;
+  // Same 16.16 Q15 yaw/pitch packing as PlayerState.rotation_packed.
   uint32 target_rotation_packed = 10;
 }
 
@@ -270,6 +282,7 @@ message VoxelMutation {
   uint32 micro_x = 5;
   uint32 micro_y = 6;
   uint32 micro_z = 7;
+  // 0xRRGGBB.
   uint32 color_rgb = 8;
 }
 
@@ -340,6 +353,10 @@ message PlayerState {
   sint32 velocity_x_cms = 4;
   sint32 velocity_y_cms = 5;
   sint32 velocity_z_cms = 6;
+  // Packed orientation, 16.16 fixed point: low 16 bits hold yaw, high 16 bits
+  // hold pitch, each as a two's-complement Q15 value using the same convention
+  // as look_yaw_q15 (radians = value / 32767 * pi). Pitch is clamped to
+  // [-pi/2, pi/2] by the authoritative runtime.
   uint32 rotation_packed = 7;
 }
 
@@ -363,6 +380,7 @@ message RemotePlayerDelta {
   sint32 velocity_x_cms = 6;
   sint32 velocity_y_cms = 7;
   sint32 velocity_z_cms = 8;
+  // Same 16.16 Q15 yaw/pitch packing as PlayerState.rotation_packed.
   uint32 body_rotation_packed = 9;
   sint32 look_yaw_q15 = 10;
   sint32 look_pitch_q15 = 11;
@@ -461,6 +479,7 @@ message CommandResult {
   uint64 applied_server_tick = 4;
   repeated ChunkRevision chunks = 5;
   string reason = 6;
+  // Reserved when this contract was first drafted; never shipped. Do not reuse.
   reserved 7;
   uint64 entity_revision = 8;
 }

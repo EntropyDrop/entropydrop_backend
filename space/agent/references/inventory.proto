@@ -1,14 +1,22 @@
 syntax = "proto3";
 
-package entropydrop.space.inventory.v6;
+package entropydrop.space.inventory.v7;
 
 // Canonical binary contract for portable files, market uploads, and immutable
 // CDN objects. Derived counts and the constant block id
 // are intentionally omitted.
+// Voxel geometry follows the authoritative realtime schema
+// `space.multiplayer.v2` (see entropydrop_backend/space/contracts/protocol.proto):
+// micro offsets are separate `micro_x`/`micro_y`/`micro_z` fields in 0..7 guarded
+// by `is_micro`, and color is an unsigned `color_rgb` varint instead of a
+// `fixed32`. This file is the single source for portable content; the realtime
+// protocol must be updated together with it.
 // Canonical encoders normalize every double -0.0 to +0.0; sort BlockSet.blocks
-// and Component.blocks by (dx,dy,dz,micro coordinates,color); and sort
-// Component.children and Entity.constraints by Unicode code-point id order.
-// Color and seat order remains significant and is preserved.
+// and Component.blocks by (dx,dy,dz,is_micro,micro_x,micro_y,micro_z,color_rgb);
+// and sort Component.children and Entity.constraints by Unicode code-point id
+// order. Color and seat order remains significant and is preserved.
+// Schema v7 is a wire-breaking change: v6 files, backpacks and CDN objects are
+// intentionally rejected and are not migrated.
 message InventoryResource {
   uint32 schema_version = 1;
 
@@ -23,9 +31,18 @@ message Voxel {
   sint32 dx = 1;
   sint32 dy = 2;
   sint32 dz = 3;
-  // Present only for micro voxels. Value = 1 + mx + 8*my + 64*mz (mx/my/mz in 0..7).
-  optional uint32 micro_index = 4;
-  fixed32 color = 5;
+  // False selects the standard 1 m voxel. True selects the micro voxel at the
+  // cell-local offset below; this mirrors VoxelMutationKind in the realtime
+  // schema instead of the removed packed `micro_index`.
+  bool is_micro = 4;
+  // Cell-local micro offsets, each in 0..7. Meaningful only when is_micro is
+  // true; canonical encoders emit 0 for the standard scale.
+  uint32 micro_x = 5;
+  uint32 micro_y = 6;
+  uint32 micro_z = 7;
+  // RGB packed as 0xRRGGBB. Matches VoxelMutation.color_rgb in the realtime
+  // schema; the old `fixed32 color` wire type is no longer accepted.
+  uint32 color_rgb = 8;
 }
 
 message BlockSet {
@@ -35,7 +52,8 @@ message BlockSet {
 
 message ColorSet {
   string name = 1;
-  repeated fixed32 colors = 2 [packed = true];
+  // Packed 0xRRGGBB values, matching Voxel.color_rgb.
+  repeated uint32 colors = 2 [packed = true];
 }
 
 message Vector3 {

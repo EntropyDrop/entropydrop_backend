@@ -9,8 +9,15 @@ Use [inventory.proto](inventory.proto) as the binary schema. Generate language b
 ```sh
 python -m pip install protobuf grpcio-tools
 curl --fail-with-body "$SPACE_BASE_URL/space/agent/references/inventory.proto" -o inventory.proto
-python -m grpc_tools.protoc -I . --python_out=. inventory.proto
+curl --fail-with-body "$SPACE_BASE_URL/space/agent/references/space_api.proto" -o space_api.proto
+python -m grpc_tools.protoc -I . --python_out=. inventory.proto space_api.proto
 ```
+
+The preferred transport sends the canonical resource as raw bytes inside the
+`entropydrop.space.api.v2.CreateEntityRequest` envelope from
+[space_api.proto](space_api.proto) with `Content-Type: application/x-protobuf`. The
+`definition_base64` JSON example below uploads the same canonical bytes and remains
+accepted, so either form stores identical content and shares one content digest.
 
 The following example prepares **one stopped orange cube** six metres east of the player. Replace the component geometry and scripts with the user's requested construction. It refuses stale coordinates, saves a secret-free idempotent request file, and does not submit automatically. If the request file already exists, it preserves it for retry.
 
@@ -28,7 +35,7 @@ if not request_path.exists():
         pose = json.load(response)
     if pose['stale']:
         raise SystemExit('Player position is stale. Refresh it before building nearby.')
-    resource = pb.InventoryResource(schema_version=5)
+    resource = pb.InventoryResource(schema_version=7)
     root = resource.entity.root
     root.id, root.name = 'chassis', 'Orange cube'
     root.body.type = pb.BODY_TYPE_DYNAMIC

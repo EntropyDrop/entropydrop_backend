@@ -1,0 +1,18 @@
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    # Enum zero values are semantic (COMPRESSION_NONE, ENTITY_DESIRED_RUN_STATE_DISABLED,
+    # ENTITY_RUNTIME_HEALTH_HEALTHY, REMOTE_PLAYER_CHANGED_FIELD_NONE, ...), the packages
+    # do not mirror the contracts directory, and the directory intentionally holds two
+    # packages side by side: the target realtime protocol (space.multiplayer.v2) and the
+    # legacy v6 inventory schema kept for the space_0004 data migration.
+    - ENUM_ZERO_VALUE_SUFFIX
+    - PACKAGE_DIRECTORY_MATCH
+    - DIRECTORY_SAME_PACKAGE
+breaking:
+  use:
+    - FILE

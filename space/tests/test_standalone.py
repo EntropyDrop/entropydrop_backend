@@ -39,7 +39,7 @@ def local(monkeypatch):
         app.dependency_overrides[_entity_creator] = lambda: EntityCreator(user=user, credential='user-proof')
         client = TestClient(app)
         world = client.post('/space/api/v2/bootstrap').json()['world']['id']
-        definition = {'type': 'space-entity', 'version': 5, 'root': {'id': 'root', 'name': 'Local',
+        definition = {'type': 'space-entity', 'version': 7, 'root': {'id': 'root', 'name': 'Local',
             'body': {'type': 'dynamic', 'useGravity': False}, 'blocks': [{'dx':0,'dy':0,'dz':0,'block':1,'color':1}],
             'children': [], 'seats': []}, 'constraints': []}
         result = client.post(f'/space/api/v2/worlds/{world}/entities', json={'operation_id': str(uuid.uuid4()),

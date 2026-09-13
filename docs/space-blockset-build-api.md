@@ -29,21 +29,26 @@ Content-Type: application/json
 {
   "operation_id": "9157b55e-92e9-4dc5-bc52-13b79bcc8134",
   "created_at_ms": 1788580800000,
-  "definition_base64": "<base64 InventoryResource Protobuf v6, kind blockset>",
+  "definition_base64": "<base64 InventoryResource Protobuf v7, kind blockset>",
   "position": {"x_cm": 16000, "y_cm": 5000, "z_cm": 16000},
   "yaw_quarter_turns": 0
 }
 ```
 
+The preferred transport is `Content-Type: application/x-protobuf` with an
+`entropydrop.space.api.v2.BuildBlocksetRequest` body (`space_api.proto`), where `definition`
+is the raw canonical resource instead of base64. The JSON form above remains accepted and
+stores identical content.
+
 Generate a fresh UUID and current Unix millisecond timestamp for a new operation; the
-example timestamp is illustrative. `definition_base64` uses the same portable v6
+example timestamp is illustrative. `definition_base64` uses the same portable v7
 InventoryResource format as Backpack exports and the Market. Publishing to the Market
 is not required. The decoded blockset contains `name` and `blocks`, for example:
 
 ```json
 {
   "type": "space-blockset",
-  "version": 5,
+  "version": 7,
   "name": "Platform",
   "blocks": [
     {"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 11259375},
@@ -51,6 +56,9 @@ is not required. The decoded blockset contains `name` and `blocks`, for example:
   ]
 }
 ```
+
+The decoded JSON uses the portable `mx`/`my`/`mz` spelling; on the wire the v7 Voxel
+carries `is_micro` plus `micro_x`/`micro_y`/`micro_z` and `color_rgb`.
 
 - Origin coordinates are integer centimetres and must be multiples of 100 (the 1 m
   grid). Standard block offsets are metres; optional `mx/my/mz` in 0–7 identify 12.5 cm

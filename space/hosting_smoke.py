@@ -10,7 +10,7 @@ async def main():
     try:
         assert await runtime.step({"probe": True}) == {"ready": True}
         definition = encode_inventory_resource("entity", {
-            "type": "space-entity", "version": 5, "root": {"name": "Hosting smoke", "id": "root", "body": {"type": "dynamic", "useGravity": False},
+            "type": "space-entity", "version": 7, "root": {"name": "Hosting smoke", "id": "root", "body": {"type": "dynamic", "useGravity": False},
                 "blocks": [{"dx": 0, "dy": 0, "dz": 0, "block": 1, "color": 123}],
                 "script": "self.state.ticks = (self.state.ticks || 0) + 1;",
                 "children": [], "seats": []}, "constraints": []})
