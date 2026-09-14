@@ -262,18 +262,29 @@ app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
 
 
 
-# Register routers
-app.include_router(auth.router, prefix="/skin")
-app.include_router(generate.router, prefix="/skin")
-app.include_router(collections.router, prefix="/skin")
-app.include_router(address.router, prefix="/skin")
-app.include_router(order.router, prefix="/skin")
-app.include_router(webhooks.router, prefix="/skin")
-app.include_router(monitor.router, prefix="/skin")
-app.include_router(ledger.router, prefix="/skin")
-app.include_router(ledger.legacy_open_router, prefix="/skin")
-app.include_router(forum.router, prefix="/skin")
-app.include_router(credit.router, prefix="/skin")
+# Core routers providing /api/... endpoints
+core_routers = [
+    auth.router,
+    generate.router,
+    collections.router,
+    address.router,
+    order.router,
+    webhooks.router,
+    monitor.router,
+    ledger.router,
+    ledger.legacy_open_router,
+    forum.router,
+    credit.router,
+]
+
+# Standard API routes (e.g. /api/auth/..., /api/generate, /api/credits/...)
+for router in core_routers:
+    app.include_router(router)
+
+# Legacy compatibility routes (e.g. /skin/api/...)
+for router in core_routers:
+    app.include_router(router, prefix="/skin")
+
 app.include_router(space_billing.router)
 # Account-owned API keys and billing stay here; world requests always cross the gateway.
 app.include_router(space_accounts.api_key_router)
@@ -282,16 +293,22 @@ app.include_router(space_proxy_router)
 
 
 
+@app.get("/")
+@app.get("/api")
 @app.get("/skin")
 @limiter.exempt
 async def root():
     return {"message": "Welcome to ED Backend API!"}
 
+@app.get("/health")
+@app.get("/api/health")
 @app.get("/skin/api/health")
 @limiter.exempt
 async def health_check():
     return {"status": "ok", "service": "ed_backend"}
 
+@app.get("/ready")
+@app.get("/api/ready")
 @app.get("/skin/api/ready")
 @limiter.exempt
 async def readiness_check():
@@ -305,6 +322,8 @@ async def readiness_check():
         }
     )
 
+@app.get("/version")
+@app.get("/api/version")
 @app.get("/skin/api/version")
 @limiter.exempt
 async def get_version():
@@ -313,3 +332,4 @@ async def get_version():
         "deploy_time": os.getenv("DEPLOY_TIME", "unknown"),
         "git_commit": os.getenv("GIT_COMMIT", "unknown")
     }
+

@@ -135,7 +135,12 @@ def revoke_auth_session(db: Session, raw_token: str | None) -> None:
         db.commit()
 
 
-def set_auth_session_cookie(response: Response, raw_token: str, expires_at: datetime) -> None:
+def set_auth_session_cookie(
+    response: Response,
+    raw_token: str,
+    expires_at: datetime,
+    path: str = "/api/auth",
+) -> None:
     expires_at = _utc(expires_at)
     max_age = max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds()))
     response.set_cookie(
@@ -143,7 +148,7 @@ def set_auth_session_cookie(response: Response, raw_token: str, expires_at: date
         value=raw_token,
         max_age=max_age,
         expires=expires_at,
-        path="/skin/api/auth",
+        path=path,
         domain=settings.AUTH_SESSION_COOKIE_DOMAIN or None,
         secure=settings.AUTH_SESSION_COOKIE_SECURE,
         httponly=True,
@@ -152,14 +157,15 @@ def set_auth_session_cookie(response: Response, raw_token: str, expires_at: date
 
 
 def clear_auth_session_cookie(response: Response) -> None:
-    response.delete_cookie(
-        key=settings.AUTH_SESSION_COOKIE_NAME,
-        path="/skin/api/auth",
-        domain=settings.AUTH_SESSION_COOKIE_DOMAIN or None,
-        secure=settings.AUTH_SESSION_COOKIE_SECURE,
-        httponly=True,
-        samesite="lax",
-    )
+    for path in ["/api/auth", "/skin/api/auth", "/"]:
+        response.delete_cookie(
+            key=settings.AUTH_SESSION_COOKIE_NAME,
+            path=path,
+            domain=settings.AUTH_SESSION_COOKIE_DOMAIN or None,
+            secure=settings.AUTH_SESSION_COOKIE_SECURE,
+            httponly=True,
+            samesite="lax",
+        )
 
 
 def _user_from_access_payload(db: Session, payload: dict) -> models.User | None:

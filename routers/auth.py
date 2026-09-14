@@ -35,6 +35,11 @@ def _validate_session_request_origin(request: Request) -> None:
         raise HTTPException(status_code=403, detail={"code": "SESSION_ORIGIN_REJECTED"})
 
 
+def _cookie_path_for_request(request: Request) -> str:
+    if request.url.path.startswith("/skin"):
+        return "/skin/api/auth"
+    return "/api/auth"
+
 
 @router.post("/api/auth/google", response_model=schemas.TokenResponse)
 def google_login(
@@ -78,7 +83,12 @@ def google_login(
         db.refresh(user)
         
     session, raw_session_token = auth.create_auth_session(db, user.id)
-    auth.set_auth_session_cookie(response, raw_session_token, session.expires_at)
+    auth.set_auth_session_cookie(
+        response,
+        raw_session_token,
+        session.expires_at,
+        path=_cookie_path_for_request(request),
+    )
     access_token = auth.create_access_token(data={"sub": user.id}, session_id=session.id)
     import backend_utils
     backend_utils.award_daily_login_credits(db, user)
@@ -125,7 +135,12 @@ def refresh_login_session(
         auth.clear_auth_session_cookie(failed)
         return failed
 
-    auth.set_auth_session_cookie(response, raw_session_token or "", session.expires_at)
+    auth.set_auth_session_cookie(
+        response,
+        raw_session_token or "",
+        session.expires_at,
+        path=_cookie_path_for_request(request),
+    )
     return {
         "access_token": auth.create_access_token(
             data={"sub": session.user_id},

@@ -11,6 +11,12 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 os.environ.setdefault('SPACE_SERVICE_URL', '')
 # TestClient uses HTTP; do not inherit the developer's HTTPS cookie setting.
 os.environ.setdefault('AUTH_SESSION_COOKIE_SECURE', 'false')
+os.environ.setdefault('DATABASE_URL', 'sqlite:///:memory:')
+os.environ.setdefault('JWT_SECRET_KEY', 'test-secret-key-32-bytes-long-for-tests-1234')
+os.environ.setdefault('JWT_ALGORITHM', 'HS256')
+os.environ.setdefault('AWS_REGION', 'us-east-1')
+os.environ.setdefault('AWS_BUCKET_NAME', 'test-bucket')
+os.environ.setdefault('AWS_PRIVATE_BUCKET_NAME', 'test-private-bucket')
 
 # Mock Redis globally for testing to avoid polluting real Redis
 import redis
