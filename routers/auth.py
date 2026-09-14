@@ -41,6 +41,13 @@ def _cookie_path_for_request(request: Request) -> str:
     return "/api/auth"
 
 
+@router.get("/api/auth/config")
+def login_configuration(response: Response):
+    """Public browser configuration shared by the main site and Space."""
+    response.headers["Cache-Control"] = "no-store"
+    return {"google_client_id": settings.GOOGLE_CLIENT_ID}
+
+
 @router.post("/api/auth/google", response_model=schemas.TokenResponse)
 def google_login(
     req: schemas.GoogleAuthRequest,
@@ -132,7 +139,10 @@ def refresh_login_session(
         session = auth.refresh_auth_session(db, raw_session_token)
     except HTTPException as error:
         failed = JSONResponse(status_code=error.status_code, content={"detail": error.detail})
-        auth.clear_auth_session_cookie(failed)
+        # A cookie scoped to the other route alias is absent from this request.
+        # Never erase it before the browser can try that alias.
+        if raw_session_token:
+            auth.clear_auth_session_cookie(failed, path=_cookie_path_for_request(request))
         return failed
 
     auth.set_auth_session_cookie(

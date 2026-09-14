@@ -580,3 +580,47 @@ def test_session_origin_reads_development_settings(monkeypatch):
     with pytest.raises(HTTPException) as error:
         _validate_session_request_origin(request('https://untrusted.example'))
     assert error.value.status_code == 403
+
+
+@pytest.mark.parametrize("login_path,other_path", [
+    ("/skin/api/auth", "/api/auth"),
+    ("/api/auth", "/skin/api/auth"),
+])
+def test_refresh_on_other_alias_preserves_existing_login_cookie(client, db, monkeypatch, login_path, other_path):
+    import auth as auth_module
+    monkeypatch.setattr(auth_module, "verify_google_token", lambda token: {
+        "email": "space-sso@example.com", "sub": "google-space-sso", "email_verified": True,
+    })
+    assert client.post(login_path + "/google", json={"token": "mock"}).status_code == 200
+    monkeypatch.setattr(settings, "CORS_ORIGINS", "https://space.entropydrop.com")
+    monkeypatch.delenv("CORS_ORIGINS", raising=False)
+    session_cookie = client.cookies.get(settings.AUTH_SESSION_COOKIE_NAME)
+    # A browser sends a path-scoped cookie only to its matching endpoint.
+    missing = client.post(other_path + "/refresh")
+    assert missing.status_code == 401
+    assert "set-cookie" not in missing.headers
+    assert client.cookies.get(settings.AUTH_SESSION_COOKIE_NAME) == session_cookie
+    # Space can still restore the same account through the legacy alias.
+    restored = client.post(login_path + "/refresh", headers={"Origin": "https://space.entropydrop.com"})
+    assert restored.status_code == 200
+    profile = client.get("/api/users/me", headers={"Authorization": "Bearer " + restored.json()["access_token"]})
+    assert profile.status_code == 200
+    assert profile.json()["email"] == "space-sso@example.com"
+
+
+def test_bad_cookie_only_clears_its_own_alias(client):
+    client.cookies.set(settings.AUTH_SESSION_COOKIE_NAME, "bad-cookie", path="/api/auth")
+    client.cookies.set(settings.AUTH_SESSION_COOKIE_NAME, "other-session", path="/skin/api/auth")
+    response = client.post("/api/auth/refresh")
+    assert response.status_code == 401
+    assert client.cookies.get(settings.AUTH_SESSION_COOKIE_NAME, path="/skin/api/auth") == "other-session"
+    assert all("Path=/api/auth" in header for header in response.headers.get_list("set-cookie"))
+
+
+def test_google_browser_configuration_is_shared_and_public(client, monkeypatch):
+    monkeypatch.setattr(settings, "GOOGLE_CLIENT_ID", "shared-client.apps.googleusercontent.com")
+    for prefix in ("", "/skin"):
+        response = client.get(prefix + "/api/auth/config")
+        assert response.status_code == 200
+        assert response.json() == {"google_client_id": "shared-client.apps.googleusercontent.com"}
+        assert response.headers["cache-control"] == "no-store"

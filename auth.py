@@ -156,8 +156,8 @@ def set_auth_session_cookie(
     )
 
 
-def clear_auth_session_cookie(response: Response) -> None:
-    for path in ["/api/auth", "/skin/api/auth", "/"]:
+def clear_auth_session_cookie(response: Response, *, path: str | None = None) -> None:
+    for path in ([path] if path else ["/api/auth", "/skin/api/auth", "/"]):
         response.delete_cookie(
             key=settings.AUTH_SESSION_COOKIE_NAME,
             path=path,
