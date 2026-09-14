@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     # Runtime mode. Production enables stricter startup validation.
     ENVIRONMENT: str = "development"
+    CORS_ORIGINS: str = ""
     STRICT_CONFIG_VALIDATION: bool = False
 
     # Redis Config

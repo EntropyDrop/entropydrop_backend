@@ -564,3 +564,19 @@ def test_update_minecraft_skin_restrictions(client, db, withdrawal_storage):
     assert user.skin_url is None
 
     app.dependency_overrides.clear()
+
+
+def test_session_origin_reads_development_settings(monkeypatch):
+    from config import settings
+    from routers.auth import _validate_session_request_origin
+    from starlette.requests import Request
+    from fastapi import HTTPException
+    import pytest
+    monkeypatch.delenv('CORS_ORIGINS', raising=False)
+    monkeypatch.setattr(settings, 'CORS_ORIGINS', 'https://space-dev-908123.entropydrop.com')
+    def request(origin):
+        return Request({'type': 'http', 'headers': [(b'origin', origin.encode())]})
+    _validate_session_request_origin(request('https://space-dev-908123.entropydrop.com'))
+    with pytest.raises(HTTPException) as error:
+        _validate_session_request_origin(request('https://untrusted.example'))
+    assert error.value.status_code == 403

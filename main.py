@@ -245,7 +245,7 @@ _default_origins = [
 ]
 _cors_origins = [
     o.strip()
-    for o in os.getenv("CORS_ORIGINS", "").split(",")
+    for o in os.getenv("CORS_ORIGINS", settings.CORS_ORIGINS).split(",")
     if o.strip()
 ] or _default_origins
 

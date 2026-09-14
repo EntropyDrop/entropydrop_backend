@@ -22,7 +22,7 @@ def _validate_session_request_origin(request: Request) -> None:
         return
     allowed_origins = {
         value.strip()
-        for value in os.getenv("CORS_ORIGINS", "").split(",")
+        for value in os.getenv("CORS_ORIGINS", settings.CORS_ORIGINS).split(",")
         if value.strip()
     } or {
         "https://entropydrop.com",
