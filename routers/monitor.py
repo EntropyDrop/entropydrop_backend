@@ -4,6 +4,8 @@ from redis import Redis
 from rq import Worker, Queue
 from config import settings
 import json
+import math
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 from auth import get_current_admin
 from models import User, GenerationLog, Order, CollectionItem, UserLike, UserFeedback, Collection, ShippingAddress, OrderItem, ForumPost, ForumComment, ForumPostLike, ForumNotification, CreditLog
@@ -847,3 +849,328 @@ async def get_sking_ddj_generations(
         "page_size": page_size,
         "total_pages": total_pages
     }
+
+
+def _match_subscription_credit_log(
+    order: Order,
+    user: Optional[User],
+    user_credit_logs: List[CreditLog],
+    expected_credits: int,
+) -> tuple:
+    """
+    Match a paid subscription order to its corresponding CreditLog.
+    Returns (matched_credit_log, grant_status, status_message).
+    """
+    order_paid_time = order.paid_at or order.created_at
+    if order_paid_time and order_paid_time.tzinfo is None:
+        order_paid_time = order_paid_time.replace(tzinfo=timezone.utc)
+
+    # Filter logs belonging to this user
+    user_logs = [l for l in user_credit_logs if l.user_id == order.user_id and l.action == "subscription_grant"]
+
+    matched_log: Optional[CreditLog] = None
+
+    # Priority 0: Explicit compensation log for this order
+    for log in user_logs:
+        if log.idempotency_key and f"compensation:{order.id}:" in log.idempotency_key:
+            matched_log = log
+            break
+        if log.source and f"Order {order.id}" in log.source:
+            matched_log = log
+            break
+
+    # Priority 1: Match by idempotency key containing paid_at ISO string (payment cycle key)
+    if not matched_log and order.paid_at:
+        paid_iso = order.paid_at.astimezone(timezone.utc).isoformat()
+        paid_date_str = paid_iso[:19]
+        for log in user_logs:
+            if log.idempotency_key and paid_date_str in log.idempotency_key:
+                matched_log = log
+                break
+
+    # Priority 2: Match by PayPal sale ID or subscription ID in idempotency_key or source
+    if not matched_log:
+        identifiers = []
+        if order.paypal_order_id:
+            identifiers.append(order.paypal_order_id)
+        if user and user.paypal_subscription_id:
+            identifiers.append(user.paypal_subscription_id)
+
+        for ident in identifiers:
+            for log in user_logs:
+                if (log.idempotency_key and ident in log.idempotency_key) or (log.source and ident in log.source):
+                    if order_paid_time and log.created_at:
+                        log_time = log.created_at if log.created_at.tzinfo else log.created_at.replace(tzinfo=timezone.utc)
+                        # Within 35 days (a billing cycle)
+                        if abs((log_time - order_paid_time).total_seconds()) <= 35 * 86400:
+                            matched_log = log
+                            break
+                    else:
+                        matched_log = log
+                        break
+            if matched_log:
+                break
+
+    # Priority 3: Proximity in time within 48 hours of payment
+    if not matched_log and order_paid_time:
+        best_diff = None
+        for log in user_logs:
+            if log.created_at:
+                log_time = log.created_at if log.created_at.tzinfo else log.created_at.replace(tzinfo=timezone.utc)
+                diff = abs((log_time - order_paid_time).total_seconds())
+                if diff <= 48 * 3600:
+                    if best_diff is None or diff < best_diff:
+                        best_diff = diff
+                        matched_log = log
+
+    if not matched_log:
+        return None, "missing", "扣款已确认，但缺少积分发放记录"
+    elif matched_log.amount >= expected_credits:
+        return matched_log, "success", "积分已成功发放"
+    else:
+        return matched_log, "mismatch", f"实充积分({matched_log.amount})低于方案应充额度({expected_credits})"
+
+
+@router.get("/subscription-credit-audits")
+@limiter.exempt
+async def get_subscription_credit_audits(
+    page: int = 1,
+    page_size: int = 15,
+    status_filter: str = "all",
+    search: Optional[str] = None,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db)
+):
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 15
+    elif page_size > 100:
+        page_size = 100
+
+    query = db.query(Order).filter(
+        Order.order_type == "subscription",
+        Order.status == "paid"
+    )
+
+    if search and search.strip():
+        search_term = search.strip()
+        query = query.outerjoin(User, User.id == Order.user_id).filter(
+            (Order.id.ilike(f"%{search_term}%")) |
+            (Order.paypal_order_id.ilike(f"%{search_term}%")) |
+            (Order.user_id == search_term) |
+            (User.email.ilike(f"%{search_term}%")) |
+            (User.username.ilike(f"%{search_term}%")) |
+            (User.paypal_subscription_id.ilike(f"%{search_term}%"))
+        )
+
+    # Sort descending by payment time
+    query = query.order_by(func.coalesce(Order.paid_at, Order.created_at).desc())
+    matched_orders = query.all()
+
+    if not matched_orders:
+        return {
+            "summary": {
+                "total_orders": 0,
+                "success_count": 0,
+                "anomaly_count": 0,
+                "total_credits_granted": 0,
+                "total_revenue": 0.0,
+            },
+            "items": [],
+            "total_count": 0,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": 1,
+        }
+
+    # Batch fetch related users, order items, and credit logs
+    order_ids = [o.id for o in matched_orders]
+    user_ids = list({o.user_id for o in matched_orders})
+
+    users = db.query(User).filter(User.id.in_(user_ids)).all()
+    user_map = {u.id: u for u in users}
+
+    order_items = db.query(OrderItem).filter(OrderItem.order_id.in_(order_ids)).all()
+    order_item_map = {item.order_id: item for item in order_items}
+
+    credit_logs = db.query(CreditLog).filter(
+        CreditLog.user_id.in_(user_ids),
+        CreditLog.action == "subscription_grant"
+    ).order_by(CreditLog.created_at.desc()).all()
+
+    logs_by_user: Dict[str, List[CreditLog]] = {}
+    for log in credit_logs:
+        logs_by_user.setdefault(log.user_id, []).append(log)
+
+    all_audited_items = []
+    total_orders = len(matched_orders)
+    success_count = 0
+    anomaly_count = 0
+    total_credits_granted = 0
+    total_revenue = 0.0
+
+    for order in matched_orders:
+        user = user_map.get(order.user_id)
+        item = order_item_map.get(order.id)
+
+        # Plan type and expected credits
+        is_pro_max = (item and item.model_type == "pro-max") or (user and user.pro_level == "pro-max")
+        expected_credits = 200 if is_pro_max else 80
+        plan_type = "pro-max" if is_pro_max else "pro-plus"
+        plan_name = "Pro Max" if is_pro_max else "Pro Plus"
+
+        user_logs = logs_by_user.get(order.user_id, [])
+        matched_log, grant_status, status_message = _match_subscription_credit_log(
+            order, user, user_logs, expected_credits
+        )
+
+        granted_credits = matched_log.amount if matched_log else 0
+        total_revenue += float(order.price or 0.0)
+
+        if grant_status == "success":
+            success_count += 1
+            total_credits_granted += granted_credits
+        else:
+            anomaly_count += 1
+            total_credits_granted += granted_credits
+
+        audit_record = {
+            "order_id": order.id,
+            "user_id": order.user_id,
+            "user_email": user.email if user else "Unknown/Deleted User",
+            "user_username": user.username if user else None,
+            "user_current_credits": user.credits if user else 0,
+            "user_pro_level": user.pro_level if user else None,
+            "paypal_subscription_id": user.paypal_subscription_id if user else None,
+            "paypal_order_id": order.paypal_order_id,
+            "plan_type": plan_type,
+            "plan_name": plan_name,
+            "price": float(order.price or 0.0),
+            "paid_at": order.paid_at.isoformat() if order.paid_at else None,
+            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "expected_credits": expected_credits,
+            "granted_credits": granted_credits,
+            "grant_status": grant_status,
+            "status_message": status_message,
+            "credit_log": {
+                "id": matched_log.id,
+                "amount": matched_log.amount,
+                "action": matched_log.action,
+                "source": matched_log.source,
+                "idempotency_key": matched_log.idempotency_key,
+                "created_at": matched_log.created_at.isoformat() if matched_log.created_at else None,
+            } if matched_log else None,
+        }
+        all_audited_items.append(audit_record)
+
+    # Filter by status
+    if status_filter == "anomaly":
+        filtered_items = [item for item in all_audited_items if item["grant_status"] in ("missing", "mismatch")]
+    elif status_filter == "success":
+        filtered_items = [item for item in all_audited_items if item["grant_status"] == "success"]
+    else:
+        filtered_items = all_audited_items
+
+    total_filtered_count = len(filtered_items)
+    total_pages = math.ceil(total_filtered_count / page_size) if total_filtered_count > 0 else 1
+    offset = (page - 1) * page_size
+    paged_items = filtered_items[offset : offset + page_size]
+
+    return {
+        "summary": {
+            "total_orders": total_orders,
+            "success_count": success_count,
+            "anomaly_count": anomaly_count,
+            "total_credits_granted": total_credits_granted,
+            "total_revenue": round(total_revenue, 2),
+        },
+        "items": paged_items,
+        "total_count": total_filtered_count,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+
+@router.post("/subscription-credit-audits/{order_id}/compensate")
+@limiter.exempt
+async def compensate_subscription_credits(
+    order_id: str,
+    admin: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.order_type != "subscription":
+        raise HTTPException(status_code=400, detail="Order is not a subscription order")
+    if order.status != "paid":
+        raise HTTPException(status_code=400, detail=f"Order status is '{order.status}', cannot compensate unpaid order")
+
+    user = db.query(User).filter(User.id == order.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Associated user not found")
+
+    item = db.query(OrderItem).filter(OrderItem.order_id == order.id).first()
+    expected_credits = 200 if ((item and item.model_type == "pro-max") or user.pro_level == "pro-max") else 80
+
+    # Fetch user's credit logs
+    user_logs = db.query(CreditLog).filter(
+        CreditLog.user_id == user.id,
+        CreditLog.action == "subscription_grant",
+    ).all()
+
+    matched_log, grant_status, _ = _match_subscription_credit_log(order, user, user_logs, expected_credits)
+    if grant_status == "success" and matched_log and matched_log.amount >= expected_credits:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Order already has full credits ({matched_log.amount}) granted in log {matched_log.id}"
+        )
+
+    already_granted = matched_log.amount if matched_log else 0
+    missing_credits = expected_credits - already_granted
+
+    if missing_credits <= 0:
+        raise HTTPException(status_code=400, detail="No missing credits to compensate")
+
+    try:
+        lock_balance(db, user)
+        user.credits = (user.credits or 0) + missing_credits
+
+        sub_id_ref = user.paypal_subscription_id or order.paypal_order_id or "Direct"
+        comp_log = CreditLog(
+            user_id=user.id,
+            amount=missing_credits,
+            action="subscription_grant",
+            source=f"Admin Compensation for Order {order.id}: {sub_id_ref}",
+            idempotency_key=f"compensation:{order.id}:{int(datetime.now(timezone.utc).timestamp())}",
+        )
+        db.add(comp_log)
+        db.flush()
+
+        notif = ForumNotification(
+            user_id=user.id,
+            sender_id=None,
+            type="subscription_grant",
+            post_id=None,
+            comment_id=str(missing_credits),
+            is_read=False,
+        )
+        db.add(notif)
+        db.commit()
+
+        return {
+            "status": "success",
+            "order_id": order.id,
+            "user_id": user.id,
+            "user_email": user.email,
+            "compensated_credits": missing_credits,
+            "new_user_credits": user.credits,
+            "credit_log_id": comp_log.id,
+            "message": f"Successfully compensated {missing_credits} credits to {user.email} for order {order.id}",
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to compensate credits: {e}")
+
