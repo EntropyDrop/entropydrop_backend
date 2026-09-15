@@ -92,9 +92,10 @@ def authorize(payload: AuthorizationRequest, db: Session = Depends(get_db)):
             raise HTTPException(409, detail={"code": "ENTITY_OPERATION_ID_REUSED"})
         db.commit()
         return {"id": aid, "user_id": user.id}
-    old = db.query(models.SpaceCreditAuthorization).filter_by(world_id=str(payload.world_id), entity_id=str(payload.entity_id)).all()
-    if any(row.user_id != user.id for row in old):
-        raise HTTPException(403, detail={"code": "ENTITY_HOSTING_FORBIDDEN"})
+    # The authenticated Space service enforces exclusive execution occupancy.
+    # Historical funding is not ownership: a later world participant may buy
+    # new hosting using their own credential, never the previous payer's balance.
+    old = db.query(models.SpaceCreditAuthorization).filter_by(world_id=str(payload.world_id), entity_id=str(payload.entity_id)).with_for_update().all()
     for row in old:
         row.enabled = False
     db.add(models.SpaceCreditAuthorization(id=aid, user_id=user.id, world_id=str(payload.world_id),

@@ -78,3 +78,27 @@ def test_legacy_key_identity_has_full_space_access_without_admin_access(account,
     assert response.status_code == 200, response.text
     assert response.json()['scopes'] == list(SPACE_API_KEY_SCOPES)
     assert response.json()['is_admin'] is False
+
+
+def test_later_entity_operator_funds_hosting_from_their_own_account(account, db):
+    from models import SpaceCreditAuthorization
+    author, post, payload, old_aid = account
+    operator = User(id='billing-operator', email='operator@example.com', username='operator', credits=3)
+    token = 'edapi_operator_test'
+    db.add(operator)
+    db.add(SpaceApiKey(id=str(uuid.uuid4()), user_id=operator.id, name='operator', key_prefix='edapi_',
+        token_hash=hashlib.sha256(token.encode()).digest(), scopes=['space:entity:create']))
+    db.commit()
+    # Exclusive world occupation is validated by the service before this RPC.
+    response = post('authorizations', {**payload, 'credential': token, 'operation_id': str(uuid.uuid4())})
+    assert response.status_code == 200, response.text
+    aid = response.json()['id']
+    assert response.json()['user_id'] == operator.id
+    assert db.get(SpaceCreditAuthorization, aid).user_id == operator.id
+    assert not db.get(SpaceCreditAuthorization, old_aid).enabled
+    assert post('reservations', {'id': str(uuid.uuid4()), 'authorization_id': old_aid}).status_code == 409
+    reservation = {'id': str(uuid.uuid4()), 'authorization_id': aid}
+    assert post('reservations', reservation).json()['state'] == 'reserved'
+    assert post('reservations/capture', reservation).json()['state'] == 'captured'
+    assert author.credits == 2, 'must never debit the entity creator or historical payer'
+    assert operator.credits == 2
