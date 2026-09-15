@@ -1,7 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 
+SKING_DDJ_V101C = "SKING_DDJ_v101c"
 SKING_DDJ_V104B = "SKING_DDJ_v104b"
 SKING_DDJ_V104 = "SKING_DDJ_v104"
 SKING_DDJ_V61B = "SKING_DDJ_v61b"
@@ -31,23 +32,31 @@ class SkinPipelineSpec:
         }
 
 
+_V104B_PIPELINE = SkinPipelineSpec(
+    prompt_file="real_to_render3.zh-hans.txt",
+    template_files=(
+        "template51.png",
+        "template66.png",
+        "template67.png",
+        "template68.png",
+        "template73.png",
+    ),
+    provider_model="nano-banana-pro",
+    image_size="1K",
+    aspect_ratio="1:1",
+    dense_uv_checkpoint_file="SKING_DDJ_v104/parser.pt",
+    DMR_mappings_dir="mappings_256x512",
+)
+
+# Keep the retired pipeline available for callbacks and recovery of in-flight jobs.
+# v101c changes only the UV release; generation assets and settings stay identical.
 MODEL_PIPELINES = MappingProxyType(
     {
-        SKING_DDJ_V104B: SkinPipelineSpec(
-            prompt_file="real_to_render3.zh-hans.txt",
-            template_files=(
-                "template51.png",
-                "template66.png",
-                "template67.png",
-                "template68.png",
-                "template73.png",
-            ),
-            provider_model="nano-banana-pro",
-            image_size="1K",
-            aspect_ratio="1:1",
-            dense_uv_checkpoint_file="SKING_DDJ_v104/parser.pt",
-            DMR_mappings_dir="mappings_256x512",
+        SKING_DDJ_V101C: replace(
+            _V104B_PIPELINE,
+            dense_uv_checkpoint_file="SKING_DDJ_v101c/parser.pt",
         ),
+        SKING_DDJ_V104B: _V104B_PIPELINE,
     }
 )
 
