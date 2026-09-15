@@ -357,11 +357,11 @@ def test_model_pipeline_mapping_is_immutable():
     ]
     assert pipeline.prompt_file == "real_to_render3.zh-hans.txt"
     assert pipeline.template_files == (
-        "template41.png",
         "template51.png",
         "template66.png",
         "template67.png",
         "template68.png",
+        "template73.png",
     )
     assert pipeline.provider_model == "nano-banana-pro"
     assert pipeline.image_size == "1K"
@@ -2010,4 +2010,3 @@ def test_v104b_spec():
     assert payload["prompt_file"] == "real_to_render3.zh-hans.txt"
     assert payload["dense_uv_checkpoint_file"] == "SKING_DDJ_v104/parser.pt"
     assert payload["provider_model"] == "nano-banana-pro"
-
