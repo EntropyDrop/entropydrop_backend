@@ -61,7 +61,9 @@ def get_real_remote_address(request: Request) -> str:
 
     return client_host
 
+# Temporarily disabled to eliminate false-positive 429s across users
 limiter = Limiter(
     key_func=get_real_remote_address,
-    default_limits=["60/minute", "1000/hour", "4000/day"]
+    default_limits=["60/minute", "1000/hour", "4000/day"],
+    enabled=False,
 )

@@ -547,7 +547,7 @@ def test_activate_subscription_rejects_non_active_subscription(mock_get_subscrip
     }
 
     response = client.post("/skin/api/orders/subscription/activate", json={"paypal_order_id": "SUB-1"})
-    assert response.status_code == 400
+    assert response.status_code == 409
     user = db.query(User).filter(User.id == "1").first()
     assert user.paypal_subscription_id is None
 

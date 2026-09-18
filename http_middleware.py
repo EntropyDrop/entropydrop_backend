@@ -121,6 +121,9 @@ async def limit_upload_size(request: Request, call_next):
         )
 
 def rate_limit_exceeded_handler(request, exc):
+    from rate_limit import get_real_remote_address
+    client_ip = get_real_remote_address(request)
+    logger.warning("Rate limit exceeded: client_ip=%s path=%s detail=%s", client_ip, request.url.path, exc)
     return JSONResponse(
         status_code=429,
         content={"detail": "Too many requests."}

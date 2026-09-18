@@ -725,6 +725,8 @@ def activate_subscription(
         sub_data = get_paypal_subscription_api(sub_id)
         status = sub_data.get("status")
         
+        if status in ("APPROVAL_PENDING", "APPROVED"):
+            raise HTTPException(status_code=409, detail=f"Subscription status is {status}; retry shortly")
         if status != "ACTIVE":
             raise HTTPException(status_code=400, detail=f"Subscription status is {status}")
 

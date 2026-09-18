@@ -244,3 +244,127 @@ def test_paypal_webhook_subscription_payment_sale_completed_dual_route(monkeypat
     assert new_order.user_id == user_new.id
     assert new_order.status == "paid"
 
+
+def test_payment_webhook_links_verified_custom_id_before_browser_activation(monkeypatch, client, db):
+    monkeypatch.setattr("routers.webhooks.settings.PAYPAL_WEBHOOK_ID", "WH-123")
+    monkeypatch.setattr("routers.webhooks.settings.PAYPAL_PRO_PLUS_PLAN_ID", "PLAN-PRO-PLUS")
+    monkeypatch.setattr("payment_utils.verify_paypal_webhook_signature", lambda *args: True)
+
+    user = models.User(
+        id="USERRACE00000001",
+        email="race@example.com",
+        credits=0,
+    )
+    db.add(user)
+    db.commit()
+
+    monkeypatch.setattr(
+        "payment_utils.get_paypal_subscription_api",
+        lambda sub_id: {
+            "id": sub_id,
+            "status": "ACTIVE",
+            "plan_id": "PLAN-PRO-PLUS",
+            "custom_id": user.id,
+            "billing_info": {
+                "last_payment": {
+                    "time": "2026-09-17T15:13:35Z",
+                    "amount": {"value": "8.0", "currency_code": "USD"},
+                },
+                "next_billing_time": "2026-10-17T10:00:00Z",
+            },
+        },
+    )
+    event = {
+        "id": "WH-RACE-1",
+        "event_type": "PAYMENT.SALE.COMPLETED",
+        "resource": {
+            "id": "SALE-RACE-1",
+            "billing_agreement_id": "SUB-RACE-1",
+            "amount": {"total": "8.00", "currency": "USD"},
+        },
+    }
+
+    for _ in range(2):
+        response = client.post("/api/webhooks/paypal", json=event)
+        assert response.status_code == 200
+        assert response.json() == {"status": "success"}
+
+    db.refresh(user)
+    assert user.paypal_subscription_id == "SUB-RACE-1"
+    assert user.paypal_subscription_status == "ACTIVE"
+    assert user.pro_level == "pro-plus"
+    assert user.credits == 80
+    assert db.query(models.Order).filter_by(paypal_order_id="SALE-RACE-1").count() == 1
+    assert db.query(models.CreditLog).filter_by(action="subscription_grant").count() == 1
+
+
+def test_activation_webhook_links_verified_custom_id(monkeypatch, client, db):
+    monkeypatch.setattr("routers.webhooks.settings.PAYPAL_WEBHOOK_ID", "WH-123")
+    monkeypatch.setattr("routers.webhooks.settings.PAYPAL_PRO_PLUS_PLAN_ID", "PLAN-PRO-PLUS")
+    monkeypatch.setattr("payment_utils.verify_paypal_webhook_signature", lambda *args: True)
+
+    user = models.User(id="USERACTIVE000001", email="active@example.com")
+    db.add(user)
+    db.commit()
+    monkeypatch.setattr(
+        "payment_utils.get_paypal_subscription_api",
+        lambda sub_id: {
+            "id": sub_id,
+            "status": "ACTIVE",
+            "plan_id": "PLAN-PRO-PLUS",
+            "custom_id": user.id,
+        },
+    )
+
+    response = client.post(
+        "/api/webhooks/paypal",
+        json={
+            "id": "WH-ACTIVE-1",
+            "event_type": "BILLING.SUBSCRIPTION.ACTIVATED",
+            "resource": {"id": "SUB-ACTIVE-1"},
+        },
+    )
+
+    assert response.status_code == 200
+    db.refresh(user)
+    assert user.paypal_subscription_id == "SUB-ACTIVE-1"
+    assert user.paypal_subscription_status == "ACTIVE"
+    assert user.pro_level == "free"
+    assert user.credits == 0
+
+
+def test_payment_webhook_retries_when_verified_owner_is_unknown(monkeypatch, client, db):
+    monkeypatch.setattr("routers.webhooks.settings.PAYPAL_WEBHOOK_ID", "WH-123")
+    monkeypatch.setattr("routers.webhooks.settings.PAYPAL_PRO_PLUS_PLAN_ID", "PLAN-PRO-PLUS")
+    monkeypatch.setattr("payment_utils.verify_paypal_webhook_signature", lambda *args: True)
+    monkeypatch.setattr(
+        "payment_utils.get_paypal_subscription_api",
+        lambda sub_id: {
+            "id": sub_id,
+            "status": "ACTIVE",
+            "plan_id": "PLAN-PRO-PLUS",
+            "custom_id": "MISSINGUSER00001",
+            "billing_info": {
+                "last_payment": {
+                    "time": "2026-09-17T15:13:35Z",
+                    "amount": {"value": "8.00", "currency_code": "USD"},
+                },
+                "next_billing_time": "2026-10-17T10:00:00Z",
+            },
+        },
+    )
+
+    response = client.post(
+        "/api/webhooks/paypal",
+        json={
+            "event_type": "PAYMENT.SALE.COMPLETED",
+            "resource": {
+                "id": "SALE-NO-OWNER",
+                "billing_agreement_id": "SUB-NO-OWNER",
+                "amount": {"total": "8.00", "currency": "USD"},
+            },
+        },
+    )
+
+    assert response.status_code == 409
+    assert db.query(models.Order).filter_by(paypal_order_id="SALE-NO-OWNER").count() == 0
