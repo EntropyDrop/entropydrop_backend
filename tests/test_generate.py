@@ -114,6 +114,64 @@ def test_get_generation_credit_cost_pro_exclusive(client):
         backend_utils.redis_conn.delete("config:model_price:SKING_DDJ_v101c")
         backend_utils.redis_conn.delete("config:model_pro:SKING_DDJ_v101c")
 
+def test_get_queue_status(client, db):
+    # Reset cache for testing
+    routers.generate._QUEUE_STATUS_CACHE = {}
+    
+    # Test empty queue
+    res = client.get("/api/generate/queue_status")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["queued_count"] == 0
+    assert data["processing_count"] == 0
+    assert data["total_queue_count"] == 0
+
+    # Add pending and processing tasks with different models
+    log1 = GenerationLog(prompt="p1", user_id="u1", mode="aigc_text_to_skin", status="pending", model_version="model_A")
+    log2 = GenerationLog(prompt="p2", user_id="u2", mode="aigc_image_to_skin", status="pending_skin", model_version="model_B")
+    log3 = GenerationLog(prompt="p3", user_id="u3", mode="aigc_text_to_skin", status="processing", model_version="model_A")
+    log4 = GenerationLog(prompt="p4", user_id="u4", mode="aigc_text_to_skin", status="success", model_version="model_A")
+    db.add_all([log1, log2, log3, log4])
+    db.commit()
+
+    routers.generate._QUEUE_STATUS_CACHE = {}
+    # Global count
+    res = client.get("/api/generate/queue_status")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["queued_count"] == 2 # 1 pending + 1 pending_skin
+    assert data["processing_count"] == 1 # 1 processing
+    assert data["total_queue_count"] == 3
+
+    # Filtered by model_A
+    res_a = client.get("/api/generate/queue_status?model_version=model_A")
+    assert res_a.status_code == 200
+    data_a = res_a.json()
+    assert data_a["queued_count"] == 1 # log1 (pending)
+    assert data_a["processing_count"] == 1 # log3 (processing)
+    assert data_a["total_queue_count"] == 2
+
+    # Filtered by model_B
+    res_b = client.get("/api/generate/queue_status?model_version=model_B")
+    assert res_b.status_code == 200
+    data_b = res_b.json()
+    assert data_b["queued_count"] == 1 # log2 (pending_skin)
+    assert data_b["processing_count"] == 0
+    assert data_b["total_queue_count"] == 1
+
+    # Filtered by non-existent model
+    res_c = client.get("/api/generate/queue_status?model_version=model_C")
+    assert res_c.status_code == 200
+    data_c = res_c.json()
+    assert data_c["queued_count"] == 0
+    assert data_c["total_queue_count"] == 0
+
+    # Test alias route
+    res_alias = client.get("/skin/api/generate/queue_status?model_version=model_A")
+    assert res_alias.status_code == 200
+    assert res_alias.json()["total_queue_count"] == 2
+
+
 def test_get_active_generation_none(client, db):
     response = client.get("/skin/api/generate/active")
     assert response.status_code == 200

@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, B
 import io
 import json
 import os
+import time
 from PIL import Image
 from typing import Literal, Optional
 from sqlalchemy import and_, func, or_
@@ -496,6 +497,59 @@ async def get_generation_credit_cost(
                 is_maintenance = True
         return {"credits": cost, "is_pro": is_pro_exclusive, "under_maintenance": is_maintenance}
     return {"credits": backend_utils.get_generation_credit_cost(), "is_pro": False, "under_maintenance": False}
+
+
+_QUEUE_STATUS_CACHE: dict[str, dict] = {}
+
+
+@router.get("/generate/queue_status")
+@router.get("/queue_status")
+@limiter.exempt
+def get_queue_status(
+    model_version: Optional[str] = Query(None, max_length=50),
+    aux_model_version: Optional[str] = Query(None, max_length=50),
+    mode: Optional[str] = Query(None, max_length=50),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the generation queue status for waiting and processing tasks.
+    Can be filtered by model_version, aux_model_version, and/or mode.
+    Cached for 3 seconds per filter combination to prevent database load spikes.
+    """
+    global _QUEUE_STATUS_CACHE
+    now = time.time()
+    cache_key = f"{model_version or ''}:{aux_model_version or ''}:{mode or ''}"
+    cached_entry = _QUEUE_STATUS_CACHE.get(cache_key)
+    if cached_entry and now < cached_entry.get("expires_at", 0.0):
+        return cached_entry.get("data")
+
+    query = (
+        db.query(models.GenerationLog.status, func.count(models.GenerationLog.id))
+        .filter(models.GenerationLog.status.in_(ACTIVE_GENERATION_STATUSES))
+    )
+    if model_version:
+        query = query.filter(models.GenerationLog.model_version == model_version)
+    if aux_model_version:
+        query = query.filter(models.GenerationLog.aux_model_version == aux_model_version)
+    if mode:
+        query = query.filter(models.GenerationLog.mode == mode)
+
+    results = query.group_by(models.GenerationLog.status).all()
+    counts = {status: count for status, count in results}
+    queued_count = counts.get("pending", 0) + counts.get("pending_skin", 0)
+    processing_count = counts.get("processing", 0) + counts.get("processing_skin", 0)
+    total_queue_count = queued_count + processing_count
+
+    data = {
+        "queued_count": queued_count,
+        "processing_count": processing_count,
+        "total_queue_count": total_queue_count,
+    }
+    _QUEUE_STATUS_CACHE[cache_key] = {
+        "expires_at": now + 3.0,
+        "data": data,
+    }
+    return data
 
 
 @router.get("/generate/active")

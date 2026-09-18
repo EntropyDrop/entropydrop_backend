@@ -16,9 +16,9 @@ class Settings(BaseSettings):
     # Format: postgresql://[user]:[password]@[host]:[port]/[db_name]
     DATABASE_URL: str = ""
     AUTO_CREATE_TABLES: bool = False
-    DB_POOL_SIZE: int = 3
-    DB_MAX_OVERFLOW: int = 2
-    DB_POOL_TIMEOUT: int = 30
+    DB_POOL_SIZE: int = 15
+    DB_MAX_OVERFLOW: int = 10
+    DB_POOL_TIMEOUT: int = 15
     DB_POOL_RECYCLE: int = 1800
 
     # Per-instance API resource monitoring. Each API task publishes a short
