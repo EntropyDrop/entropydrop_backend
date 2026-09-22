@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, or_
 from typing import List, Optional
@@ -14,6 +14,7 @@ from database import get_db
 from s3_utils import s3_client, get_cdn_url
 from config import settings
 from redis import Redis
+from rate_limit import limiter, get_authenticated_or_remote_address
 
 redis_client = Redis.from_url(settings.REDIS_URL)
 ALLOWED_FORUM_UPLOAD_TYPES = {
@@ -47,7 +48,13 @@ class PresignedUrlRequest(BaseModel):
     content_type: str
 
 @router.post("/upload/presigned-url")
+@limiter.limit(
+    "10/minute",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 async def get_presigned_url(
+    request: Request,
     req: PresignedUrlRequest,
     current_user: models.User = Depends(auth.get_current_user)
 ):

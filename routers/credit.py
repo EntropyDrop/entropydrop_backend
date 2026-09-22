@@ -1,6 +1,6 @@
 """Credit purchase / top-up endpoints."""
 from credit_balance import lock_balance
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 from typing import Optional
@@ -10,6 +10,7 @@ from database import get_db
 import models
 import auth
 from payment_utils import create_paypal_order_api, capture_paypal_order_api, get_paypal_order_api
+from rate_limit import limiter, get_authenticated_or_remote_address
 
 router = APIRouter(prefix="/api/credits", tags=["credits"])
 
@@ -38,7 +39,13 @@ def get_credit_packages():
 
 
 @router.post("/purchase")
+@limiter.limit(
+    "5/minute; 30/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def purchase_credits(
+    request: Request,
     req: CreditPurchaseRequest,
     current_user: models.User = Depends(auth.get_current_user),
 ):
@@ -78,7 +85,13 @@ def purchase_credits(
 
 
 @router.post("/capture")
+@limiter.limit(
+    "5/minute; 30/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def capture_credits(
+    request: Request,
     req: CreditCaptureRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),

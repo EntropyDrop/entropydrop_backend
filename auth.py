@@ -4,7 +4,7 @@ import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from fastapi import HTTPException, Security, Depends, Response
+from fastapi import HTTPException, Security, Depends, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from google.oauth2 import id_token
@@ -205,7 +205,11 @@ def verify_google_token(token: str):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid Google token")
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security), db: Session = Depends(get_db)):
+def get_current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    db: Session = Depends(get_db),
+):
     token = credentials.credentials
     try:
         payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
@@ -221,6 +225,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
     
     import backend_utils
     backend_utils.award_daily_login_credits(db, user)
+    request.state.rate_limit_principal = f"user:{user.id}"
     return user
 
 def get_current_admin(user: models.User = Depends(get_current_user)):
@@ -229,7 +234,11 @@ def get_current_admin(user: models.User = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
 
-def get_current_user_optional(credentials: Optional[HTTPAuthorizationCredentials] = Security(HTTPBearer(auto_error=False)), db: Session = Depends(get_db)):
+def get_current_user_optional(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(HTTPBearer(auto_error=False)),
+    db: Session = Depends(get_db),
+):
     if not credentials:
         return None
     token = credentials.credentials
@@ -241,6 +250,7 @@ def get_current_user_optional(credentials: Optional[HTTPAuthorizationCredentials
         if user:
             import backend_utils
             backend_utils.award_daily_login_credits(db, user)
+            request.state.rate_limit_principal = f"user:{user.id}"
         return user
     except Exception:
         return None

@@ -1,5 +1,5 @@
 from credit_balance import lock_balance
-from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException
+from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, Request
 from redis import Redis
 from rq import Worker, Queue
 from config import settings
@@ -12,7 +12,7 @@ from models import User, GenerationLog, Order, CollectionItem, UserLike, UserFee
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import get_db
-from rate_limit import limiter
+from rate_limit import limiter, get_authenticated_or_remote_address
 from instance_monitor import list_backend_instance_history, list_backend_instance_metrics
 
 router = APIRouter(
@@ -22,11 +22,16 @@ router = APIRouter(
 
 # Use the same connection params as in worker_tasks.py
 redis_conn = Redis.from_url(settings.REDIS_URL)
+MONITOR_READ_RATE_LIMIT = "30/minute; 2000/hour"
+MONITOR_WRITE_RATE_LIMIT = "2/minute; 20/hour"
+MONITOR_CONFIG_RATE_LIMIT = "10/minute; 100/hour"
+MONITOR_BULK_GIFT_RATE_LIMIT = "1/5minutes; 10/day"
 
 
 @router.get("/backend-instances/history")
-@limiter.exempt
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def get_backend_instance_history(
+    request: Request,
     admin: User = Depends(get_current_admin),
 ):
     return list_backend_instance_history(
@@ -37,8 +42,9 @@ async def get_backend_instance_history(
 
 
 @router.get("/backend-instances")
-@limiter.exempt
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def get_backend_instances(
+    request: Request,
     admin: User = Depends(get_current_admin),
 ):
     return list_backend_instance_metrics(
@@ -47,8 +53,9 @@ async def get_backend_instances(
     )
 
 @router.get("/stats")
-@limiter.exempt
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def get_monitor_stats(
+    request: Request,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):
@@ -239,8 +246,9 @@ async def get_monitor_stats(
 import math
 
 @router.get("/unfinished")
-@limiter.exempt
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def get_unfinished_logs(
+    request: Request,
     page: int = 1,
     page_size: int = 10,
     admin: User = Depends(get_current_admin),
@@ -344,8 +352,9 @@ async def get_unfinished_logs(
 
 
 @router.delete("/logs/{id}")
-@limiter.exempt
+@limiter.limit(MONITOR_WRITE_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 def admin_delete_log(
+    request: Request,
     id: str,
     background_tasks: BackgroundTasks,
     admin: User = Depends(get_current_admin),
@@ -391,8 +400,9 @@ def admin_delete_log(
 
 
 @router.delete("/failed-tasks")
-@limiter.exempt
+@limiter.limit("1/minute; 10/hour", key_func=get_authenticated_or_remote_address, override_defaults=False)
 def admin_delete_all_failed_tasks(
+    request: Request,
     background_tasks: BackgroundTasks,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
@@ -425,8 +435,9 @@ class ModeMaintenanceToggleRequest(BaseModel):
 
 
 @router.get("/mode_status")
-@limiter.exempt
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def get_modes_status(
+    request: Request,
     admin: User = Depends(get_current_admin)
 ):
     from backend_utils import is_text_to_skin_enabled, is_image_to_skin_enabled, is_image_edit_to_skin_enabled
@@ -437,8 +448,9 @@ async def get_modes_status(
     }
 
 @router.post("/mode_status/{mode_name}")
-@limiter.exempt
+@limiter.limit(MONITOR_CONFIG_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def toggle_mode_status(
+    request: Request,
     mode_name: str,
     req: ModeMaintenanceToggleRequest,
     admin: User = Depends(get_current_admin)
@@ -463,8 +475,9 @@ class SetModelPriceRequest(BaseModel):
 
 
 @router.get("/model_prices")
-@limiter.exempt
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def get_model_prices_endpoint(
+    request: Request,
     admin: User = Depends(get_current_admin)
 ):
     from routers.generate import (
@@ -490,8 +503,9 @@ async def get_model_prices_endpoint(
 
 
 @router.post("/model_prices")
-@limiter.exempt
+@limiter.limit(MONITOR_CONFIG_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def set_model_price_endpoint(
+    request: Request,
     req: SetModelPriceRequest,
     admin: User = Depends(get_current_admin)
 ):
@@ -514,8 +528,9 @@ async def set_model_price_endpoint(
 
 
 @router.delete("/users/by-email")
-@limiter.exempt
+@limiter.limit("1/minute; 10/hour", key_func=get_authenticated_or_remote_address, override_defaults=False)
 def admin_delete_user_by_email(
+    request: Request,
     email: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
@@ -604,8 +619,9 @@ class GiftActiveUsersRequest(BaseModel):
 
 
 @router.post("/gift_active_users")
-@limiter.exempt
+@limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def gift_credits_to_seven_day_active_users(
+    request: Request,
     req: GiftActiveUsersRequest,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
@@ -667,8 +683,9 @@ async def gift_credits_to_seven_day_active_users(
 
 
 @router.post("/gift_pro_users")
-@limiter.exempt
+@limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def gift_credits_to_pro_users(
+    request: Request,
     req: GiftActiveUsersRequest,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
@@ -730,8 +747,9 @@ class GiftSpecificUserRequest(BaseModel):
 
 
 @router.post("/gift_specific_user")
-@limiter.exempt
+@limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def gift_credits_to_specific_user(
+    request: Request,
     req: GiftSpecificUserRequest,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
@@ -790,8 +808,9 @@ async def gift_credits_to_specific_user(
 
 
 @router.get("/sking_ddj_generations")
-@limiter.exempt
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def get_sking_ddj_generations(
+    request: Request,
     page: int = 1,
     page_size: int = 10,
     admin: User = Depends(get_current_admin),
@@ -932,8 +951,9 @@ def _match_subscription_credit_log(
 
 
 @router.get("/subscription-credit-audits")
-@limiter.exempt
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def get_subscription_credit_audits(
+    request: Request,
     page: int = 1,
     page_size: int = 15,
     status_filter: str = "all",
@@ -1094,8 +1114,9 @@ async def get_subscription_credit_audits(
 
 
 @router.post("/subscription-credit-audits/{order_id}/compensate")
-@limiter.exempt
+@limiter.limit(MONITOR_WRITE_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
 async def compensate_subscription_credits(
+    request: Request,
     order_id: str,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
@@ -1173,4 +1194,3 @@ async def compensate_subscription_credits(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to compensate credits: {e}")
-

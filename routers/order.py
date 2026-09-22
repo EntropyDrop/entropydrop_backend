@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from decimal import Decimal, InvalidOperation
@@ -22,6 +22,7 @@ from payment_utils import (
 )
 import backend_utils
 from order_inventory import lock_order, reserve_inventory, release_inventory, expire_inventory_holds
+from rate_limit import limiter, get_authenticated_or_remote_address
 
 PAYPAL_CURRENCY_CODE = "USD"
 
@@ -320,8 +321,13 @@ def get_model_stock(order_type: Optional[str] = None, db: Session = Depends(get_
     return result
 
 @router.post("", response_model=schemas.OrderResponse)
-
+@limiter.limit(
+    "10/minute; 100/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def create_order(
+    request: Request,
     req: schemas.OrderCreate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -550,7 +556,13 @@ def delete_order(
     return {"status": "success", "message": f"Order deleted"}
 
 @router.post("/{id}/pay", response_model=schemas.OrderResponse)
+@limiter.limit(
+    "5/minute; 30/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def pay_order(
+    request: Request,
     id: str,
     req: schemas.PayRequest,
     db: Session = Depends(get_db),
@@ -617,7 +629,13 @@ def delete_order_item(
     return {"status": "success", "message": "Item deleted"}
 
 @router.post("/{id}/create-paypal-order")
+@limiter.limit(
+    "5/minute; 30/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def create_paypal_order(
+    request: Request,
     id: str,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -658,7 +676,13 @@ def get_paypal_config():
     }
 
 @router.post("/subscription/create")
+@limiter.limit(
+    "5/minute; 30/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def create_subscription(
+    request: Request,
     req: schemas.SubscriptionCreateRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
@@ -701,7 +725,13 @@ def create_subscription(
 
 
 @router.post("/subscription/activate")
+@limiter.limit(
+    "5/minute; 30/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def activate_subscription(
+    request: Request,
     req: schemas.PayRequest,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)

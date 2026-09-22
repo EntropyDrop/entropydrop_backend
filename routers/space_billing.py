@@ -11,7 +11,7 @@ import json
 import time
 import uuid
 import jwt
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from sqlalchemy.orm import Session
@@ -39,7 +39,7 @@ class Credential(BaseModel):
     credential: str = Field(min_length=1, max_length=8192)
 
 
-def credential_identity(db, credential):
+def credential_identity(request: Request, db, credential):
     expires = time.time() + 30
     scopes = None
     if credential.startswith("edapi_"):
@@ -50,7 +50,11 @@ def credential_identity(db, credential):
         scopes = list(SPACE_API_KEY_SCOPES)
         key.last_used_at = dt.datetime.now(dt.timezone.utc)
     else:
-        user = auth.get_current_user(credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=credential), db=db)
+        user = auth.get_current_user(
+            request=request,
+            credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=credential),
+            db=db,
+        )
         payload = jwt.decode(credential, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
         expires = min(expires, float(payload["exp"]))
     if user is None:
@@ -60,8 +64,8 @@ def credential_identity(db, credential):
 
 @router.post("/identity")
 @limiter.exempt
-def identity(payload: Credential, db: Session = Depends(get_db)):
-    user, scopes, expires = credential_identity(db, payload.credential)
+def identity(request: Request, payload: Credential, db: Session = Depends(get_db)):
+    user, scopes, expires = credential_identity(request, db, payload.credential)
     result = {"id": user.id, "username": user.username, "skin_url": user.skin_url,
               "skin_type": user.skin_type, "is_admin": user.is_admin and scopes is None,
               "credits": available_balance(db, user), "scopes": scopes, "expires_at": expires,
@@ -80,8 +84,8 @@ class AuthorizationRequest(Credential):
 
 @router.post("/authorizations")
 @limiter.exempt
-def authorize(payload: AuthorizationRequest, db: Session = Depends(get_db)):
-    user, _, _ = credential_identity(db, payload.credential)
+def authorize(request: Request, payload: AuthorizationRequest, db: Session = Depends(get_db)):
+    user, _, _ = credential_identity(request, db, payload.credential)
     lock_balance(db, user)
     aid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"space:{payload.world_id}:{payload.operation_id}"))
     body = payload.model_dump(mode="json", exclude={"credential"})

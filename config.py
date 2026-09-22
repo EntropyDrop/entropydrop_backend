@@ -124,6 +124,7 @@ class Settings(BaseSettings):
 
     ADMIN_EMAILS: str = "" # Comma separated list of admin emails
     TRUSTED_PROXY_CIDRS: str = "127.0.0.1/32,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" # Comma separated CIDRs allowed to supply X-Forwarded-For/X-Real-IP
+    RATELIMIT_ENABLED: bool = True
 
     model_config = SettingsConfigDict(
         env_file=os.getenv("ENV_FILE", ".env"), 

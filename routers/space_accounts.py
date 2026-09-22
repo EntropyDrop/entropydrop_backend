@@ -9,11 +9,12 @@ from sqlalchemy.orm import Session
 import auth
 import models
 from database import get_db
-from rate_limit import limiter
+from rate_limit import limiter, get_authenticated_or_remote_address
 api_key_router = APIRouter(prefix="/space/api/v2/api-keys", tags=["space-api-keys"])
 class StrictEntityModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-SPACE_ENTITY_RATE_LIMIT = "120/minute; 2000/hour"
+SPACE_API_KEY_LIST_RATE_LIMIT = "60/minute; 1000/hour"
+SPACE_API_KEY_MUTATION_RATE_LIMIT = "5/minute; 50/hour"
 SPACE_API_KEY_MAX_PER_USER = 20
 SPACE_API_KEY_PREFIX = "edapi_"
 SPACE_API_KEY_CREATE_SCOPE = "space:entity:create"
@@ -46,7 +47,11 @@ def _api_key_response(api_key: models.SpaceApiKey) -> dict:
 
 
 @api_key_router.post("", status_code=201)
-@limiter.limit(SPACE_ENTITY_RATE_LIMIT)
+@limiter.limit(
+    SPACE_API_KEY_MUTATION_RATE_LIMIT,
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def create_space_api_key(
     request: Request,
     payload: CreateSpaceApiKeyRequest,
@@ -84,7 +89,11 @@ def create_space_api_key(
 
 
 @api_key_router.get("")
-@limiter.limit(SPACE_ENTITY_RATE_LIMIT)
+@limiter.limit(
+    SPACE_API_KEY_LIST_RATE_LIMIT,
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def list_space_api_keys(
     request: Request,
     db: Session = Depends(get_db),
@@ -97,7 +106,11 @@ def list_space_api_keys(
 
 
 @api_key_router.delete("/{api_key_id}")
-@limiter.limit(SPACE_ENTITY_RATE_LIMIT)
+@limiter.limit(
+    SPACE_API_KEY_MUTATION_RATE_LIMIT,
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def revoke_space_api_key(
     request: Request,
     api_key_id: str,

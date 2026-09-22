@@ -1,5 +1,5 @@
 from credit_balance import lock_balance
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, BackgroundTasks, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, BackgroundTasks, Query, Request, Response
 import io
 import json
 import os
@@ -28,7 +28,7 @@ from rq import Queue, Retry
 from rq.exceptions import InvalidJobOperation, NoSuchJobError
 from rq.job import Callback, Job
 import httpx
-from rate_limit import limiter
+from rate_limit import limiter, get_authenticated_or_remote_address
 
 redis_conn = Redis.from_url(
     settings.REDIS_URL,
@@ -504,8 +504,9 @@ _QUEUE_STATUS_CACHE: dict[str, dict] = {}
 
 @router.get("/generate/queue_status")
 @router.get("/queue_status")
-@limiter.exempt
+@limiter.limit("20/minute; 500/hour", override_defaults=False)
 def get_queue_status(
+    request: Request,
     model_version: Optional[str] = Query(None, max_length=50),
     aux_model_version: Optional[str] = Query(None, max_length=50),
     mode: Optional[str] = Query(None, max_length=50),
@@ -583,7 +584,13 @@ async def get_active_generation(
     }
 
 @router.post("/generate")
+@limiter.limit(
+    "5/minute; 30/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 async def generate_image(
+    request: Request,
     background_tasks: BackgroundTasks,
     prompt: Optional[str] = Form(None, max_length=500),
     is_public: bool = Form(True),
@@ -1071,8 +1078,13 @@ async def toggle_like(
     return {"status": "success", "action": action, "likes_count": log.likes_count}
 
 @router.get("/history")
-@limiter.exempt
+@limiter.limit(
+    "20/minute; 500/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 async def get_history(
+    request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     db: Session = Depends(get_db),
@@ -1264,10 +1276,12 @@ async def get_discovery_logs(response: Response):
     )
     return get_discovery_cache_items()
 
-from fastapi import Request
-
 @router.get("/discovery/search")
-@limiter.limit("1/second")
+@limiter.limit(
+    "1/second; 30/minute; 300/hour; 1000/day",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 async def search_discovery_logs(
     request: Request,
     q: Optional[str] = Query(None, max_length=100),
@@ -1505,9 +1519,15 @@ async def update_log_name(
     return {"message": "Name updated successfully"}
 
 @router.post("/logs/{id}/feedback")
+@limiter.limit(
+    "5/minute; 50/day",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 async def create_log_feedback(
+    request: Request,
     id: str,
-    request: schemas.FeedbackCreate,
+    payload: schemas.FeedbackCreate,
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(auth.get_current_user_optional)
 ):
@@ -1533,13 +1553,13 @@ async def create_log_feedback(
     feedback = models.UserFeedback(
         user_id=current_user.id if current_user else None,
         log_id=id,
-        is_good=request.is_good
+        is_good=payload.is_good
     )
     db.add(feedback)
     db.commit()
     db.refresh(feedback)
     
-    print(f"[*] Quality Feedback received for log {id}: is_good={request.is_good}")
+    print(f"[*] Quality Feedback received for log {id}: is_good={payload.is_good}")
     return {"status": "success", "message": "Feedback submitted successfully"}
 
 

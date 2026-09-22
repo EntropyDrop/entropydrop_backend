@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from rate_limit import limiter
+from rate_limit import limiter, ensure_rate_limit_headers
 logger = logging.getLogger(__name__)
 
 DEFAULT_REQUEST_BODY_LIMIT_BYTES = 512 * 1024
@@ -124,9 +124,13 @@ def rate_limit_exceeded_handler(request, exc):
     from rate_limit import get_real_remote_address
     client_ip = get_real_remote_address(request)
     logger.warning("Rate limit exceeded: client_ip=%s path=%s detail=%s", client_ip, request.url.path, exc)
-    return JSONResponse(
+    response = JSONResponse(
         status_code=429,
         content={"detail": "Too many requests."}
+    )
+    return request.app.state.limiter._inject_headers(
+        response,
+        getattr(request.state, "view_rate_limit", None),
     )
 
 
@@ -162,7 +166,14 @@ def configure_http(app):
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=[
+            "X-RateLimit-Limit",
+            "X-RateLimit-Remaining",
+            "X-RateLimit-Reset",
+            "Retry-After",
+        ],
     )
 
     app.add_middleware(SlowAPIMiddleware)
     app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=6)
+    app.middleware("http")(ensure_rate_limit_headers)

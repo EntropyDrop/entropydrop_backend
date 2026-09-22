@@ -12,6 +12,7 @@ import auth
 from datetime import datetime, date
 import backend_utils
 from backend_utils import is_text_to_skin_enabled, is_image_to_skin_enabled, is_image_edit_to_skin_enabled
+from rate_limit import limiter, get_authenticated_or_remote_address
 
 router = APIRouter(tags=["auth"])
 
@@ -49,6 +50,7 @@ def login_configuration(response: Response):
 
 
 @router.post("/api/auth/google", response_model=schemas.TokenResponse)
+@limiter.limit("10/minute; 100/hour", override_defaults=False)
 def google_login(
     req: schemas.GoogleAuthRequest,
     request: Request,
@@ -128,6 +130,11 @@ def google_login(
 
 
 @router.post("/api/auth/refresh", response_model=schemas.AccessTokenResponse)
+@limiter.limit(
+    "30/minute; 300/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def refresh_login_session(
     request: Request,
     response: Response,
@@ -162,6 +169,11 @@ def refresh_login_session(
 
 
 @router.post("/api/auth/logout")
+@limiter.limit(
+    "30/minute; 300/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
 def logout_session(
     request: Request,
     response: Response,
@@ -226,7 +238,16 @@ def agree_terms(db: Session = Depends(get_db), current_user: models.User = Depen
     }
 
 @router.post("/api/users/me/cancel_subscription")
-def cancel_subscription(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+@limiter.limit(
+    "5/minute; 30/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
+def cancel_subscription(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
     from payment_utils import cancel_paypal_subscription_api
     
     sub_id = current_user.paypal_subscription_id

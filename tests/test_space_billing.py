@@ -1,5 +1,9 @@
 import uuid
 import hashlib
+import time
+from datetime import datetime, timezone
+import auth
+import jwt
 import pytest
 from config import settings
 from credit_balance import available_balance, lock_balance
@@ -78,6 +82,68 @@ def test_legacy_key_identity_has_full_space_access_without_admin_access(account,
     assert response.status_code == 200, response.text
     assert response.json()['scopes'] == list(SPACE_API_KEY_SCOPES)
     assert response.json()['is_admin'] is False
+
+
+@pytest.mark.parametrize('path', ['identity', 'authorizations'])
+@pytest.mark.parametrize('session_backed', [False, True])
+def test_jwt_credentials_receive_request_context(account, db, monkeypatch, path, session_backed):
+    user, post, authorization, _ = account
+    monkeypatch.setattr(settings, 'ADMIN_EMAILS', user.email)
+    user.last_login_date = datetime.now(timezone.utc).date()
+    db.commit()
+    expires = int(time.time()) + 20
+    claims = {'sub': user.id, 'type': 'access', 'exp': expires}
+    if session_backed:
+        session, _ = auth.create_auth_session(db, user.id)
+        claims['sid'] = session.id
+    token = jwt.encode(claims, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
+    authenticate = auth.get_current_user
+    authenticated_requests = []
+
+    def track_authentication(*args, **kwargs):
+        result = authenticate(*args, **kwargs)
+        request = kwargs['request']
+        authenticated_requests.append((request.url.path, request.state.rate_limit_principal))
+        return result
+
+    monkeypatch.setattr(auth, 'get_current_user', track_authentication)
+    payload = {'credential': token}
+    if path == 'authorizations':
+        payload = {**authorization, **payload, 'operation_id': str(uuid.uuid4())}
+    response = post(path, payload)
+    assert response.status_code == 200, response.text
+    assert authenticated_requests == [(f'/internal/space/{path}', f'user:{user.id}')]
+    if path == 'identity':
+        assert response.json()['id'] == user.id
+        assert response.json()['scopes'] is None
+        assert response.json()['is_admin'] is True
+        assert response.json()['expires_at'] == expires
+    else:
+        assert response.json()['user_id'] == user.id
+
+
+@pytest.mark.parametrize('path', ['identity', 'authorizations'])
+@pytest.mark.parametrize('invalid', ['malformed', 'expired', 'wrong_type', 'revoked_session', 'unknown_user'])
+def test_invalid_jwt_credentials_are_rejected(account, db, path, invalid):
+    user, post, authorization, _ = account
+    claims = {'sub': user.id, 'type': 'access', 'exp': int(time.time()) + 60}
+    if invalid == 'expired':
+        claims['exp'] = int(time.time()) - 60
+    elif invalid == 'wrong_type':
+        claims['type'] = 'refresh'
+    elif invalid == 'revoked_session':
+        session, cookie = auth.create_auth_session(db, user.id)
+        claims['sid'] = session.id
+        auth.revoke_auth_session(db, cookie)
+    elif invalid == 'unknown_user':
+        claims['sub'] = 'missing-billing-user'
+    token = ('not-a-jwt' if invalid == 'malformed' else
+             jwt.encode(claims, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM))
+    payload = {'credential': token}
+    if path == 'authorizations':
+        payload = {**authorization, **payload, 'operation_id': str(uuid.uuid4())}
+    response = post(path, payload)
+    assert response.status_code == 401, response.text
 
 
 def test_later_entity_operator_funds_hosting_from_their_own_account(account, db):
