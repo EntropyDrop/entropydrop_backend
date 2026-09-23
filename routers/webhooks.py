@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 import models
+import generation_priority
 from config import settings
 from database import get_db
 from rate_limit import limiter
@@ -174,6 +175,7 @@ def _process_paypal_webhook(body, headers, db):
         )
         if existing_order:
             db.rollback()
+            generation_priority.sync_after_payment(db, user.id)
             return {"status": "success"}
 
         user.pro_expires_at = expires_at
@@ -212,7 +214,9 @@ def _process_paypal_webhook(body, headers, db):
             is_webhook=True,
             paid_at=paid_at,
         )
+        generation_priority.grant_pro_priority(db, user)
         db.commit()
+        generation_priority.sync_after_payment(db, user.id)
         print(f"Processed subscription sale {sale_id} for user {user.id} from event {event_id}")
 
     return {"status": "success"}

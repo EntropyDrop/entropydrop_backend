@@ -21,6 +21,7 @@ from payment_utils import (
     revise_paypal_subscription_api,
 )
 import backend_utils
+import generation_priority
 from order_inventory import lock_order, reserve_inventory, release_inventory, expire_inventory_holds
 from rate_limit import limiter, get_authenticated_or_remote_address
 
@@ -200,7 +201,7 @@ def _activate_order_benefits(order, db: Session, current_user):
         else:
             current_user.pro_level = "pro-plus"
              
-        #current_user.priority_points += 10
+        generation_priority.grant_pro_priority(db, current_user)
     elif order.order_type == "print":
         order.goods_status = "preparing"
 
@@ -244,6 +245,8 @@ def complete_order_payment(db, order, paypal_order_id):
         order.goods_status = "awaiting_stock"
     order.inventory_reserved = False  # Hold is consumed, never released.
     db.commit()
+    if order.order_type == "subscription":
+        generation_priority.sync_after_payment(db, user.id)
     return order
 
 
@@ -794,9 +797,11 @@ def activate_subscription(
         
         # Award monthly credits immediately
         backend_utils.award_subscription_credits(db, current_user, pro_level, sub_id, is_webhook=False, paid_at=paid_at)
+        generation_priority.grant_pro_priority(db, current_user)
                  
         db.commit()
         db.refresh(current_user)
+        generation_priority.sync_after_payment(db, current_user.id)
         return {"status": "success", "subscription_id": sub_id}
         
     except HTTPException:

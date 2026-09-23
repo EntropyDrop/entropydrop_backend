@@ -15,6 +15,7 @@ from database import get_db
 from s3_utils import get_cdn_url, get_s3_url, delete_from_s3, upload_to_s3, generate_presigned_url_get
 import backend_utils
 import licenses
+from generation_priority import STAGE_QUEUES
 from config import settings
 from pipeline_registry import (
     MODEL_PIPELINES,
@@ -185,8 +186,12 @@ def uses_image_to_skin_intermediate(log: models.GenerationLog) -> bool:
     return log.mode != "aigc_image_to_skin" or uses_real_to_render_pipeline(log)
 
 
+def generation_queue_prefix(log, is_pro_active):
+    return "high_" if (is_pro_active or log.pro_priority or log.is_pro) else ""
+
+
 def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, content_type: str = "image/png"):
-    prefix = "high_" if is_pro_active else ""
+    prefix = generation_queue_prefix(log, is_pro_active)
     q_skin = Queue(f'{prefix}queue_image_to_skin', connection=redis_conn)
     retry_policy = get_generation_retry_policy_for_log(log)
 
@@ -244,7 +249,7 @@ def enqueue_real_to_render_task(
 
     pipeline = get_pipeline(log.model_version)
 
-    prefix = "high_" if is_pro_active else ""
+    prefix = generation_queue_prefix(log, is_pro_active)
     queue = Queue(f"{prefix}queue_real_to_render", connection=redis_conn)
     return queue.enqueue(
         "tasks.submit_real_to_render",
@@ -283,7 +288,7 @@ def enqueue_real_to_render_resume_task(
             f"Cannot resume real_to_render for {log.id}: missing provider task id"
         )
     pipeline = get_pipeline(log.model_version)
-    prefix = "high_" if is_pro_active else ""
+    prefix = generation_queue_prefix(log, is_pro_active)
     queue = Queue(f"{prefix}queue_real_to_render", connection=redis_conn)
     return queue.enqueue(
         "tasks.resume_real_to_render",
@@ -323,7 +328,7 @@ def enqueue_render_to_uv_task(
 
     pipeline = get_pipeline(log.model_version)
 
-    prefix = "high_" if is_pro_active else ""
+    prefix = generation_queue_prefix(log, is_pro_active)
     queue = Queue(
         f"{prefix}queue_render_to_uv",
         connection=redis_conn,
@@ -348,7 +353,7 @@ def enqueue_render_to_uv_task(
 
 
 def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, content_type: str = "image/png"):
-    prefix = "high_" if is_pro_active else ""
+    prefix = generation_queue_prefix(log, is_pro_active)
 
     if is_sking_ddj_model(log.model_version):
         return enqueue_real_to_render_task(
@@ -386,49 +391,47 @@ def enqueue_generation_task(log: models.GenerationLog, is_pro_active: bool, cont
         raise Exception("Unsupported mode")
 
 
+QUEUE_POSITION_SCRIPT = """
+local high = redis.call('lrange', KEYS[1], 0, -1)
+for i, id in ipairs(high) do
+    if id == ARGV[1] then return i - 1 end
+end
+local normal = redis.call('lrange', KEYS[2], 0, -1)
+for i, id in ipairs(normal) do
+    if id == ARGV[1] then return #high + i - 1 end
+end
+return 0
+"""
+
+
 def get_queue_position(db: Session, log_id: str) -> int:
-    """
-    Calculate the position of a given generation log in its corresponding queue
-    """
+    """Count waiting jobs ahead in the actual queues, including Pro priority."""
     log = db.query(models.GenerationLog).filter(models.GenerationLog.id == log_id).first()
-    if not log:
+    if not log or log.status not in ACTIVE_GENERATION_STATUSES:
         return 0
-    if log.status in ["success", "failed"]:
-        return 0
-        
-    if log.status in ["pending_skin", "processing_skin"]:
-        # Stage 2: waiting in image_to_skin queue.
-        # This queue processes both direct image-to-skin tasks, and multi-stage tasks in Stage 2.
-        count = db.query(models.GenerationLog).filter(
-            models.GenerationLog.created_at < log.created_at,
-            (
-                (models.GenerationLog.mode == "aigc_image_to_skin") & models.GenerationLog.status.in_(["pending", "pending_skin", "processing_skin"])
-            ) | (
-                (models.GenerationLog.mode.in_(["aigc_text_to_skin", "aigc_image_edit_to_skin"])) & models.GenerationLog.status.in_(["pending_skin", "processing_skin"])
-            )
-        ).count()
-        return count
+    if log.status in SECOND_STAGE_STATUSES:
+        stage = "render_to_uv" if uses_real_to_render_pipeline(log) else "image_to_skin"
+    elif uses_real_to_render_pipeline(log):
+        stage = "real_to_render"
     else:
-        # Stage 1: waiting in the first queue (queue_text_to_image, queue_image_edit, or queue_image_to_skin for single stage).
-        if log.mode == "aigc_text_to_skin":
-            count = db.query(models.GenerationLog).filter(
-                models.GenerationLog.created_at < log.created_at,
-                models.GenerationLog.mode == "aigc_text_to_skin",
-                models.GenerationLog.status.in_(["pending", "processing"])
-            ).count()
-        elif log.mode == "aigc_image_edit_to_skin":
-            count = db.query(models.GenerationLog).filter(
-                models.GenerationLog.created_at < log.created_at,
-                models.GenerationLog.mode == "aigc_image_edit_to_skin",
-                models.GenerationLog.status.in_(["pending", "processing"])
-            ).count()
-        else: # "aigc_image_to_skin"
-            count = db.query(models.GenerationLog).filter(
-                models.GenerationLog.created_at < log.created_at,
-                models.GenerationLog.mode == "aigc_image_to_skin",
-                models.GenerationLog.status.in_(["pending", "processing_skin"])
-            ).count()
-        return count
+        stage = {
+            "aigc_text_to_skin": "text_to_image",
+            "aigc_image_edit_to_skin": "image_edit",
+            "aigc_image_to_skin": "image_to_skin",
+        }.get(log.mode)
+    if stage is None:
+        return 0
+    queue_name = STAGE_QUEUES[stage]
+    try:
+        # One Redis snapshot avoids counting a job twice during promotion.
+        return int(redis_conn.eval(
+            QUEUE_POSITION_SCRIPT, 2,
+            f"rq:queue:high_{queue_name}", f"rq:queue:{queue_name}",
+            make_generation_job_id(log.id, stage),
+        ))
+    except Exception:
+        # Queue visibility is best effort; history remains available in outages.
+        return 0
 
 
 def delete_s3_files_task(files: list[tuple[Optional[str], bool]]):
@@ -576,6 +579,7 @@ async def get_active_generation(
         "task": {
             "id": log.id,
             "status": log.status,
+            "pro_priority": log.pro_priority,
             "queue_position": queue_pos,
             "prompt": log.prompt,
             "mode": log.mode,
@@ -781,6 +785,7 @@ async def generate_image(
         guidance=guidance,
         status="pending",
         is_pro=current_user.is_pro_active,
+        pro_priority=current_user.is_pro_active,
         license=license_code,
         public_license=licenses.public_license_for(license_code, is_public),
         license_version=licenses.LICENSE_VERSION,
@@ -1140,6 +1145,7 @@ async def get_history(
             "n_step": log.n_step,
             "guidance": log.guidance,
             "is_pro": log.is_pro,
+            "pro_priority": log.pro_priority,
             "license": licenses.license_payload(log)
         })
 
@@ -1432,6 +1438,7 @@ async def get_log(
         "guidance": log.guidance,
         "queue_position": queue_pos,
         "is_pro": log.is_pro,
+        "pro_priority": log.pro_priority,
         "license": licenses.license_payload(log),
         "has_feedback": has_feedback
     }

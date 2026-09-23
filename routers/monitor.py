@@ -22,14 +22,14 @@ router = APIRouter(
 
 # Use the same connection params as in worker_tasks.py
 redis_conn = Redis.from_url(settings.REDIS_URL)
-MONITOR_READ_RATE_LIMIT = "30/minute; 2000/hour"
-MONITOR_WRITE_RATE_LIMIT = "2/minute; 20/hour"
-MONITOR_CONFIG_RATE_LIMIT = "10/minute; 100/hour"
-MONITOR_BULK_GIFT_RATE_LIMIT = "1/5minutes; 10/day"
+MONITOR_READ_RATE_LIMIT = "240/minute; 10000/hour"
+MONITOR_WRITE_RATE_LIMIT = "30/minute; 300/hour"
+MONITOR_CONFIG_RATE_LIMIT = "60/minute; 600/hour"
+MONITOR_BULK_GIFT_RATE_LIMIT = "10/minute; 100/hour"
 
 
 @router.get("/backend-instances/history")
-@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def get_backend_instance_history(
     request: Request,
     admin: User = Depends(get_current_admin),
@@ -42,7 +42,7 @@ async def get_backend_instance_history(
 
 
 @router.get("/backend-instances")
-@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def get_backend_instances(
     request: Request,
     admin: User = Depends(get_current_admin),
@@ -53,7 +53,7 @@ async def get_backend_instances(
     )
 
 @router.get("/stats")
-@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def get_monitor_stats(
     request: Request,
     admin: User = Depends(get_current_admin),
@@ -246,7 +246,7 @@ async def get_monitor_stats(
 import math
 
 @router.get("/unfinished")
-@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def get_unfinished_logs(
     request: Request,
     page: int = 1,
@@ -352,7 +352,7 @@ async def get_unfinished_logs(
 
 
 @router.delete("/logs/{id}")
-@limiter.limit(MONITOR_WRITE_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_WRITE_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 def admin_delete_log(
     request: Request,
     id: str,
@@ -400,7 +400,7 @@ def admin_delete_log(
 
 
 @router.delete("/failed-tasks")
-@limiter.limit("1/minute; 10/hour", key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit("10/minute; 60/hour", key_func=get_authenticated_or_remote_address, override_defaults=True)
 def admin_delete_all_failed_tasks(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -435,7 +435,7 @@ class ModeMaintenanceToggleRequest(BaseModel):
 
 
 @router.get("/mode_status")
-@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def get_modes_status(
     request: Request,
     admin: User = Depends(get_current_admin)
@@ -448,7 +448,7 @@ async def get_modes_status(
     }
 
 @router.post("/mode_status/{mode_name}")
-@limiter.limit(MONITOR_CONFIG_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_CONFIG_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def toggle_mode_status(
     request: Request,
     mode_name: str,
@@ -475,7 +475,7 @@ class SetModelPriceRequest(BaseModel):
 
 
 @router.get("/model_prices")
-@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def get_model_prices_endpoint(
     request: Request,
     admin: User = Depends(get_current_admin)
@@ -503,7 +503,7 @@ async def get_model_prices_endpoint(
 
 
 @router.post("/model_prices")
-@limiter.limit(MONITOR_CONFIG_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_CONFIG_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def set_model_price_endpoint(
     request: Request,
     req: SetModelPriceRequest,
@@ -528,7 +528,7 @@ async def set_model_price_endpoint(
 
 
 @router.delete("/users/by-email")
-@limiter.limit("1/minute; 10/hour", key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit("10/minute; 60/hour", key_func=get_authenticated_or_remote_address, override_defaults=True)
 def admin_delete_user_by_email(
     request: Request,
     email: str,
@@ -619,7 +619,7 @@ class GiftActiveUsersRequest(BaseModel):
 
 
 @router.post("/gift_active_users")
-@limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def gift_credits_to_seven_day_active_users(
     request: Request,
     req: GiftActiveUsersRequest,
@@ -683,7 +683,7 @@ async def gift_credits_to_seven_day_active_users(
 
 
 @router.post("/gift_pro_users")
-@limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def gift_credits_to_pro_users(
     request: Request,
     req: GiftActiveUsersRequest,
@@ -747,7 +747,7 @@ class GiftSpecificUserRequest(BaseModel):
 
 
 @router.post("/gift_specific_user")
-@limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def gift_credits_to_specific_user(
     request: Request,
     req: GiftSpecificUserRequest,
@@ -808,7 +808,7 @@ async def gift_credits_to_specific_user(
 
 
 @router.get("/sking_ddj_generations")
-@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def get_sking_ddj_generations(
     request: Request,
     page: int = 1,
@@ -951,7 +951,7 @@ def _match_subscription_credit_log(
 
 
 @router.get("/subscription-credit-audits")
-@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def get_subscription_credit_audits(
     request: Request,
     page: int = 1,
@@ -1114,7 +1114,7 @@ async def get_subscription_credit_audits(
 
 
 @router.post("/subscription-credit-audits/{order_id}/compensate")
-@limiter.limit(MONITOR_WRITE_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=False)
+@limiter.limit(MONITOR_WRITE_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def compensate_subscription_credits(
     request: Request,
     order_id: str,

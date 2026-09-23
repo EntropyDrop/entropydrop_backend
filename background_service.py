@@ -7,6 +7,7 @@ from redis import Redis
 
 from config import settings
 from routers import generate, order, ledger
+import generation_priority
 
 
 LOCK_KEY = os.getenv("BACKGROUND_LOCK_KEY", "ed:background:singleton")
@@ -64,6 +65,7 @@ async def run_background_tasks() -> None:
 
     from skin_withdrawal import start_withdrawal_job
     tasks = [
+        asyncio.create_task(generation_priority.start_pro_priority_job(), name="pro-priority-job"),
         asyncio.create_task(start_withdrawal_job(), name="skin-withdrawal-job"),
         asyncio.create_task(order.start_order_reconciliation_job(), name="order-reconciliation-job"),
         asyncio.create_task(generate.start_discovery_cache_job(), name="discovery-cache-job"),

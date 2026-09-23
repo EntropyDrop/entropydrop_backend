@@ -151,6 +151,9 @@ class GenerationLog(Base):
     error_msg = Column(Text, nullable=True)
     is_deleted = Column(Boolean, default=False, index=True)
     is_pro = Column(Boolean, default=False, index=True)
+    # Queue entitlement can be upgraded after submission; is_pro and license
+    # remain snapshots of the account/rights at creation time.
+    pro_priority = Column(Boolean, default=False, nullable=False, server_default="0")
     # Immutable license snapshot assigned when the log is created. Visibility
     # and the public reuse license are intentionally stored separately.
     license = Column(String(64), nullable=False, default="unknown", server_default="unknown", index=True)

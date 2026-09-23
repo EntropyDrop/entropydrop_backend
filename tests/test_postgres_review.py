@@ -65,7 +65,7 @@ def test_empty_and_legacy_database_upgrade_to_head(postgres, legacy):
             conn.execute(sa.text("INSERT INTO users (id, email, username) VALUES ('legacy-user', 'legacy@example.test', 'Existing user')"))
     migrate(url, "upgrade", "head")
     with engine.connect() as conn:
-        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "a8e6c4d20918"
+        assert conn.execute(sa.text("SELECT version_num FROM alembic_version")).scalar_one() == "c82e7a4d901b"
         if legacy:
             assert conn.execute(sa.text("SELECT username FROM users WHERE id = 'legacy-user'")).scalar_one() == "Existing user"
     inspector = sa.inspect(engine)
