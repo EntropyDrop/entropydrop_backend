@@ -63,6 +63,7 @@ RENDER_TO_UV_RETRY_INTERVALS_SECONDS = [
 ]
 RESULT_QUEUE_KEY = os.getenv("GENERATE_RESULT_QUEUE_KEY", "generate_results")
 RESULT_PROCESSING_QUEUE_KEY = os.getenv("GENERATE_RESULT_PROCESSING_QUEUE_KEY", "generate_results_processing")
+REFUNDED_CREDITS_MESSAGE = "Your credits have been refunded. Please try again."
 GENERATION_RECOVERY_MIN_AGE_SECONDS = int(os.getenv("GENERATION_RECOVERY_MIN_AGE_SECONDS", "300"))
 GENERATION_CANCELLATION_TTL_SECONDS = int(
     os.getenv("GENERATION_CANCELLATION_TTL_SECONDS", str(7 * 24 * 3600))
@@ -856,6 +857,12 @@ def should_apply_generation_status(log: models.GenerationLog, data: dict) -> boo
         return True
 
     if incoming_status == "failed":
+        if (
+            incoming_stage == "real_to_render"
+            and data.get("failure_reason") == "enqueue_render_to_uv"
+            and current_status == "pending_skin"
+        ):
+            return True
         if incoming_stage in {"text_to_image", "image_edit", "real_to_render"}:
             return current_status in {"pending", "processing", "failed"}
         if incoming_stage in {"image_to_skin", "render_to_uv"}:
@@ -981,6 +988,19 @@ def refund_generation_credits(db: Session, log: models.GenerationLog) -> int:
     return charged
 
 
+def apply_real_to_render_refund_message(log: models.GenerationLog, data: dict) -> None:
+    """Only promise a refund once it has been recorded in this transaction."""
+    if (
+        data.get("stage") != "real_to_render"
+        or log.status != "failed"
+        or not log.credits_refunded
+    ):
+        return
+    reason = (log.error_msg or "The request failed for an unknown reason.").strip()
+    if REFUNDED_CREDITS_MESSAGE not in reason:
+        log.error_msg = f"{reason} {REFUNDED_CREDITS_MESSAGE}"
+
+
 async def start_result_listener():
     """Listen to Redis results in the background and write to the database."""
     await asyncio.to_thread(recover_inflight_result_messages)
@@ -1023,6 +1043,8 @@ async def start_result_listener():
                         if updated and status == "failed" and not log.recoverable
                         else 0
                     )
+                    if updated:
+                        apply_real_to_render_refund_message(log, data)
                     db.commit()
                     if updated:
                         print(f"[*] Task {log_id} status updated to {status}")

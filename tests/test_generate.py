@@ -305,6 +305,94 @@ def test_failed_generation_refund_is_idempotent(db):
     assert refund_logs[0].amount == 3
 
 
+@pytest.mark.parametrize("reason", [
+    "Image generation failed (generate failed).",
+    "The generated image did not pass the background validation.",
+    "A network error prevented the request from completing.",
+    "The image contains invalid or prohibited content.",
+    "The request failed for an unknown reason.",
+])
+def test_real_to_render_listener_refunds_only_terminal_failure(db, monkeypatch, reason):
+    import asyncio
+    import json
+    from collections import deque
+
+    generate = routers.generate
+    user = db.query(User).filter(User.id == "test_user_generate").one()
+    user.credits = 96
+    log = GenerationLog(
+        id="bounded_retry_refund", prompt="retry", user_id=user.id,
+        mode="aigc_image_to_skin", model_version=SKING_DDJ_V101C,
+        status="processing", credits_charged=4, credits_refunded=False,
+        recoverable=False,
+    )
+    db.add(log)
+    db.commit()
+    failure = {
+        "log_id": log.id, "stage": "real_to_render",
+        "status": "failed", "error_msg": reason,
+    }
+    messages = deque(json.dumps(message) for message in [
+        *[{
+            "log_id": log.id, "stage": "real_to_render",
+            "status": "processing", "retrying": True,
+            "retry_attempt": attempt, "error_msg": "",
+        } for attempt in range(1, 4)],
+        failure, failure,
+    ])
+    snapshots = []
+
+    def pop(*args, **kwargs):
+        if not messages:
+            raise asyncio.CancelledError
+        return messages.popleft()
+
+    def ack(message):
+        db.refresh(log)
+        db.refresh(user)
+        snapshots.append((log.status, log.error_msg, user.credits))
+
+    monkeypatch.setattr(generate, "redis_conn", MagicMock(brpoplpush=pop))
+    monkeypatch.setattr(generate, "recover_inflight_result_messages", lambda: None)
+    monkeypatch.setattr(generate, "ack_result_message", ack)
+    monkeypatch.setattr(db, "close", lambda: None)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(generate.start_result_listener())
+
+    assert snapshots[:3] == [("processing", "", 96)] * 3
+    expected = f"{reason} Your credits have been refunded. Please try again."
+    assert snapshots[3:] == [("failed", expected, 100)] * 2
+    assert log.credits_refunded is True
+    assert db.query(CreditLog).filter(
+        CreditLog.action == "refund",
+        CreditLog.source == f"Skin Generation Refund: {log.id}",
+    ).count() == 1
+
+
+def test_real_to_render_refund_message_requires_confirmed_refund():
+    generate = routers.generate
+    log = GenerationLog(status="failed", credits_refunded=False, error_msg="Unknown error.")
+    data = {"stage": "real_to_render"}
+    generate.apply_real_to_render_refund_message(log, data)
+    assert log.error_msg == "Unknown error."
+    log.credits_refunded = True
+    generate.apply_real_to_render_refund_message(log, data)
+    generate.apply_real_to_render_refund_message(log, data)
+    assert log.error_msg.count(generate.REFUNDED_CREDITS_MESSAGE) == 1
+
+
+@pytest.mark.parametrize("current_status,applies", [
+    ("pending_skin", True), ("processing_skin", False), ("success", False),
+])
+def test_real_to_render_handoff_failure_only_applies_before_gpu_starts(current_status, applies):
+    log = GenerationLog(status=current_status, result="existing.png")
+    assert routers.generate.apply_generation_result_update(log, {
+        "stage": "real_to_render", "status": "failed",
+        "failure_reason": "enqueue_render_to_uv", "error_msg": "Network error.",
+    }) is applies
+    assert log.status == ("failed" if applies else current_status)
+
+
 def test_generation_result_update_persists_stage1_provider_metadata():
     log = GenerationLog(
         id="provider_metadata",
