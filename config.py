@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     SPACE_DEFAULT_WORLD_ID: str = "00000000-0000-4000-8000-000000000001"
     SPACE_STANDALONE: bool = False
     SPACE_ACCOUNT_API_URL: str = ""
+    SPACE_AGENT_VERIFICATION_URI: str = "https://entropydrop.com/space/authorize"
     SPACE_ACCOUNT_SERVICE_TOKEN: str = ""
     SPACE_IDENTITY_CACHE_SECONDS: int = 30
     SPACE_SERVICE_URL: str = ""

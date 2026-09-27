@@ -111,6 +111,21 @@ class SpaceApiKey(Base):
     last_used_at = Column(DateTime(timezone=True), nullable=True)
 
 
+class SpaceAgentAuthorization(Base):
+    """Short-lived pairing grant. Neither device codes nor API-key secrets are stored."""
+    __tablename__ = "space_agent_authorizations"
+    device_hash = Column(LargeBinary(32), primary_key=True)
+    user_code_hash = Column(LargeBinary(32), nullable=False, unique=True)
+    name = Column(String(80), nullable=False)
+    status = Column(String(16), nullable=False, default="pending")
+    user_id = Column(String(16), ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    # Retain the ID after revocation so a token retry cannot recreate the key.
+    api_key_id = Column(String(16), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    next_poll_at = Column(DateTime(timezone=True), nullable=False)
+    poll_interval = Column(Integer, nullable=False, default=5)
+
+
 class GenerationLog(Base):
     """Generation log model"""
     __tablename__ = "generation_logs"

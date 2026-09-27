@@ -22,6 +22,7 @@ from routers import (
     order,
     space_billing,
     space_accounts,
+    space_agent_auth,
     webhooks,
 )
 from config import settings
@@ -302,6 +303,16 @@ for router in core_routers:
 app.include_router(space_billing.router)
 # Account-owned API keys and billing stay here; world requests always cross the gateway.
 app.include_router(space_accounts.api_key_router)
+app.include_router(space_agent_auth.router)
+
+@app.middleware("http")
+async def agent_authorization_no_store(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/space/api/v2/agent-authorizations/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
 from space.proxy import router as space_proxy_router
 app.include_router(space_proxy_router)
 

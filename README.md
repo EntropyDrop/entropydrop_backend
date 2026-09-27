@@ -82,3 +82,24 @@ python tests/verify_nginx_limits.py
 
 The second command uses an ephemeral Docker Nginx container and an isolated
 test upstream to verify the 512 KiB / 9 MiB / 17 MiB request boundaries.
+
+
+### Agent browser authorization
+
+`/space/api/v2/agent-authorizations` implements a device-style pairing flow:
+`POST /requests` starts a ten-minute request; the signed-in user reviews it with
+`POST /inspect` and submits `POST /decision`; the agent polls `POST /token` with
+its private `device_code`. All bodies are JSON. Consent uses the normal browser
+Bearer login token. An API key cannot approve another agent.
+
+Run `alembic upgrade head` before deploying this version (migration
+`d9a7e3b10462`). Set `SPACE_AGENT_VERIFICATION_URI` to the public main-site
+`/space/authorize` page; only HTTPS or loopback HTTP URLs are accepted. The URI
+is server configuration, never supplied by an agent. Deploy the matching frontend
+route and Space discovery/docs together. Existing manual key creation still works.
+
+Pairing codes are stored as hashes, expire after ten minutes and are rate limited.
+The key is minted at redemption under the existing per-user quota lock. A retry
+with the same device code returns the same key until the request expires; revoking
+that key prevents further redemption. This preserves the existing long-lived,
+revocable full-Space key contract. Expired request rows are pruned on new requests.

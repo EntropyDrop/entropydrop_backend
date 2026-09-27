@@ -58,13 +58,20 @@ def create_space_api_key(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    name = payload.name.strip()
+    api_key, plaintext = issue_space_api_key(db, current_user.id, payload.name)
+    db.commit()
+    return {**_api_key_response(api_key), "api_key": plaintext}
+
+
+def issue_space_api_key(db: Session, user_id: str, name: str, *, secret: str | None = None):
+    """Caller owns the transaction, including quota locking and grant redemption."""
+    name = name.strip()
     if not name:
         raise HTTPException(status_code=422, detail={"code": "SPACE_API_KEY_NAME_REQUIRED"})
     scopes = list(SPACE_API_KEY_SCOPES)
-    db.query(models.User).filter(models.User.id == current_user.id).with_for_update().first()
+    db.query(models.User).filter(models.User.id == user_id).with_for_update().first()
     count = db.query(models.SpaceApiKey).filter(
-        models.SpaceApiKey.user_id == current_user.id,
+        models.SpaceApiKey.user_id == user_id,
     ).count()
     if count >= SPACE_API_KEY_MAX_PER_USER:
         raise HTTPException(status_code=429, detail={
@@ -73,19 +80,18 @@ def create_space_api_key(
         })
     key_id = models.generate_base58_id()
     key_prefix = f"{SPACE_API_KEY_PREFIX}{key_id}_"
-    plaintext = f"{key_prefix}{secrets.token_urlsafe(32)}"
+    plaintext = f"{key_prefix}{secret or secrets.token_urlsafe(32)}"
     api_key = models.SpaceApiKey(
         id=key_id,
-        user_id=current_user.id,
+        user_id=user_id,
         name=name,
         key_prefix=key_prefix,
         token_hash=hashlib.sha256(plaintext.encode()).digest(),
         scopes=scopes,
     )
     db.add(api_key)
-    db.commit()
-    db.refresh(api_key)
-    return {**_api_key_response(api_key), "api_key": plaintext}
+    db.flush()
+    return api_key, plaintext
 
 
 @api_key_router.get("")
