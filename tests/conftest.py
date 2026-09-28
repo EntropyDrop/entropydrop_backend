@@ -40,6 +40,11 @@ class FakeRedis(MagicMock):
             self._store.pop(name, None)
         return len(names)
 
+    def mset(self, mapping):
+        for name, value in mapping.items():
+            self.set(name, value)
+        return True
+
     def incr(self, name, amount=1):
         val = self._store.get(name, b"0")
         try:

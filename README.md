@@ -66,6 +66,32 @@ and `.local/` directories.
   `billing_info.last_payment` identifies the paid cycle. Approval preceding
   the first payment preserves the owner binding for the subsequent webhook.
 
+## Model credit pricing
+
+In `/skin/monitor`, set `SKING_DDJ_v101c`'s **All users** price to **12** and
+**Pro only** price to **4**. The image-to-skin model selector shows two entries
+with the same model name and distinct access labels and prices. Both execute
+the same model and share the maintenance switch. Free users default to All users;
+active Pro users default to Pro only, but can choose All users at its listed price.
+Deploy the backend before the frontend. No database migration is required;
+existing prices remain until an administrator saves a new All users price.
+
+`POST /skin/api/monitor/model_prices` accepts `credits` (the existing Pro price)
+and `free_credits`, alongside `model_name`, `is_pro` (Pro-only access), and
+`under_maintenance`. Prices are stored in Redis as `config:model_price:<model>`
+and `config:model_free_price:<model>`. An unset Free price falls back to the
+existing price; older clients that omit `free_credits` preserve any override.
+`GET /skin/api/models` exposes `image_to_skin_options` with unique option IDs,
+the real `model_version`, and `pricing_tier` (`standard` or `pro`). Send the real
+model version and selected pricing tier to the quote and generation endpoints.
+These options have fixed access rules independent of the legacy model-wide
+`is_pro` flag: `standard` is open to everyone; `pro` requires an active, unexpired
+subscription. The frontend never sends an option ID as the real model version.
+The monitor saves both prices together and clears the legacy Pro-only flag for
+this model. Other models and older clients without `pricing_tier` retain their
+membership-based pricing. Combined models add each model's price for that tier.
+Refunds use the amount recorded when the task was submitted.
+
 ## Tests
 
 ```bash

@@ -63,13 +63,18 @@ def get_generation_credit_cost():
     return 1
 
 
-def get_model_credit_cost(model_name: str) -> int:
-    try:
-        val = redis_conn.get(f"config:model_price:{model_name}")
-        if val is not None:
-            return max(0, int(val.decode("utf-8")))
-    except Exception as e:
-        print(f"Failed to read model credit cost for {model_name} from redis: {e}")
+def get_model_credit_cost(model_name: str, *, is_pro: bool = False) -> int:
+    """Free users may have an override; Pro keeps the existing model price."""
+    price_keys = [f"config:model_price:{model_name}"]
+    if not is_pro:
+        price_keys.insert(0, f"config:model_free_price:{model_name}")
+    for key in price_keys:
+        try:
+            val = redis_conn.get(key)
+            if val is not None:
+                return max(0, int(val.decode("utf-8")))
+        except Exception as e:
+            print(f"Failed to read {key} from redis: {e}")
     # Fallback: base models default to 0, skin models default to global cost
     from routers.generate import AVAILABlE_TEXT_TO_IMAGE_MODELS, AVAILABLE_IMAGE_EDIT_MODELS
     if model_name in AVAILABlE_TEXT_TO_IMAGE_MODELS or model_name in AVAILABLE_IMAGE_EDIT_MODELS:

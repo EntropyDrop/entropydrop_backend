@@ -469,7 +469,9 @@ async def toggle_mode_status(
 
 class SetModelPriceRequest(BaseModel):
     model_name: str
+    # Keep the existing field/key as the Pro price for backward compatibility.
     credits: int
+    free_credits: int | None = None
     is_pro: bool = False
     under_maintenance: bool = False
 
@@ -483,7 +485,8 @@ async def get_model_prices_endpoint(
     from routers.generate import (
         AVAILABLE_IMAGE_TO_SKIN_MODELS,
         AVAILABlE_TEXT_TO_IMAGE_MODELS,
-        AVAILABLE_IMAGE_EDIT_MODELS
+        AVAILABLE_IMAGE_EDIT_MODELS,
+        get_model_pricing_tiers,
     )
     from backend_utils import get_model_credit_cost, is_model_pro_exclusive, is_model_under_maintenance
     
@@ -495,7 +498,9 @@ async def get_model_prices_endpoint(
     prices = {}
     for m in all_models:
         prices[m] = {
-            "credits": get_model_credit_cost(m),
+            "credits": get_model_credit_cost(m, is_pro=True),
+            "free_credits": get_model_credit_cost(m, is_pro=False),
+            "pricing_tiers": get_model_pricing_tiers(m),
             "is_pro": is_model_pro_exclusive(m),
             "under_maintenance": is_model_under_maintenance(m)
         }
@@ -509,15 +514,25 @@ async def set_model_price_endpoint(
     req: SetModelPriceRequest,
     admin: User = Depends(get_current_admin)
 ):
-    if req.credits < 0:
+    if req.credits < 0 or (req.free_credits is not None and req.free_credits < 0):
         raise HTTPException(status_code=400, detail="Credits cannot be negative")
     try:
-        redis_conn.set(f"config:model_price:{req.model_name}", str(req.credits))
-        redis_conn.set(f"config:model_pro:{req.model_name}", "1" if req.is_pro else "0")
-        redis_conn.set(f"config:model_maintenance:{req.model_name}", "1" if req.under_maintenance else "0")
+        values = {
+            f"config:model_price:{req.model_name}": str(req.credits),
+            f"config:model_pro:{req.model_name}": "1" if req.is_pro else "0",
+            f"config:model_maintenance:{req.model_name}": "1" if req.under_maintenance else "0",
+        }
+        # Older clients can still update the shared price without erasing an override.
+        if req.free_credits is not None:
+            values[f"config:model_free_price:{req.model_name}"] = str(req.free_credits)
+        redis_conn.mset(values)
+        from backend_utils import get_model_credit_cost
+        from routers.generate import get_model_pricing_tiers
         return {
             "model_name": req.model_name,
             "credits": req.credits,
+            "free_credits": get_model_credit_cost(req.model_name, is_pro=False),
+            "pricing_tiers": get_model_pricing_tiers(req.model_name),
             "is_pro": req.is_pro,
             "under_maintenance": req.under_maintenance
         }

@@ -465,6 +465,31 @@ AVAILABLE_IMAGE_EDIT_MODELS = [
     'flux_4b'
 ]
 
+
+def get_model_pricing_tiers(model_version: str) -> list[str]:
+    return ["pro", "standard"] if model_version == SKING_DDJ_V101C else []
+
+
+def generation_model_pricing(model_version, aux_model_version, is_pro, pricing_tier=None):
+    if pricing_tier is not None:
+        if pricing_tier not in get_model_pricing_tiers(model_version) or aux_model_version:
+            raise HTTPException(status_code=400, detail="Invalid pricing option for this model")
+        # Explicit options have fixed prices and permissions for every viewer.
+        price_is_pro = pricing_tier == "pro"
+        pro_only = price_is_pro
+    else:
+        # Preserve membership-based pricing for older clients without an option.
+        price_is_pro = is_pro
+        pro_only = backend_utils.is_model_pro_exclusive(model_version)
+    cost = backend_utils.get_model_credit_cost(model_version, is_pro=price_is_pro)
+    maintenance = backend_utils.is_model_under_maintenance(model_version)
+    if aux_model_version:
+        cost += backend_utils.get_model_credit_cost(aux_model_version, is_pro=is_pro)
+        pro_only = pro_only or backend_utils.is_model_pro_exclusive(aux_model_version)
+        maintenance = maintenance or backend_utils.is_model_under_maintenance(aux_model_version)
+    return {"credits": cost, "is_pro": pro_only, "under_maintenance": maintenance}
+
+
 @router.get("/models")
 async def get_models(current_user: models.User = Depends(auth.get_current_user)):
     """
@@ -474,7 +499,13 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
     return {
         "text_to_image_models": AVAILABlE_TEXT_TO_IMAGE_MODELS,
         "image_edit_models": AVAILABLE_IMAGE_EDIT_MODELS,
-        "image_to_skin_models": AVAILABLE_IMAGE_TO_SKIN_MODELS
+        "image_to_skin_models": AVAILABLE_IMAGE_TO_SKIN_MODELS,
+        "image_to_skin_options": [
+            {"id": f"{model}:{tier}", "model_version": model, "pricing_tier": tier}
+            if tier else {"id": model, "model_version": model}
+            for model in AVAILABLE_IMAGE_TO_SKIN_MODELS
+            for tier in (get_model_pricing_tiers(model) or [None])
+        ],
     }
 
 
@@ -482,23 +513,15 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
 async def get_generation_credit_cost(
     model_version: Optional[str] = Query(None),
     aux_model_version: Optional[str] = Query(None),
+    pricing_tier: Optional[Literal["standard", "pro"]] = Query(None),
     current_user: models.User = Depends(auth.get_current_user)
 ):
-    is_pro_exclusive = False
-    is_maintenance = False
     if model_version:
-        cost = backend_utils.get_model_credit_cost(model_version)
-        if backend_utils.is_model_pro_exclusive(model_version):
-            is_pro_exclusive = True
-        if backend_utils.is_model_under_maintenance(model_version):
-            is_maintenance = True
-        if aux_model_version:
-            cost += backend_utils.get_model_credit_cost(aux_model_version)
-            if backend_utils.is_model_pro_exclusive(aux_model_version):
-                is_pro_exclusive = True
-            if backend_utils.is_model_under_maintenance(aux_model_version):
-                is_maintenance = True
-        return {"credits": cost, "is_pro": is_pro_exclusive, "under_maintenance": is_maintenance}
+        return generation_model_pricing(
+            model_version, aux_model_version, current_user.is_pro_active, pricing_tier
+        )
+    if pricing_tier is not None:
+        raise HTTPException(status_code=400, detail="A model is required for a pricing option")
     return {"credits": backend_utils.get_generation_credit_cost(), "is_pro": False, "under_maintenance": False}
 
 
@@ -601,6 +624,7 @@ async def generate_image(
     file: UploadFile = File(None),
     model_version: str = Form(..., alias="model_version", max_length=50),
     aux_model_version: Optional[str] = Form(None, alias="aux_model_version", max_length=50),
+    pricing_tier: Optional[Literal["standard", "pro"]] = Form(None),
     mode: Optional[str] = Form(None, max_length=50),
     parent: Optional[str] = Form(None),
     seed: Optional[int] = Form(None),
@@ -687,32 +711,26 @@ async def generate_image(
     if global_queue_count > 10000:
         raise HTTPException(status_code=429, detail="Server is busy. The queue is full, please try again later.")
 
-    generation_credit_cost = 0
+    pricing = generation_model_pricing(
+        model_version, aux_model_version, current_user.is_pro_active, pricing_tier
+    )
 
     # Maintenance Check
-    is_under_maintenance = backend_utils.is_model_under_maintenance(model_version) or (
-        aux_model_version and backend_utils.is_model_under_maintenance(aux_model_version)
-    )
-    if is_under_maintenance:
+    if pricing["under_maintenance"]:
         raise HTTPException(
             status_code=403,
             detail="The selected model is under maintenance. Please choose another model."
         )
 
     # Pro Exclusive Check
-    is_pro_exclusive = backend_utils.is_model_pro_exclusive(model_version) or (
-        aux_model_version and backend_utils.is_model_pro_exclusive(aux_model_version)
-    )
-    if is_pro_exclusive and not current_user.is_pro_active:
+    if pricing["is_pro"] and not current_user.is_pro_active:
         raise HTTPException(
             status_code=403,
             detail="The selected model is exclusive to Pro users. Please upgrade your subscription to access this model."
         )
 
     # Quota Check
-    generation_credit_cost = backend_utils.get_model_credit_cost(model_version)
-    if aux_model_version:
-        generation_credit_cost += backend_utils.get_model_credit_cost(aux_model_version)
+    generation_credit_cost = pricing["credits"]
     remaining = lock_balance(db, current_user)
     if remaining < generation_credit_cost:
         raise HTTPException(status_code=403, detail="Insufficient credits")
