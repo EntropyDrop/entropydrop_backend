@@ -71,8 +71,9 @@ and `.local/` directories.
 In `/skin/monitor`, set `SKING_DDJ_v101c`'s **All users** price to **12** and
 **Pro only** price to **4**. The image-to-skin model selector shows two entries
 with the same model name and distinct access labels and prices. Both execute
-the same model and share the maintenance switch. Free users default to All users;
-active Pro users default to Pro only, but can choose All users at its listed price.
+the same model and share the maintenance switch. The selector defaults to the
+first Pro-only option for everyone. Free users see the subscription action and
+can choose All users at its listed price; active Pro users can choose either.
 Deploy the backend before the frontend. No database migration is required;
 existing prices remain until an administrator saves a new All users price.
 
