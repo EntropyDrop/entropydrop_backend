@@ -12,91 +12,75 @@ import datetime
 LICENSE_UNKNOWN = "unknown"
 LICENSE_CC_BY_NC_4 = "cc-by-nc-4.0"
 LICENSE_COMMERCIAL = "entropydrop-commercial-1.0"
-LICENSE_VERSION = 1
+# These describe pre-existing rights, not grants from EntropyDrop.
+LICENSE_ORIGINAL = "original-work"
+LICENSE_SOURCE = "source-license"
+LICENSE_VERSION = 2
+SOURCE_RIGHTS = {"original", "external"}
 
 
-def public_license_for(license_code: str, is_public: bool) -> str | None:
-    if is_public and license_code != LICENSE_UNKNOWN:
+def public_license_for(license_code: str, is_public: bool, *, consent=False) -> str | None:
+    if is_public and (license_code != LICENSE_UNKNOWN or consent):
         return LICENSE_CC_BY_NC_4
     return None
 
 
-def generated_license(current_user, parent_log=None) -> str:
-    """Resolve a new AI generation without expanding its source rights."""
-    if parent_log is None:
-        return (
-            LICENSE_COMMERCIAL
-            if current_user.is_pro_active
-            else LICENSE_CC_BY_NC_4
-        )
-
-    parent_license = parent_log.license or LICENSE_UNKNOWN
-    if parent_license == LICENSE_UNKNOWN:
-        return LICENSE_UNKNOWN
-    if parent_license == LICENSE_CC_BY_NC_4:
-        return LICENSE_CC_BY_NC_4
-    if parent_license == LICENSE_COMMERCIAL:
-        owns_parent_commercial_license = parent_log.user_id == current_user.id
-        if owns_parent_commercial_license and current_user.is_pro_active:
-            return LICENSE_COMMERCIAL
-        return LICENSE_CC_BY_NC_4
-    return LICENSE_UNKNOWN
-
-
-def edited_license(current_user, parent_log=None) -> str:
-    """Resolve a manual edit; an edit never grants broader source rights."""
-    if parent_log is None:
-        return LICENSE_CC_BY_NC_4
-
-    parent_license = parent_log.license or LICENSE_UNKNOWN
-    if parent_license == LICENSE_COMMERCIAL:
-        return (
-            LICENSE_COMMERCIAL
-            if parent_log.user_id == current_user.id
-            else LICENSE_CC_BY_NC_4
-        )
-    if parent_license == LICENSE_CC_BY_NC_4:
-        return LICENSE_CC_BY_NC_4
-    return LICENSE_UNKNOWN
-
-
-def saved_license(current_user, parent_log=None, requested_license=None, is_upload=False) -> str:
-    """Resolve an explicitly selected license without expanding source rights.
-
-    A new independent upload/edit may select the commercial license only while
-    the saving account has an active Pro entitlement.  A commercial license
-    already attached to the account's own parent remains usable permanently.
-    """
-    if requested_license not in {None, LICENSE_CC_BY_NC_4, LICENSE_COMMERCIAL}:
-        raise ValueError("Unsupported requested license")
-
-    inherited_license = (
+def source_license(current_user, parent_log) -> str:
+    """A source's account rights belong to its owner, not its collectors."""
+    code = parent_log.license or LICENSE_UNKNOWN
+    if parent_log.user_id == current_user.id:
+        return code if code in {
+            LICENSE_COMMERCIAL, LICENSE_CC_BY_NC_4, LICENSE_ORIGINAL, LICENSE_SOURCE
+        } else LICENSE_UNKNOWN
+    return (
         LICENSE_CC_BY_NC_4
-        if is_upload and parent_log is None
-        else edited_license(current_user, parent_log)
+        if getattr(parent_log, "public_license", None) == LICENSE_CC_BY_NC_4
+        else LICENSE_UNKNOWN
     )
 
-    if requested_license is None:
-        return inherited_license
 
-    if inherited_license == LICENSE_UNKNOWN:
-        if requested_license == LICENSE_COMMERCIAL:
-            raise ValueError("Unknown source rights cannot be upgraded to a commercial license")
-        return LICENSE_UNKNOWN
+def generated_license(current_user, parent_log=None, source_rights=None) -> str:
+    """Resolve a new AI generation without expanding its source rights."""
+    if source_rights not in {None, *SOURCE_RIGHTS}:
+        raise ValueError("Unsupported source rights")
+    if parent_log is not None:
+        inherited = source_license(current_user, parent_log)
+        if inherited not in {LICENSE_COMMERCIAL, LICENSE_ORIGINAL}:
+            return inherited
+    elif source_rights == "external":
+        return LICENSE_SOURCE
+    return LICENSE_COMMERCIAL if current_user.is_pro_active else LICENSE_CC_BY_NC_4
 
-    if requested_license == LICENSE_CC_BY_NC_4:
-        return LICENSE_CC_BY_NC_4
 
-    owns_parent_commercial_license = (
-        parent_log is not None
-        and parent_log.license == LICENSE_COMMERCIAL
-        and parent_log.user_id == current_user.id
-    )
-    is_new_pro_work = parent_log is None and current_user.is_pro_active
-    if owns_parent_commercial_license or is_new_pro_work:
-        return LICENSE_COMMERCIAL
+def edited_license(current_user, parent_log=None, source_rights=None) -> str:
+    """Manual creation/import preserves existing rights regardless of plan."""
+    if source_rights not in {None, *SOURCE_RIGHTS}:
+        raise ValueError("Unsupported source rights")
+    if parent_log is not None:
+        return source_license(current_user, parent_log)
+    return LICENSE_ORIGINAL if source_rights == "original" else LICENSE_SOURCE
 
-    raise ValueError("The source license does not permit commercial use")
+
+def saved_license(current_user, parent_log=None, requested_license=None, is_upload=False, source_rights=None) -> str:
+    """Old clients may echo an inherited value but cannot choose new rights."""
+    inherited = edited_license(current_user, parent_log, source_rights)
+    if requested_license is not None and requested_license != inherited:
+        raise ValueError("Source permissions are inherited; uploads do not grant a commercial license")
+    return inherited
+
+
+def license_preview(current_user, operation, parent_log=None, source_rights=None, is_public=True):
+    if parent_log is not None and (operation == "generate" or not parent_log.is_public):
+        is_public = parent_log.is_public
+    code = (generated_license(current_user, parent_log, source_rights)
+            if operation == "generate"
+            else edited_license(current_user, parent_log, source_rights))
+    return {
+        "code": code,
+        "public_license": public_license_for(code, is_public, consent=True),
+        "is_pro": current_user.is_pro_active,
+        "parent_is_private": bool(parent_log and not parent_log.is_public),
+    }
 
 
 def license_payload(log) -> dict:

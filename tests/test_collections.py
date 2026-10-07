@@ -174,9 +174,13 @@ def test_move_collection_item(client, db):
     db.refresh(col1)
     db.refresh(col2)
 
+    log = GenerationLog(user_id="1", mode="human_upload", is_public=True, status="success")
+    db.add(log)
+    db.flush()
     item = CollectionItem(
         collection_id=col1.id,
         type="image",
+        log_id=log.id,
         data={"url": "http://example.com/3.png"}
     )
     db.add(item)
@@ -270,7 +274,15 @@ def test_get_user_public_collections(client, db):
     data = response.json()
     assert data["total"] >= 1
 
-def test_upload_item_virtual(client, db):
+@pytest.mark.parametrize("is_pro", [False, True])
+@pytest.mark.parametrize("source_rights", ["original", "external"])
+def test_upload_item_virtual(client, db, is_pro, source_rights):
+    if is_pro:
+        from datetime import datetime, timedelta, timezone
+        current_user = db.query(User).filter(User.id == "1").one()
+        current_user.pro_level = "pro-plus"
+        current_user.pro_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+        db.commit()
     from unittest.mock import patch
     with patch("s3_utils.s3_client") as mock_s3:
         from PIL import Image
@@ -281,18 +293,21 @@ def test_upload_item_virtual(client, db):
         img_bytes = img_io.getvalue()
 
         files = {"file": ("test.png", img_bytes, "image/png")}
-        response = client.post("/skin/api/collections/creations_public/upload", files=files, data={"name": "Upload Test", "license_consent": "true"})
+        upload_data = {"name": "Upload Test", "license_consent": "true"}
+        upload_data["source_rights"] = source_rights
+        response = client.post("/skin/api/collections/creations_public/upload", files=files, data=upload_data)
         
         assert response.status_code == 200
         data = response.json()
         assert data["collection_id"] == "creations_public"
         assert data["name"] == "Upload Test"
         log = db.query(GenerationLog).filter(GenerationLog.id == data["log_id"]).one()
-        assert log.license == "cc-by-nc-4.0"
+        assert log.license == ("original-work" if source_rights == "original" else "source-license")
         assert log.public_license == "cc-by-nc-4.0"
 
 
-def test_pro_upload_can_select_creator_commercial_license(client, db):
+@pytest.mark.parametrize("source_rights", ["original", "external"])
+def test_pro_private_upload_preserves_source_rights(client, db, source_rights):
     from datetime import datetime, timedelta, timezone
     from io import BytesIO
     from unittest.mock import patch
@@ -308,12 +323,12 @@ def test_pro_upload_can_select_creator_commercial_license(client, db):
     files = {"file": ("pro-upload.png", image_buffer.getvalue(), "image/png")}
     data = {
         "license_consent": "true",
-        "requested_license": "entropydrop-commercial-1.0",
+        "source_rights": source_rights,
     }
 
     with patch("s3_utils.s3_client"):
         response = client.post(
-            "/skin/api/collections/creations_public/upload",
+            "/skin/api/collections/creations_private/upload",
             files=files,
             data=data,
         )
@@ -322,11 +337,20 @@ def test_pro_upload_can_select_creator_commercial_license(client, db):
     log = db.query(GenerationLog).filter(
         GenerationLog.id == response.json()["log_id"]
     ).one()
-    assert log.license == "entropydrop-commercial-1.0"
-    assert log.public_license == "cc-by-nc-4.0"
+    assert log.license == ("original-work" if source_rights == "original" else "source-license")
+    assert log.public_license is None
+    assert log.is_public is False
 
 
-def test_free_upload_cannot_select_creator_commercial_license(client, db):
+@pytest.mark.parametrize("is_pro", [False, True])
+@pytest.mark.parametrize("mode", ["human_upload", "human_edit"])
+def test_public_upload_cannot_select_commercial_license(client, db, is_pro, mode):
+    if is_pro:
+        from datetime import datetime, timedelta, timezone
+        current_user = db.query(User).filter(User.id == "1").one()
+        current_user.pro_level = "pro-plus"
+        current_user.pro_expires_at = datetime.now(timezone.utc) + timedelta(days=30)
+        db.commit()
     from io import BytesIO
     from unittest.mock import patch
     from PIL import Image
@@ -340,13 +364,14 @@ def test_free_upload_cannot_select_creator_commercial_license(client, db):
             "/skin/api/collections/creations_public/upload",
             files=files,
             data={
+                "mode": mode,
                 "license_consent": "true",
                 "requested_license": "entropydrop-commercial-1.0",
             },
         )
 
     assert response.status_code == 400
-    assert "does not permit commercial use" in response.json()["detail"]
+    assert "uploads do not grant a commercial license" in response.json()["detail"]
     mock_s3.put_object.assert_not_called()
 
 
@@ -401,12 +426,13 @@ def test_pro_edit_cannot_upgrade_cc_parent_to_commercial(client, db):
             data={
                 "mode": "human_edit",
                 "parent": parent_log.id,
+                "public_license_consent": "true",
                 "requested_license": "entropydrop-commercial-1.0",
             },
         )
 
     assert response.status_code == 400
-    assert "does not permit commercial use" in response.json()["detail"]
+    assert "uploads do not grant a commercial license" in response.json()["detail"]
     mock_s3.put_object.assert_not_called()
 
 def test_upload_item_requires_cc_license_consent(client, db):
@@ -487,7 +513,8 @@ def test_upload_private_model_as_public_fail(client, db):
         id=models.generate_base58_id(),
         user_id="1",
         mode="edit",
-        is_public=False
+        is_public=False,
+        status="success"
     )
     db.add(parent_log)
     db.commit()
@@ -561,3 +588,73 @@ def test_upload_item_invalid_dimensions(client, db):
     response = client.post("/skin/api/collections/creations_public/upload", files=files, data={"license_consent": "true"})
     assert response.status_code == 400
     assert "Invalid dimensions" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("skin_public,source_public,target_public,expected", [
+    (True, False, False, 200), (True, False, True, 200),
+    (True, True, False, 200), (True, True, True, 200),
+    (False, False, False, 200), (False, False, True, 400),
+])
+def test_move_uses_skin_visibility_not_folder_visibility(client, db, skin_public, source_public, target_public, expected):
+    db.add(User(id="2", email="public-creator@example.com", username="Public Creator", terms_agreed=True))
+    source = Collection(user_id="1", name="Source", is_public=source_public)
+    target = Collection(user_id="1", name="Target", is_public=target_public)
+    log = GenerationLog(user_id="2" if skin_public else "1", mode="human_upload", status="success",
+                        is_public=skin_public, public_license="cc-by-nc-4.0" if skin_public else None)
+    db.add_all([source, target, log])
+    db.flush()
+    item = CollectionItem(collection_id=source.id, type="image", log_id=log.id,
+                          data={"is_public": not skin_public})
+    db.add(item)
+    db.commit()
+    before = client.get("/skin/api/collections/items", params={"collection_id": source.id, "user_id": "1"})
+    assert before.status_code == 200
+    assert before.json()["items"][0]["data"]["is_public"] is skin_public
+    response = client.post(f"/skin/api/collections/items/{item.id}/move", json={"target_collection_id": target.id})
+    assert response.status_code == expected
+    db.refresh(item)
+    db.refresh(log)
+    assert item.collection_id == (target.id if expected == 200 else source.id)
+    assert log.is_public is skin_public
+    assert log.public_license == ("cc-by-nc-4.0" if skin_public else None)
+    if expected == 200:
+        after = client.get("/skin/api/collections/items", params={"collection_id": target.id, "user_id": "1"})
+        assert after.json()["items"][0]["data"]["is_public"] is skin_public
+
+
+@pytest.mark.parametrize("kind", ["missing", "deleted", "other_private"])
+def test_move_rejects_unavailable_skin_even_when_item_claims_public(client, db, kind):
+    db.add(User(id="2", email="other-private@example.com", username="Other", terms_agreed=True))
+    source = Collection(user_id="1", name="Source", is_public=False)
+    target = Collection(user_id="1", name="Target", is_public=True)
+    db.add_all([source, target])
+    db.flush()
+    log = None
+    if kind != "missing":
+        log = GenerationLog(user_id="2" if kind == "other_private" else "1", mode="human_upload",
+                            status="success", is_public=False, is_deleted=kind == "deleted")
+        db.add(log)
+        db.flush()
+    item = CollectionItem(collection_id=source.id, type="image", log_id=log.id if log else None,
+                          data={"is_public": True})
+    db.add(item)
+    db.commit()
+    response = client.post(f"/skin/api/collections/items/{item.id}/move", json={"target_collection_id": target.id})
+    assert response.status_code == 403
+    db.refresh(item)
+    assert item.collection_id == source.id
+
+
+@pytest.mark.parametrize("collection_id,expected", [
+    ("liked", {True, False}), ("creations_public", {True}), ("creations_private", {False}),
+])
+def test_virtual_collection_items_expose_skin_visibility(client, db, collection_id, expected):
+    for is_public in (True, False):
+        log = GenerationLog(user_id="1", mode="human_upload", status="success", is_public=is_public)
+        db.add(log)
+        db.flush()
+        db.add(UserLike(user_id="1", log_id=log.id))
+    db.commit()
+    response = client.get("/skin/api/collections/items", params={"collection_id": collection_id, "user_id": "1"})
+    assert response.status_code == 200
+    assert {item["data"]["is_public"] for item in response.json()["items"]} == expected

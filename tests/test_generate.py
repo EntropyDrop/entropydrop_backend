@@ -526,12 +526,12 @@ def test_sking_ddj_model_routes_to_real_to_render_without_retry(
 def test_dense_uv_model_is_rejected_for_text_to_skin(client):
     response = client.post(
         "/skin/api/generate",
-        data={
+        data={"public_license_consent": "true", **{
             "prompt": "not a direct image pipeline",
             "mode": "aigc_text_to_skin",
             "aux_model_version": "z_image",
             "model_version": SKING_DDJ_V101C,
-        },
+        }},
     )
 
     assert response.status_code == 400
@@ -561,10 +561,10 @@ def test_sking_ddj_generation_is_unrecoverable(
 
     response = client.post(
         "/skin/api/generate",
-        data={
+        data={"public_license_consent": "true", **{
             "mode": "aigc_image_to_skin",
             "model_version": model_version,
-        },
+        }},
         files={
             "file": (
                 "source.png",
@@ -598,13 +598,13 @@ def test_enqueue_failure_refunds_credits_and_records_history(
 
     response = client.post(
         "/skin/api/generate",
-        data={
+        data={"public_license_consent": "true", **{
             "prompt": "refund enqueue failure",
             "is_public": True,
             "aux_model_version": "z_image",
             "model_version": "sking_v73_flux_4b_000027000",
             "mode": "aigc_text_to_skin",
-        },
+        }},
     )
 
     assert response.status_code == 500
@@ -640,7 +640,7 @@ def test_submit_generate_text_to_skin(mock_credit_cost, mock_enqueue, client, db
         "model_version": "sking_v73_flux_4b_000027000",
         "mode": "aigc_text_to_skin"
     }
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "pending"
@@ -669,13 +669,13 @@ def test_submit_generate_uses_dynamic_credit_cost(mock_credit_cost, mock_enqueue
     user.credits = 4
     db.commit()
 
-    response = client.post("/skin/api/generate", data={
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **{
         "prompt": "dynamic cost",
         "is_public": True,
         "aux_model_version": "z_image",
         "model_version": "sking_v73_flux_4b_000027000",
         "mode": "aigc_text_to_skin",
-    })
+    }})
 
     assert response.status_code == 200
     db.refresh(user)
@@ -699,13 +699,13 @@ def test_submit_generate_uses_model_specific_credit_cost(mock_enqueue, client, d
     backend_utils.redis_conn.set("config:model_price:sking_v73_flux_4b_000027000", "7")
 
     try:
-        response = client.post("/skin/api/generate", data={
+        response = client.post("/skin/api/generate", data={"public_license_consent": "true", **{
             "prompt": "custom model price test",
             "is_public": True,
             "aux_model_version": "z_image",
             "model_version": "sking_v73_flux_4b_000027000",
             "mode": "aigc_text_to_skin",
-        })
+        }})
 
         assert response.status_code == 200
         db.refresh(user)
@@ -933,13 +933,13 @@ def test_toggle_like_rejects_deleted_log(client, db):
 
 def test_generate_validation_fail_guidance(client):
     payload = {"prompt": "test", "guidance": 20.0, "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}  # Too large
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 400
     assert "Guidance must be between" in response.json()["detail"]
 
 def test_generate_validation_fail_n_step(client):
     payload = {"prompt": "test", "n_step": 10, "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}  # Too small
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 400
     assert "n_step must be between" in response.json()["detail"]
 
@@ -950,7 +950,7 @@ def test_generate_private_non_pro(client, db):
     db.commit()
 
     payload = {"prompt": "test", "is_public": False, "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 403
     assert "Free users have no private quota" in response.json()["detail"]
 
@@ -971,7 +971,7 @@ def test_generate_queue_full(client, db):
     db.commit()
 
     payload = {"prompt": "test", "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 429
     assert "task(s) in the queue" in response.json()["detail"]
 
@@ -987,7 +987,7 @@ def test_generate_queue_limit_counts_pending_skin(mock_enqueue, client, db):
     db.add(GenerationLog(status="pending_skin", user_id="test_user_generate", mode="aigc_text_to_skin"))
     db.commit()
 
-    response = client.post("/skin/api/generate", data={"prompt": "blocked", "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"})
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **{"prompt": "blocked", "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}})
     assert response.status_code == 429
     assert "task(s) in the queue" in response.json()["detail"]
     mock_enqueue.assert_not_called()
@@ -1866,7 +1866,7 @@ def test_generate_pro_priority(mock_q_init, mock_enqueue, client, db):
         "aux_model_version": "z_image",
         "model_version": "sking_v73_flux_4b_000027000"
     }
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 200
     
     # Verify Queue was initialized with 'high_' prefix
@@ -1888,7 +1888,7 @@ def test_generate_normal_priority(mock_q_init, mock_enqueue, client, db):
         "aux_model_version": "z_image",
         "model_version": "sking_v73_flux_4b_000027000"
     }
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 200
     
     # Verify Queue was initialized WITHOUT 'high_' prefix
@@ -1962,7 +1962,7 @@ def test_generate_validation_fail_invalid_model_version(client):
         "model_version": "invalid_model_version_name",
         "mode": "aigc_text_to_skin"
     }
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 400
     assert "Invalid model version" in response.json()["detail"]
 
@@ -1973,7 +1973,7 @@ def test_generate_missing_model_version(client):
         "is_public": True,
         "mode": "aigc_text_to_skin"
     }
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 422
 
 @patch("routers.generate.backend_utils.is_text_to_skin_enabled", return_value=False)
@@ -1985,7 +1985,7 @@ def test_generate_text_to_skin_maintenance_block(mock_is_enabled, client, db):
         "aux_model_version": "z_image",
         "model_version": "sking_v73_flux_4b_000027000"
     }
-    response = client.post("/skin/api/generate", data=payload)
+    response = client.post("/skin/api/generate", data={"public_license_consent": "true", **payload})
     assert response.status_code == 403
     assert "Text to skin generation is temporarily under maintenance." in response.json()["detail"]
 
@@ -2005,7 +2005,7 @@ def test_generate_image_to_skin_maintenance_block(mock_is_enabled, client, db):
     }
     response = client.post(
         "/skin/api/generate",
-        data=payload,
+        data={"public_license_consent": "true", **payload},
         files={"file": ("test.png", img_data, "image/png")}
     )
     assert response.status_code == 403
@@ -2028,7 +2028,7 @@ def test_generate_image_edit_to_skin_maintenance_block(mock_is_enabled, client, 
     }
     response = client.post(
         "/skin/api/generate",
-        data=payload,
+        data={"public_license_consent": "true", **payload},
         files={"file": ("test.png", img_data, "image/png")}
     )
     assert response.status_code == 403
@@ -2054,7 +2054,7 @@ def test_generate_model_maintenance_block(client, db):
         }
         response = client.post(
             "/skin/api/generate",
-            data=payload,
+            data={"public_license_consent": "true", **payload},
             files={"file": ("test.png", img_data, "image/png")}
         )
         assert response.status_code == 403
@@ -2082,7 +2082,7 @@ def test_v101c_keeps_v104b_generation_settings():
 def test_retired_v104b_rejects_new_generation_requests(client):
     response = client.post(
         "/skin/api/generate",
-        data={"mode": "aigc_image_to_skin", "model_version": SKING_DDJ_V104B},
+        data={"public_license_consent": "true", **{"mode": "aigc_image_to_skin", "model_version": SKING_DDJ_V104B}},
     )
     assert response.status_code == 400
     assert "Invalid model version combination" in response.json()["detail"]

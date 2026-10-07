@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Form, Query
-from typing import List, Optional
+from typing import List, Optional, Literal
 from sqlalchemy.orm import Session
 import uuid
 from database import get_db
@@ -12,6 +12,30 @@ import licenses
 from config import settings
 
 router = APIRouter(prefix="/api", tags=["collections"])
+
+@router.get("/licenses/preview")
+def preview_skin_license(
+    operation: Literal["generate", "save"],
+    parent: Optional[str] = None,
+    source_rights: Optional[Literal["original", "external"]] = None,
+    is_public: bool = True,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    parent_log = None
+    if parent:
+        parent_log = db.query(models.GenerationLog).filter(
+            models.GenerationLog.id == parent,
+            models.GenerationLog.is_deleted == False,
+            models.GenerationLog.withdrawal.is_(None),
+            models.GenerationLog.status == "success",
+        ).first()
+        if not parent_log:
+            raise HTTPException(status_code=404, detail="Parent skin not found")
+        if not parent_log.is_public and parent_log.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Permission denied")
+    return licenses.license_preview(current_user, operation, parent_log, source_rights, is_public)
+
 
 def visible_logs(viewer_id=None, public_only=False):
     from sqlalchemy import or_
@@ -43,7 +67,7 @@ def resolve_item_urls(item, col_is_public, db, viewer_id=None):
     ).first() if item.log_id else None
     if not log:
         return {}
-    return {"id": log.id, "result": log.result_url, "url": log.result_url}
+    return {"id": log.id, "result": log.result_url, "url": log.result_url, "is_public": log.is_public}
 
 
 @router.get("/collections", response_model=schemas.PaginatedCollections)
@@ -305,6 +329,7 @@ async def get_collection_items(
         for log in logs:
             item_data = {}
             item_data["result"] = log.result_url
+            item_data["is_public"] = log.is_public
 
             processed_items.append({
                 "id": str(log.id),
@@ -453,18 +478,15 @@ async def move_item(
     if not target_col:
         raise HTTPException(status_code=404, detail="Target collection not found")
         
-    # Privacy check: public images -> public collections only, private images -> private collections only
-    skin_is_public = current_col.is_public
-    if item.log_id:
-        log = db.query(models.GenerationLog).filter(models.GenerationLog.id == item.log_id).first()
-        if log:
-            skin_is_public = log.is_public
-
-    if skin_is_public != target_col.is_public:
-        if skin_is_public:
-            raise HTTPException(status_code=400, detail="Public images can only be moved to public collections")
-        else:
-            raise HTTPException(status_code=400, detail="Private images can only be moved to private collections")
+    # Collection visibility does not change the linked skin's visibility.
+    log = db.query(models.GenerationLog).filter(
+        models.GenerationLog.id == item.log_id,
+        *visible_logs(current_user.id),
+    ).first() if item.log_id else None
+    if not log:
+        raise HTTPException(status_code=403, detail="Skin not found or permission denied")
+    if not log.is_public and target_col.is_public:
+        raise HTTPException(status_code=400, detail="Private images can only be moved to private collections")
             
     item.collection_id = req.target_collection_id
     db.commit()
@@ -479,6 +501,8 @@ async def upload_item_to_collection(
     parent: Optional[str] = Form(None), # parent log_id
     license_consent: bool = Form(False),
     requested_license: Optional[str] = Form(None),
+    source_rights: Optional[Literal["original", "external"]] = Form(None),
+    public_license_consent: Optional[bool] = Form(None),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
@@ -487,14 +511,15 @@ async def upload_item_to_collection(
     """Upload image to collection and create generation log"""
     if not id in ["creations_public", "creations_private"]:
         raise HTTPException(status_code=400, detail="Custom collections do not support manual uploads")
-    if (mode == "human_upload" or parent is None) and not license_consent:
-        raise HTTPException(
-            status_code=400,
-            detail="You must confirm that you have the necessary rights for CC BY-NC 4.0 or the selected commercial license",
-        )
-
     is_public = (id == "creations_public")
-    
+    if not parent and not license_consent:
+        raise HTTPException(status_code=400, detail="You must confirm your right to upload and, for public sharing, grant CC BY-NC 4.0")
+    # Older clients used one combined upload/public-sharing confirmation.
+    # An explicit public-sharing decision from newer clients takes precedence.
+    has_public_consent = license_consent if public_license_consent is None else public_license_consent
+    if is_public and not has_public_consent:
+        raise HTTPException(status_code=400, detail="Public sharing requires consent to CC BY-NC 4.0")
+
     if not is_public:
         if not current_user.is_pro_active:
              raise HTTPException(status_code=403, detail="Free users have no private quota, please subscribe to Pro")
@@ -513,6 +538,8 @@ async def upload_item_to_collection(
         parent_log = db.query(models.GenerationLog).filter(
             models.GenerationLog.id == parent,
             models.GenerationLog.is_deleted == False,
+            models.GenerationLog.withdrawal.is_(None),
+            models.GenerationLog.status == "success",
         ).first()
         if not parent_log:
             raise HTTPException(status_code=404, detail="Parent skin not found")
@@ -537,15 +564,14 @@ async def upload_item_to_collection(
             raise e
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    # The requested choice is advisory until validated against the source
-    # lineage and the account's entitlement. It can never broaden CC/unknown
-    # source rights. Validate before uploading to avoid orphaned objects.
+    # Resolve the same policy as the preview before creating storage objects.
     try:
         license_code = licenses.saved_license(
             current_user,
             parent_log=parent_log,
             requested_license=requested_license,
             is_upload=(mode == "human_upload"),
+            source_rights=source_rights,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -580,7 +606,7 @@ async def upload_item_to_collection(
         parent=parent,
         status="success",
         license=license_code,
-        public_license=licenses.public_license_for(license_code, is_public),
+        public_license=licenses.public_license_for(license_code, is_public, consent=has_public_consent),
         license_version=licenses.LICENSE_VERSION,
     )
     db.add(log)
@@ -599,7 +625,7 @@ async def upload_item_to_collection(
         "name": log.name,
         "type": "image",
         "log_id": log.id,
-        "data": {"result": result_url}
+        "data": {"result": result_url, "is_public": log.is_public}
     }
 
 

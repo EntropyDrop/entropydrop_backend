@@ -627,6 +627,8 @@ async def generate_image(
     pricing_tier: Optional[Literal["standard", "pro"]] = Form(None),
     mode: Optional[str] = Form(None, max_length=50),
     parent: Optional[str] = Form(None),
+    source_rights: Optional[Literal["original", "external"]] = Form(None),
+    public_license_consent: bool = Form(False),
     seed: Optional[int] = Form(None),
     n_step: Optional[int] = Form(None),
     guidance: Optional[float] = Form(None),
@@ -674,9 +676,20 @@ async def generate_image(
         
     parent_log = None
     if parent:
-        parent_log = db.query(models.GenerationLog).filter(models.GenerationLog.id == parent).first()
-        if parent_log:
-            is_public = parent_log.is_public
+        parent_log = db.query(models.GenerationLog).filter(
+            models.GenerationLog.id == parent,
+            models.GenerationLog.is_deleted == False,
+            models.GenerationLog.withdrawal.is_(None),
+            models.GenerationLog.status == "success",
+        ).first()
+        if not parent_log:
+            raise HTTPException(status_code=404, detail="Parent skin not found")
+        if not parent_log.is_public and parent_log.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Permission denied")
+        # Derivatives retain the source visibility; previews use the same rule.
+        is_public = parent_log.is_public
+    if is_public and not public_license_consent:
+        raise HTTPException(status_code=400, detail="Public sharing requires consent to CC BY-NC 4.0")
 
     # Pro Quota Check
     if not is_public:
@@ -780,7 +793,9 @@ async def generate_image(
             print(f"S3 upload error for {log_id}: {err_detail}")
             raise HTTPException(status_code=500, detail="Image upload failed, please try again later")
 
-    license_code = licenses.generated_license(current_user, parent_log)
+    license_code = licenses.generated_license(
+        current_user, parent_log, source_rights or ("external" if file else None)
+    )
     log = models.GenerationLog(
         id=log_id,
         prompt=prompt,
@@ -805,7 +820,7 @@ async def generate_image(
         is_pro=current_user.is_pro_active,
         pro_priority=current_user.is_pro_active,
         license=license_code,
-        public_license=licenses.public_license_for(license_code, is_public),
+        public_license=licenses.public_license_for(license_code, is_public, consent=public_license_consent),
         license_version=licenses.LICENSE_VERSION,
         source=source_filename
     )
