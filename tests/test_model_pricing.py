@@ -70,6 +70,7 @@ def submit_image(client, **overrides):
         "model_version": SKING_DDJ_V101C,
         "mode": "aigc_image_to_skin",
         "is_public": True,
+        "public_license_consent": True,
         **overrides,
     }, files={"file": ("source.png", image.getvalue(), "image/png")})
 
@@ -196,6 +197,7 @@ def test_combined_models_use_same_membership_tier(
     assert quote.json()["credits"] == cost
     response = client.post("/skin/api/generate", data={
         **params, "prompt": "tiered pricing", "mode": "aigc_text_to_skin", "is_public": True,
+        "public_license_consent": True,
     })
     assert response.status_code == 200, response.text
     db.refresh(pricing_user)

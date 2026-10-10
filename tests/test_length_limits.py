@@ -64,7 +64,12 @@ def test_generate_prompt_length_limit(client):
 def test_generate_name_truncation(mock_enqueue, client, db):
     # Prompt is long (e.g. 200), name should be truncated to 100
     prompt = "a" * 200
-    payload = {"prompt": prompt, "aux_model_version": "z_image", "model_version": "sking_v73_flux_4b_000027000"}
+    payload = {
+        "prompt": prompt,
+        "public_license_consent": True,
+        "aux_model_version": "z_image",
+        "model_version": "sking_v73_flux_4b_000027000",
+    }
     response = client.post("/skin/api/generate", data=payload)
     assert response.status_code == 200
     
