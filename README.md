@@ -38,6 +38,18 @@ and `.local/` directories.
 
 ## Production Notes
 
+- Revision `e6b93f1a0c25` adds `users.figure_print_terms_version` and
+  `users.figure_print_terms_accepted_at`. Run migrations, deploy the API, then
+  deploy the frontend's download-confirmation flow. Existing rows remain null;
+  accepting the general Terms of Service does not accept the printing terms.
+- Authenticated GET/POST `/api/users/me/figure_print_terms` reads/records the
+  printing agreement. POST requires `{ "version": "1.0", "accepted": true }`;
+  the server supplies the user identity and UTC time, rejects outdated versions,
+  and preserves the first acceptance time on retries. This is the latest user
+  acceptance, not a download history or a history of all agreement versions.
+- Keep `figure_print_terms.py` synchronized with the frontend's terms version
+  and its archived text in `docs/legal/figure-print-terms/`. Publish changed
+  terms under a new version; never replace text for an already published one.
 - Keep real credentials in your deployment secret manager or local `.env` files.
 - Do not commit `.env`, `.env.prod`, private keys, virtualenvs, coverage output, or deployment scripts with environment-specific details.
 - Run migrations with `alembic upgrade head` before starting new API versions.
@@ -130,3 +142,71 @@ The key is minted at redemption under the existing per-user quota lock. A retry
 with the same device code returns the same key until the request expires; revoking
 that key prevents further redemption. This preserves the existing long-lived,
 revocable full-Space key contract. Expired request rows are pruned on new requests.
+
+### Figure kit review and refunds
+
+Apply migration `a4e19c7d8032` before starting this version. Figure orders paid
+through the checkout enter human review. Administrators listed in `ADMIN_EMAILS`
+can use `/figure/manage` and the protected `/api/figure/orders` endpoints to
+approve, reject with a reason, produce, ship with tracking, and complete orders.
+Rejection applies to the entire paid order and requests a full PayPal refund.
+The decision and customer mailbox notification commit before the payment call;
+only a verified completed refund marks the order refunded. Refunds preserve the
+same idempotency key across retries and restore known consumed stock once.
+
+Keep `background_service.py` running for payment and refund reconciliation.
+Pending refunds are checked at five-minute intervals; administrators can also
+sync them manually. Partial/multiple refunds, mismatched amounts, and unknown
+results older than six hours require manual PayPal reconciliation. Failed refund
+IDs are queried rather than issuing a second refund blindly. Existing orders
+already in production or fulfilled keep their workflow; unstarted paid orders
+enter review. Historical stock deductions without evidence are not restored.
+
+### CUTE-7cm kit price
+
+Migration `b8d62a4f901c` updates the `Cute DIY Kit` print SKU to US$40 for new purchases. Stock and existing order/item price snapshots are preserved. The frontend reads the live price from `/api/orders/model-stock?order_type=print`. A schema downgrade does not revert operational pricing.
+
+
+### Figure kit specifications
+
+Apply `alembic upgrade head` before enabling the updated order API. Migration
+`c7a31d902ef4` adds `model_sales_limits.kit_specifications` (the current English
+product name, dimensions, material quantities/descriptions and assembly note)
+and `order_items.kit_specifications_snapshot`. It seeds the CUTE-7cm catalog
+without changing prices, inventory or historical orders.
+
+The stock endpoint returns catalog specifications. Order creation validates the
+server-side configuration against `schemas.KitSpecifications` and snapshots it
+for every kit; client-supplied specifications cannot replace it. Updating a
+product does not rewrite earlier order snapshots. User and administrator order
+responses expose the saved snapshot. For historical items without a snapshot,
+`kit_specifications_current` is a clearly identified current-catalog fallback.
+Do not backfill current specifications as historical purchase terms.
+
+
+### Order sticker snapshots and production sources
+
+Migration `d2f81a604bc9` adds `order_items.sticker_snapshot`. New CUTE orders
+save skin ID/name, publisher ID/username, canonical source URL, brand, model
+label and the actual localized sticker labels. These values come from server
+records; only `sticker_language` (`en` or `zh-hans`) is accepted from the client.
+Each kit also keeps its own private PNG at `orders/{order_id}/{item_id}.png`.
+The source skin row is locked during copying, coordinating with skin withdrawal;
+a missing source or failed copy prevents order creation. Source withdrawal does
+not remove order copies. Renaming/deleting the skin or publisher does not alter
+saved sticker metadata. The order's `user_id` continues to identify the buyer.
+
+The administrator-only endpoint
+`GET /api/figure/orders/{order_id}/items/{item_id}/production-source` requires a
+paid/fulfilled, approved order, a matching CUTE item, its private image key and
+complete sticker snapshot. It signs the order copy on each request and returns
+the saved sticker information without looking up the original skin or user.
+The frontend preparation link contains only order/item IDs, so refreshing or
+reopening it works after source deletion or signed URL expiry.
+
+Legacy CUTE metadata is recovered from prior snapshots and remaining records,
+marked `origin=legacy_backfill`. Names read from a current profile are recovery
+values, not guaranteed historical names. Unrecoverable fields are enumerated in
+`missing_fields`; production is blocked until those records are reviewed and
+corrected from reliable evidence. This migration does not change prices, stock,
+order totals or skin files. Apply migrations before enabling the new API.

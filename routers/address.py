@@ -5,6 +5,7 @@ from database import get_db
 import models
 import schemas
 import auth
+from shipping_address_rules import ADDRESS_FIELDS, ShippingAddressError, validate_address
 
 router = APIRouter(prefix="/api/addresses", tags=["address"])
 
@@ -33,6 +34,11 @@ async def create_address(
     if count >= 10:
         raise HTTPException(status_code=400, detail="Maximum of 10 shipping addresses can be stored")
 
+    try:
+        normalized = validate_address(req.model_dump())
+    except ShippingAddressError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+
     # If set as default, unset other default addresses first
     if req.is_default:
         db.query(models.ShippingAddress).filter(
@@ -44,12 +50,7 @@ async def create_address(
     
     address = models.ShippingAddress(
         user_id=current_user.id,
-        country=req.country,
-        phone=req.phone,
-        zip_code=req.zip_code,
-        state=req.state,
-        city=req.city,
-        detail_address=req.detail_address,
+        **normalized,
         is_default=req.is_default
     )
     db.add(address)
@@ -73,6 +74,17 @@ async def update_address(
     if not address:
         raise HTTPException(status_code=404, detail="Address not found")
 
+    # Validate the merged address; a country-only update can change required
+    # fields. Do this before changing defaults or writing any address data.
+    update_data = req.model_dump(exclude_unset=True)
+    merged = {key: getattr(address, key) for key in ADDRESS_FIELDS}
+    merged.update({key: value for key, value in update_data.items() if key in ADDRESS_FIELDS})
+    try:
+        normalized = validate_address(merged)
+    except ShippingAddressError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    update_data.update(normalized)
+
     # If updated to default, unset other default addresses first
     if req.is_default:
         db.query(models.ShippingAddress).filter(
@@ -82,7 +94,6 @@ async def update_address(
         ).update({"is_default": False})
 
     # Update fields
-    update_data = req.dict(exclude_unset=True)
     for key, value in update_data.items():
         setattr(address, key, value)
 

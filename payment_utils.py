@@ -3,6 +3,8 @@ import base64
 from config import settings
 
 PAYPAL_TIMEOUT_SECONDS = 15
+# Marks purchase units created with the website address locked in PayPal.
+PAYPAL_WEBSITE_SHIPPING_REFERENCE = "website-shipping-v2"
 
 def get_paypal_access_token():
     """Get OAuth2 token from PayPal."""
@@ -24,8 +26,12 @@ def get_paypal_access_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
-def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "USD", return_url: str | None = None, cancel_url: str | None = None):
-    """Create order using PayPal API."""
+def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "USD", return_url: str | None = None, cancel_url: str | None = None, shipping_address: dict | None = None, shipping_name: str | None = None):
+    """Create an order, optionally locking shipping to the merchant address."""
+    if shipping_address is not None:
+        shipping_name = (shipping_name or "").strip()
+        if not shipping_name or len(shipping_name) > 300:
+            raise ValueError("Shipping recipient name must contain 1 to 300 characters")
     access_token = get_paypal_access_token()
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -44,12 +50,20 @@ def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "
             }
         ]
     }
-    if return_url or cancel_url:
-        order_payload["application_context"] = {}
-        if return_url:
-            order_payload["application_context"]["return_url"] = return_url
-        if cancel_url:
-            order_payload["application_context"]["cancel_url"] = cancel_url
+    experience_context = {}
+    if return_url:
+        experience_context["return_url"] = return_url
+    if cancel_url:
+        experience_context["cancel_url"] = cancel_url
+    if shipping_address is not None:
+        unit = order_payload["purchase_units"][0]
+        unit["reference_id"] = PAYPAL_WEBSITE_SHIPPING_REFERENCE
+        unit["shipping"] = {"name": {"full_name": shipping_name}, "address": shipping_address}
+        experience_context["shipping_preference"] = "SET_PROVIDED_ADDRESS"
+        order_payload["payment_source"] = {"paypal": {"experience_context": experience_context}}
+    elif experience_context:
+        # Preserve existing Credits / non-shipping checkout behavior.
+        order_payload["application_context"] = experience_context
     
     response = requests.post(
         f"{settings.PAYPAL_API_BASE}/v2/checkout/orders",
@@ -61,11 +75,12 @@ def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "
     return response.json()
 
 def capture_paypal_order_api(paypal_order_id: str):
-    """Capture payment after user approves."""
+    """Capture payment after user approves, requesting the full order details."""
     access_token = get_paypal_access_token()
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
     }
     
     response = requests.post(
@@ -302,3 +317,27 @@ def anonymize_name(given_name: str, surname: str) -> str:
         return f"{g} {s}".strip()
     except Exception:
         return "User"
+
+
+def refund_paypal_capture_api(capture_id: str, amount: str, request_id: str):
+    """Refund the exact captured order amount with a stable idempotency key."""
+    response = requests.post(
+        f"{settings.PAYPAL_API_BASE}/v2/payments/captures/{capture_id}/refund",
+        headers={"Authorization": f"Bearer {get_paypal_access_token()}",
+                 "Content-Type": "application/json", "PayPal-Request-Id": request_id,
+                 "Prefer": "return=representation"},
+        json={"amount": {"value": amount, "currency_code": "USD"}},
+        timeout=PAYPAL_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def get_paypal_refund_api(refund_id: str):
+    response = requests.get(
+        f"{settings.PAYPAL_API_BASE}/v2/payments/refunds/{refund_id}",
+        headers={"Authorization": f"Bearer {get_paypal_access_token()}"},
+        timeout=PAYPAL_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    return response.json()

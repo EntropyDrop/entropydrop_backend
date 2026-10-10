@@ -27,7 +27,8 @@ def test_get_addresses_empty(client):
 
 def test_create_address(client, db):
     payload = {
-        "country": "China",
+        "recipient_name": "Test Recipient",
+        "country": "CN",
         "phone": "13800000000",
         "zip_code": "100000",
         "state": "Beijing",
@@ -38,7 +39,7 @@ def test_create_address(client, db):
     response = client.post("/skin/api/addresses", json=payload)
     assert response.status_code == 200
     data = response.json()
-    assert data["country"] == "China"
+    assert data["country"] == "CN"
     assert data["phone"] == "13800000000"
     assert data["is_default"] is True
 
@@ -51,8 +52,9 @@ def test_create_address_limit(client, db):
     # Add 10 addresses first
     for i in range(10):
         addr = ShippingAddress(
+            recipient_name="Test Recipient",
             user_id="1",
-            country="China",
+            country="CN",
             phone=f"1380000000{i}",
             zip_code="100000",
             state="Beijing",
@@ -64,7 +66,8 @@ def test_create_address_limit(client, db):
 
     # Try creating the 11th
     payload = {
-        "country": "China",
+        "recipient_name": "Test Recipient",
+        "country": "CN",
         "phone": "13800000000",
         "zip_code": "100000",
         "state": "Beijing",
@@ -77,8 +80,9 @@ def test_create_address_limit(client, db):
 
 def test_update_address(client, db):
     addr = ShippingAddress(
+        recipient_name="Test Recipient",
         user_id="1",
-        country="China",
+        country="CN",
         phone="13800000000",
         zip_code="100000",
         state="Beijing",
@@ -102,8 +106,9 @@ def test_update_address(client, db):
 
 def test_delete_address(client, db):
     addr = ShippingAddress(
+        recipient_name="Test Recipient",
         user_id="1",
-        country="China",
+        country="CN",
         phone="13800000000",
         zip_code="100000",
         state="Beijing",

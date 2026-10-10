@@ -1,5 +1,5 @@
-from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, List
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, HttpUrl
+from typing import Optional, List, Literal
 from datetime import datetime
 
 class GoogleAuthRequest(BaseModel):
@@ -13,6 +13,15 @@ class UpdateMinecraftSkinRequest(BaseModel):
     skin_type: Optional[str] = Field("strong", max_length=20)
     model_config = ConfigDict(extra="forbid")
 
+class PublicUserProfile(BaseModel):
+    id: str
+    username: Optional[str] = None
+    picture: Optional[str] = None
+    skin_url: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class UserResponse(BaseModel):
     id: str
     email: str
@@ -24,6 +33,8 @@ class UserResponse(BaseModel):
     
     # Priority fields
     terms_agreed: Optional[bool] = False
+    figure_print_terms_version: Optional[str] = None
+    figure_print_terms_accepted_at: Optional[datetime] = None
     is_pro: bool = False
     is_admin: bool = False
     pro_expires_at: Optional[datetime] = None
@@ -39,6 +50,17 @@ class UserResponse(BaseModel):
     paypal_subscription_status: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
+
+class FigurePrintTermsRequest(BaseModel):
+    version: str = Field(..., min_length=1, max_length=32)
+    accepted: StrictBool
+    model_config = ConfigDict(extra="forbid")
+
+class FigurePrintTermsResponse(BaseModel):
+    required_version: str
+    effective_date: str
+    accepted_version: Optional[str] = None
+    accepted_at: Optional[datetime] = None
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -108,6 +130,8 @@ class LogNameUpdateRequest(BaseModel):
     name: str = Field(..., max_length=100)
 
 class ShippingAddressBase(BaseModel):
+    # Empty is retained only for reading historical addresses and order snapshots.
+    recipient_name: str = Field("", max_length=300)
     country: str = Field(..., max_length=100)
     phone: str = Field(..., max_length=50)
     zip_code: str = Field(..., max_length=20)
@@ -120,6 +144,7 @@ class ShippingAddressCreate(ShippingAddressBase):
     pass
 
 class ShippingAddressUpdate(BaseModel):
+    recipient_name: Optional[str] = Field(None, max_length=300)
     country: Optional[str] = Field(None, max_length=100)
     phone: Optional[str] = Field(None, max_length=50)
     zip_code: Optional[str] = Field(None, max_length=20)
@@ -142,10 +167,52 @@ class OrderBase(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
 class OrderCreate(OrderBase):
+    sticker_language: Literal["en", "zh-hans"] = "en"
+    quantity: int = Field(1, ge=1, le=10, strict=True)
     log_id: Optional[str] = None # Used for direct link/Pro ordering
     model_type: Optional[str] = Field("PLA+sticker", max_length=100) # Default for direct links
 
+class KitMaterial(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    quantity: int = Field(ge=1, le=1000, strict=True)
+    description: Optional[str] = Field(None, max_length=1000)
+
+class KitSpecifications(BaseModel):
+    product_name: str = Field(min_length=1, max_length=200)
+    dimensions: str = Field(min_length=1, max_length=200)
+    materials: List[KitMaterial] = Field(min_length=1, max_length=100)
+    assembly_note: str = Field(min_length=1, max_length=2000)
+
+class ModelStockResponse(BaseModel):
+    model_type: str
+    available: bool
+    stock: int
+    price: float
+    kit_specifications: Optional[KitSpecifications] = None
+
+class StickerLabels(BaseModel):
+    publisher: str
+    user_id: str
+    source: str
+
+class OrderStickerSnapshot(BaseModel):
+    schema_version: Literal[1] = 1
+    origin: Literal["order", "legacy_backfill"]
+    brand: str
+    model_name: str
+    skin_id: str
+    skin_name: str
+    publisher_id: str
+    publisher_name: str
+    source_url: str
+    labels: StickerLabels
+    missing_fields: List[str] = []
+
 class OrderItemResponse(BaseModel):
+    sticker_snapshot: Optional[OrderStickerSnapshot] = None
+    kit_specifications_snapshot: Optional[KitSpecifications] = None
+    kit_specifications_current: Optional[KitSpecifications] = None
+    refer_log_id: Optional[str] = None
     id: str
     order_id: str
     skin_url: Optional[str] = None
@@ -168,42 +235,23 @@ class OrderResponse(OrderBase):
     address: Optional[ShippingAddressResponse] = None
     paypal_order_id: Optional[str] = None
     goods_status: Optional[str] = None
+    figure_review_status: Optional[str] = None
+    figure_review_reason: Optional[str] = None
+    figure_reviewed_at: Optional[datetime] = None
+    refund_status: Optional[str] = None
+    tracking_number: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
 class PayRequest(BaseModel):
     paypal_order_id: Optional[str] = None
 
+class OrderCheckoutRequest(BaseModel):
+    return_url: HttpUrl
+
 class SubscriptionCreateRequest(BaseModel):
     tier: str
     return_url: str
-
-# Cart related models
-class CartItemBase(BaseModel):
-    log_id: str
-    model_config = ConfigDict(protected_namespaces=())
-    model_type: str = Field("PLA+sticker", max_length=100)
-
-class CartItemCreate(CartItemBase):
-    pass
-
-class CartItemResponse(CartItemBase):
-    id: str
-    user_id: str
-    created_at: datetime
-    
-    # Enriched for frontend use
-    log_name: Optional[str] = None
-    log_result: Optional[str] = None
-
-    model_config = ConfigDict(from_attributes=True)
-        
-class PaginatedCartItems(BaseModel):
-    items: List[CartItemResponse]
-    total: int
-    page: int
-    page_size: int
-    total_pages: int
 
 class PaginatedOrders(BaseModel):
     items: List[OrderResponse]
@@ -285,6 +333,8 @@ class ForumNotificationResponse(BaseModel):
     senderSkinUrl: Optional[str] = None
     postId: Optional[str] = None
     postTitle: Optional[str] = None
+    orderId: Optional[str] = None
+    message: Optional[str] = None
     isRead: bool = False
     createdAt: str
 

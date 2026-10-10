@@ -9,6 +9,7 @@ from config import settings
 import models
 import schemas
 import auth
+from figure_print_terms import FIGURE_PRINT_TERMS_VERSION, acceptance_status, record_acceptance
 from datetime import datetime, date
 import backend_utils
 from backend_utils import is_text_to_skin_enabled, is_image_to_skin_enabled, is_image_edit_to_skin_enabled
@@ -111,6 +112,8 @@ def google_login(
         "is_admin": user.is_admin,
         "pro_expires_at": user.pro_expires_at,
         "terms_agreed": user.terms_agreed,
+        "figure_print_terms_version": user.figure_print_terms_version,
+        "figure_print_terms_accepted_at": user.figure_print_terms_accepted_at,
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
@@ -187,6 +190,19 @@ def logout_session(
     auth.clear_auth_session_cookie(response)
     return {"status": "ok"}
 
+@router.get("/api/users/{user_id}/profile", response_model=schemas.PublicUserProfile)
+def get_public_profile(
+    user_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Basic collection-owner identity, available only to signed-in visitors."""
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
 @router.get("/api/users/me", response_model=schemas.UserResponse)
 def get_my_profile(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     user_res = {
@@ -199,6 +215,8 @@ def get_my_profile(db: Session = Depends(get_db), current_user: models.User = De
         "is_admin": current_user.is_admin,
         "pro_expires_at": current_user.pro_expires_at,
         "terms_agreed": current_user.terms_agreed,
+        "figure_print_terms_version": current_user.figure_print_terms_version,
+        "figure_print_terms_accepted_at": current_user.figure_print_terms_accepted_at,
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
@@ -210,6 +228,30 @@ def get_my_profile(db: Session = Depends(get_db), current_user: models.User = De
         "skin_type": current_user.skin_type or "strong"
     }
     return user_res
+
+@router.get("/api/users/me/figure_print_terms", response_model=schemas.FigurePrintTermsResponse)
+def get_figure_print_terms(response: Response, current_user: models.User = Depends(auth.get_current_user)):
+    response.headers["Cache-Control"] = "no-store"
+    return acceptance_status(current_user)
+
+
+@router.post("/api/users/me/figure_print_terms", response_model=schemas.FigurePrintTermsResponse)
+def agree_figure_print_terms(
+    req: schemas.FigurePrintTermsRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    response.headers["Cache-Control"] = "no-store"
+    if req.version != FIGURE_PRINT_TERMS_VERSION:
+        raise HTTPException(status_code=409, detail={
+            "code": "FIGURE_PRINT_TERMS_VERSION_MISMATCH",
+            "required_version": FIGURE_PRINT_TERMS_VERSION,
+        })
+    if not req.accepted:
+        raise HTTPException(status_code=400, detail={"code": "FIGURE_PRINT_TERMS_ACCEPTANCE_REQUIRED"})
+    return record_acceptance(db, current_user)
+
 
 @router.post("/api/users/agree_terms", response_model=schemas.UserResponse)
 def agree_terms(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
@@ -226,6 +268,8 @@ def agree_terms(db: Session = Depends(get_db), current_user: models.User = Depen
         "is_admin": current_user.is_admin,
         "pro_expires_at": current_user.pro_expires_at,
         "terms_agreed": current_user.terms_agreed,
+        "figure_print_terms_version": current_user.figure_print_terms_version,
+        "figure_print_terms_accepted_at": current_user.figure_print_terms_accepted_at,
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
@@ -283,6 +327,8 @@ def update_username(
         "is_admin": current_user.is_admin,
         "pro_expires_at": current_user.pro_expires_at,
         "terms_agreed": current_user.terms_agreed,
+        "figure_print_terms_version": current_user.figure_print_terms_version,
+        "figure_print_terms_accepted_at": current_user.figure_print_terms_accepted_at,
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
@@ -355,6 +401,8 @@ def update_minecraft_skin(
         "is_admin": current_user.is_admin,
         "pro_expires_at": current_user.pro_expires_at,
         "terms_agreed": current_user.terms_agreed,
+        "figure_print_terms_version": current_user.figure_print_terms_version,
+        "figure_print_terms_accepted_at": current_user.figure_print_terms_accepted_at,
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),

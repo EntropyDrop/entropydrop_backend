@@ -12,6 +12,7 @@ from database import engine
 import models
 from routers import (
     address,
+    figure_admin,
     auth,
     collections,
     credit,
@@ -284,6 +285,7 @@ core_routers = [
     collections.router,
     address.router,
     order.router,
+    figure_admin.router,
     webhooks.router,
     monitor.router,
     ledger.router,

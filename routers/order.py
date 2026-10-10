@@ -13,6 +13,7 @@ from datetime import timezone
 from config import settings
 from s3_utils import s3_client
 from payment_utils import (
+    PAYPAL_WEBSITE_SHIPPING_REFERENCE,
     create_paypal_order_api,
     capture_paypal_order_api,
     get_paypal_order_api,
@@ -22,10 +23,22 @@ from payment_utils import (
 )
 import backend_utils
 import generation_priority
+from order_stickers import sticker_snapshot
+from shipping_address_rules import ADDRESS_FIELDS, ShippingAddressError, normalize_address, paypal_shipping_address, validate_address
 from order_inventory import lock_order, reserve_inventory, release_inventory, expire_inventory_holds
 from rate_limit import limiter, get_authenticated_or_remote_address
 
 PAYPAL_CURRENCY_CODE = "USD"
+
+
+def _paypal_shipping_address(order: models.Order) -> dict:
+    """Validate the order snapshot before creating a PayPal checkout."""
+    try:
+        return paypal_shipping_address(order.address_snapshot)
+    except ShippingAddressError as exc:
+        if "recipient_name" in exc.fields:
+            raise HTTPException(status_code=409, detail="This order needs a recipient name. Please recreate it using a complete shipping address.")
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 def _money(value) -> Decimal:
@@ -59,7 +72,13 @@ def _payload_amount(unit: dict) -> dict:
     raise HTTPException(status_code=400, detail="PayPal order is missing amount")
 
 
+def _validate_paypal_response_id(order: models.Order, payload: dict) -> None:
+    if payload.get("id") is not None and payload["id"] != order.paypal_order_id:
+        raise HTTPException(status_code=400, detail="Payment voucher mismatch")
+
+
 def _validate_paypal_payload_for_order(order: models.Order, payload: dict) -> None:
+    _validate_paypal_response_id(order, payload)
     unit = _purchase_unit(payload)
     custom_id = unit.get("custom_id")
     if custom_id != order.id:
@@ -111,6 +130,13 @@ def confirm_paypal_payment(order: models.Order, paypal_order_id: Optional[str], 
         return paypal_order
     if status == "APPROVED":
         capture_data = capture_paypal_order_api(paypal_order_id)
+        _validate_paypal_response_id(order, capture_data)
+        units = capture_data.get("purchase_units") or []
+        if not units or units[0].get("custom_id") is None:
+            # Capture responses can omit purchase-unit metadata, or include
+            # custom_id only on the capture. Read the saved PayPal order again
+            # and fully verify its binding and amount before fulfillment.
+            capture_data = get_paypal_order_api(paypal_order_id)
         _validate_paypal_payload_for_order(order, capture_data)
         if not _paypal_payload_is_completed(capture_data):
             raise HTTPException(status_code=400, detail="PayPal payment not completed")
@@ -140,7 +166,7 @@ def _subscription_custom_id(subscription: dict) -> Optional[str]:
 
 def clone_skin_for_order(log_entry, order_id, item_id):
     if not log_entry or not log_entry.result:
-        return None
+        raise HTTPException(status_code=409, detail="Source skin image is unavailable")
     source_bucket = settings.AWS_BUCKET_NAME if log_entry.is_public else settings.AWS_PRIVATE_BUCKET_NAME
     source_key = log_entry.result
     # result typically is subpath or full file path key
@@ -155,7 +181,6 @@ def clone_skin_for_order(log_entry, order_id, item_id):
         return destination_key
     except Exception as e:
         print(f"Failed to copy skin for order: {e}")
-        from fastapi import HTTPException
         raise HTTPException(status_code=500, detail="Failed to save custom file")
 
 def presign_order_items(items):
@@ -173,6 +198,17 @@ def order_response(db, order):
     data = schemas.OrderResponse.model_validate(order)
     data.address = schemas.ShippingAddressResponse.model_validate(order.address_snapshot) if order.address_snapshot else None
     data.items = presign_order_items(db.query(models.OrderItem).filter_by(order_id=order.id).all())
+    # Legacy orders have no purchase-time specification. Return current catalog
+    # data separately so clients never present it as an original order snapshot.
+    missing = {item.model_type for item in data.items if item.kit_specifications_snapshot is None}
+    if order.order_type == "print" and missing:
+        catalog = {product.model_type: product.kit_specifications for product in db.query(models.ModelSalesLimit).filter(
+            models.ModelSalesLimit.order_type == "print", models.ModelSalesLimit.model_type.in_(missing)
+        )}
+        for item in data.items:
+            current = catalog.get(item.model_type)
+            if item.kit_specifications_snapshot is None and current:
+                item.kit_specifications_current = schemas.KitSpecifications.model_validate(current)
     return data
 
 
@@ -203,7 +239,8 @@ def _activate_order_benefits(order, db: Session, current_user):
              
         generation_priority.grant_pro_priority(db, current_user)
     elif order.order_type == "print":
-        order.goods_status = "preparing"
+        order.figure_review_status = "pending"
+        order.goods_status = "awaiting_review"
 
 def complete_order_payment(db, order, paypal_order_id):
     """The caller holds the order lock. Repeated confirmation is a no-op."""
@@ -236,13 +273,17 @@ def complete_order_payment(db, order, paypal_order_id):
     order = lock_order(db, order_id)
     if order.status in ("paid", "shipping", "completed"):
         return order
-    confirm_paypal_payment(order, paypal_order_id, verified_payload=payload)
+    captured = confirm_paypal_payment(order, paypal_order_id, verified_payload=payload)
+    capture = _capture_from_unit(_purchase_unit(captured))
+    if capture:
+        order.paypal_capture_id = capture.get("id")
     order.status = "paid"
     order.paid_at = datetime.datetime.now(timezone.utc)
     user = db.query(models.User).filter_by(id=order.user_id).with_for_update().first()
     _activate_order_benefits(order, db, user)
     if backordered:
         order.goods_status = "awaiting_stock"
+    order.inventory_consumed = bool(order.inventory_reserved)
     order.inventory_reserved = False  # Hold is consumed, never released.
     db.commit()
     if order.order_type == "subscription":
@@ -285,6 +326,8 @@ async def start_order_reconciliation_job():
     while True:
         await asyncio.sleep(60)
         await repair_unhandled_orders()
+        from figure_orders import reconcile_figure_refunds
+        await asyncio.to_thread(reconcile_figure_refunds)
 
 
 router = APIRouter(prefix="/api/orders", tags=["order"])
@@ -306,7 +349,7 @@ def get_orders(
     
     return backend_utils.paginate_response([order_response(db, o) for o in orders], total, page, page_size)
 
-@router.get("/model-stock")
+@router.get("/model-stock", response_model=list[schemas.ModelStockResponse])
 def get_model_stock(order_type: Optional[str] = None, db: Session = Depends(get_db)):
     """Get model stock status"""
     query = db.query(models.ModelSalesLimit)
@@ -319,7 +362,9 @@ def get_model_stock(order_type: Optional[str] = None, db: Session = Depends(get_
         result.append({
             "model_type": limit.model_type,
             "available": limit.stock > 0,
-            "price": limit.price
+            "stock": max(0, limit.stock),
+            "price": limit.price,
+            "kit_specifications": limit.kit_specifications,
         })
     return result
 
@@ -348,6 +393,8 @@ def create_order(
         raise HTTPException(status_code=429, detail="Daily order limit reached (100 times)")
 
     if req.order_type == "subscription":
+        if req.quantity != 1:
+            raise HTTPException(status_code=400, detail="Subscriptions must be ordered individually")
         limit_cfg = db.query(models.ModelSalesLimit).filter(
             models.ModelSalesLimit.model_type == req.model_type,
             models.ModelSalesLimit.order_type == req.order_type
@@ -385,6 +432,11 @@ def create_order(
         if not address:
             raise HTTPException(status_code=400, detail="Invalid shipping address or address does not belong to you")
 
+        try:
+            shipping_fields = validate_address({key: getattr(address, key) for key in ADDRESS_FIELDS})
+        except ShippingAddressError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
         items_to_create = []
 
         # Check stock from DB
@@ -395,25 +447,37 @@ def create_order(
         if not limit_cfg:
             raise HTTPException(status_code=400, detail="Invalid model type")
         stock = limit_cfg.stock
+        specifications = schemas.KitSpecifications.model_validate(limit_cfg.kit_specifications) if limit_cfg.kit_specifications else None
+        if req.model_type == "Cute DIY Kit" and specifications is None:
+            raise HTTPException(status_code=409, detail="Kit specifications are unavailable")
 
         if stock <= 0:
             raise HTTPException(status_code=400, detail="This model is sold out")
+
+        if req.quantity > stock:
+            raise HTTPException(status_code=400, detail="Insufficient stock for this quantity")
 
         if req.log_id:
             log_entry = db.query(models.GenerationLog).filter(
                 models.GenerationLog.id == req.log_id,
                 models.GenerationLog.is_deleted == False,
                 models.GenerationLog.status == "success"
-            ).first()
+            ).with_for_update().populate_existing().first()
             if not log_entry:
                 raise HTTPException(status_code=400, detail="Invalid model reference log")
             if not log_entry.is_public and log_entry.user_id != current_user.id:
                 raise HTTPException(status_code=403, detail="Unauthorized to use this private model for ordering")
-            items_to_create.append({
+            if not log_entry.result:
+                raise HTTPException(status_code=409, detail="Source skin image is unavailable")
+            saved_sticker = sticker_snapshot(db, log_entry, req.model_type, req.sticker_language)
+            publisher = db.query(models.User).filter_by(id=log_entry.user_id).first() if log_entry.user_id else None
+            items_to_create.extend({
                 "log_entry": log_entry,
                 "model_type": req.model_type,
-                "price": limit_cfg.price
-            })
+                "price": limit_cfg.price,
+                "sticker_snapshot": saved_sticker,
+                "publisher_name": publisher.username if publisher else None,
+            } for _ in range(req.quantity))
 
 
 
@@ -421,19 +485,30 @@ def create_order(
         if not items_to_create:
             raise HTTPException(status_code=400, detail="Checkout queue is empty")
 
-        # Merge with unpaid orders having the same shipping address
-        existing_order = db.query(models.Order).filter(
+        # Address IDs survive edits. Merge only when the saved shipping fields
+        # still match; default-address metadata does not affect fulfillment.
+        candidates = db.query(models.Order).filter(
             models.Order.user_id == current_user.id,
             models.Order.address_id == req.address_id,
             models.Order.status == "pending_payment",
             models.Order.order_type == "print",
             models.Order.capture_started == False,
-        ).with_for_update().populate_existing().first()
+        ).order_by(models.Order.created_at.asc(), models.Order.id.asc()).with_for_update().populate_existing().all()
+        existing_order = next((candidate for candidate in candidates
+                               if candidate.address_snapshot
+                               and normalize_address(candidate.address_snapshot) == shipping_fields), None)
 
         if existing_order:
             current_count = db.query(models.OrderItem).filter(models.OrderItem.order_id == existing_order.id).count()
             if current_count + len(items_to_create) > 10:
                 raise HTTPException(status_code=400, detail="Item limit for unpaid orders reached")
+            model_count = db.query(models.OrderItem).filter(
+                models.OrderItem.order_id == existing_order.id,
+                models.OrderItem.model_type == req.model_type,
+            ).count()
+            available_for_order = stock + (model_count if existing_order.inventory_reserved else 0)
+            if model_count + req.quantity > available_for_order:
+                raise HTTPException(status_code=400, detail="Insufficient stock for this quantity")
 
 
         added_price = sum(item["price"] for item in items_to_create)
@@ -442,7 +517,6 @@ def create_order(
         if existing_order:
             order = existing_order
             release_inventory(db, order)
-            order.address_snapshot = schemas.ShippingAddressResponse.model_validate(address).model_dump(mode="json")
             order.price += added_price
             order.total_price += added_price
             order.paypal_order_id = None
@@ -450,7 +524,10 @@ def create_order(
             order = models.Order(
                 user_id=current_user.id,
                 address_id=req.address_id,
-                address_snapshot=schemas.ShippingAddressResponse.model_validate(address).model_dump(mode="json"),
+                address_snapshot={
+                    **schemas.ShippingAddressResponse.model_validate(address).model_dump(mode="json"),
+                    **shipping_fields,
+                },
                 order_type="print",
                 status="pending_payment", 
                 price=added_price,
@@ -474,7 +551,15 @@ def create_order(
                 skin_url=skin_url,
                 model_type=it["model_type"],
                 price=it["price"],
-                refer_log_id=it.get("log_entry").id if it.get("log_entry") else None
+                kit_specifications_snapshot=specifications.model_dump(mode="json") if specifications else None,
+                sticker_snapshot=it["sticker_snapshot"],
+                refer_log_id=it.get("log_entry").id if it.get("log_entry") else None,
+                source_snapshot={
+                    "skin_id": it["log_entry"].id, "name": it["log_entry"].name,
+                    "publisher_id": it["log_entry"].user_id, "publisher_name": it["publisher_name"], "parent_id": it["log_entry"].parent,
+                    "license": it["log_entry"].license, "public_license": it["log_entry"].public_license,
+                    "is_public": it["log_entry"].is_public, "license_version": it["log_entry"].license_version,
+                } if it.get("log_entry") else None
             )
             db.add(order_item)
             created_items.append(order_item)
@@ -640,6 +725,7 @@ def delete_order_item(
 def create_paypal_order(
     request: Request,
     id: str,
+    req: Optional[schemas.OrderCheckoutRequest] = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user)
 ):
@@ -652,21 +738,55 @@ def create_paypal_order(
         raise HTTPException(status_code=400, detail="Order is not in pending payment status")
         
     if order.capture_started:
+        if req is not None and order.paypal_order_id:
+            # The popup client must resume confirmation of this voucher, never
+            # create a second payment after a timeout with an unknown outcome.
+            return {"id": order.paypal_order_id, "status": "CAPTURE_PENDING"}
         raise HTTPException(status_code=409, detail="Payment confirmation is pending")
-    reserve_inventory(db, order)
-    if order.paypal_order_id:
-        db.commit()
-        return {"id": order.paypal_order_id}
     try:
-        # Pass order.id for bidirectional binding
-        paypal_order = create_paypal_order_api(order.total_price, order.id)
-        # Save to database
-        order.paypal_order_id = paypal_order["id"]
+        reserve_inventory(db, order)
+        # Print orders also inspect SDK-created vouchers to replace old,
+        # unapproved checkouts that still let the buyer choose another address.
+        if order.paypal_order_id and req is None and order.order_type != "print":
+            db.commit()
+            return {"id": order.paypal_order_id}
+        paypal_order = get_paypal_order_api(order.paypal_order_id) if order.paypal_order_id else None
+        if paypal_order and order.order_type == "print" and paypal_order.get("status") in ("CREATED", "PAYER_ACTION_REQUIRED"):
+            _paypal_shipping_address(order)
+            units = paypal_order.get("purchase_units") or []
+            shipping_locked = len(units) == 1 and units[0].get("reference_id") == PAYPAL_WEBSITE_SHIPPING_REFERENCE
+            if not shipping_locked:
+                # Reuse the inventory hold. Approved/completed payments must
+                # keep their original voucher so they can be reconciled safely.
+                paypal_order = None
+        if paypal_order is None:
+            checkout_options = {"return_url": str(req.return_url), "cancel_url": str(req.return_url)} if req else {}
+            if order.order_type == "print":
+                checkout_options["shipping_address"] = _paypal_shipping_address(order)
+                checkout_options["shipping_name"] = order.address_snapshot["recipient_name"].strip()
+            paypal_order = create_paypal_order_api(order.total_price, order.id, **checkout_options)
+            order.paypal_order_id = paypal_order["id"]
         db.commit()
-        return {"id": paypal_order["id"]}
+        if req is None:
+            return {"id": order.paypal_order_id}
+        approval_url = next((link.get("href") for link in paypal_order.get("links", [])
+                             if link.get("rel") in ("approve", "payer-action") and link.get("href")), None)
+        # Older SDK-created vouchers may omit their approval link. Keep the
+        # checkout host consistent with the configured PayPal environment.
+        host = "www.sandbox.paypal.com" if "sandbox" in settings.PAYPAL_API_BASE else "www.paypal.com"
+        return {
+            "id": order.paypal_order_id,
+            "status": paypal_order.get("status"),
+            "approval_url": approval_url or f"https://{host}/checkoutnow?token={order.paypal_order_id}",
+        }
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
+        db.rollback()
         print(f"Error creating PayPal order: {e}")
         raise HTTPException(status_code=500, detail="Failed to create payment order")
+
 
 
 @router.get("/paypal/config")

@@ -740,7 +740,10 @@ async def list_notifications(
         sender = sender_map.get(n.sender_id)
         post = post_map.get(n.post_id) if n.type not in ("daily_login", "monthly_login", "subscription_grant", "system_gift") else None
         
-        if n.type in ("daily_login", "monthly_login", "subscription_grant"):
+        if n.order_id:
+            sender_name = "System"
+            post_title = None
+        elif n.type in ("daily_login", "monthly_login", "subscription_grant"):
             sender_name = "System"
             post_title = n.comment_id or "0"
         elif n.type == "system_gift":
@@ -759,6 +762,8 @@ async def list_notifications(
             senderSkinUrl=sender.skin_url if sender else None,
             postId=n.post_id,
             postTitle=post_title,
+            orderId=n.order_id,
+            message=n.message,
             isRead=n.is_read,
             createdAt=get_relative_time(n.created_at)
         ))

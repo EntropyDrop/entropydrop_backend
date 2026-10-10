@@ -27,6 +27,8 @@ class User(Base):
     credits = Column(Integer, default=0, nullable=False)
     last_login_date = Column(Date, nullable=True)
     terms_agreed = Column(Boolean, default=False) # Whether user agreed to terms of service
+    figure_print_terms_version = Column(String(32), nullable=True)
+    figure_print_terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
     
     # Subscription fields
     pro_expires_at = Column(DateTime(timezone=True), nullable=True)
@@ -244,6 +246,8 @@ class ShippingAddress(Base):
     """Shipping address model"""
     __tablename__ = "shipping_addresses"
 
+    recipient_name = Column(String(300), nullable=False, default="", server_default="")
+
     id = Column(String(16), primary_key=True, default=generate_base58_id, index=True)
     user_id = Column(String(16), index=True, nullable=False)
     country = Column(String(100), nullable=False)
@@ -282,7 +286,19 @@ class Order(Base):
 
     paid_at = Column(DateTime(timezone=True), nullable=True) # Timestamp of successful payment
     paypal_order_id = Column(String(100), unique=True, nullable=True, index=True)
-    goods_status = Column(String(50), nullable=True, index=True) # shipping, preparing, printing
+    goods_status = Column(String(50), nullable=True, index=True)
+    figure_review_status = Column(String(20), nullable=True, index=True)
+    figure_review_reason = Column(Text, nullable=True)
+    figure_reviewed_by = Column(String(16), nullable=True)
+    figure_reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    paypal_capture_id = Column(String(100), nullable=True)
+    paypal_refund_id = Column(String(100), nullable=True, unique=True)
+    refund_status = Column(String(30), nullable=True)
+    refund_error = Column(Text, nullable=True)
+    refund_requested_at = Column(DateTime(timezone=True), nullable=True)
+    refund_checked_at = Column(DateTime(timezone=True), nullable=True)
+    inventory_consumed = Column(Boolean, default=False, nullable=False, server_default="0")
+    tracking_number = Column(String(200), nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
@@ -297,6 +313,9 @@ class OrderItem(Base):
     model_type = Column(String(100), nullable=False, default="10cm Model V1")
     price = Column(Float, nullable=False, default=60.0)
     refer_log_id = Column(String(16), nullable=True, index=True)
+    source_snapshot = Column(JSON, nullable=True)
+    kit_specifications_snapshot = Column(JSON, nullable=True)
+    sticker_snapshot = Column(JSON, nullable=True)
 
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc))
@@ -311,6 +330,7 @@ class ModelSalesLimit(Base):
     order_type = Column(String(20), nullable=False, default="print") # 'subscription' or 'print'
     stock = Column(Integer, default=100) # Remaining stock / quota
     price = Column(Float, nullable=False, default=0.0)
+    kit_specifications = Column(JSON, nullable=True)
 
     
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc))
@@ -442,7 +462,10 @@ class ForumNotification(Base):
     id = Column(String(16), primary_key=True, default=generate_base58_id, index=True)
     user_id = Column(String(16), index=True, nullable=False) # recipient
     sender_id = Column(String(16), index=True, nullable=True) # initiator
-    type = Column(String(50), nullable=False) # 'like', 'comment', 'reply'
+    type = Column(String(50), nullable=False)
+    order_id = Column(String(16), nullable=True, index=True)
+    message = Column(Text, nullable=True)
+    event_key = Column(String(100), nullable=True, unique=True)
     post_id = Column(String(16), index=True, nullable=True)
     comment_id = Column(String(16), index=True, nullable=True)
     is_read = Column(Boolean, default=False, index=True)

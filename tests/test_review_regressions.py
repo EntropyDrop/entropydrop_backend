@@ -215,7 +215,7 @@ def test_private_skin_deletion_uses_private_storage(client, db, account, withdra
 
 def print_order(db, account, stock=1):
     cfg = models.ModelSalesLimit(model_type="review-print", order_type="print", stock=stock, price=20)
-    address = models.ShippingAddress(user_id=account.id, country="US", phone="+12345678", zip_code="12345", state="CA", city="City", detail_address="Original address")
+    address = models.ShippingAddress(recipient_name="Test Recipient", user_id=account.id, country="US", phone="+12345678", zip_code="12345", state="CA", city="City", detail_address="Original address")
     db.add_all([cfg, address])
     db.flush()
     order = models.Order(user_id=account.id, order_type="print", total_price=20, price=20, address_id=address.id, paypal_order_id="PAY-REVIEW")
@@ -295,7 +295,7 @@ def test_timeout_then_background_repair_consumes_stock_once(client, db, account,
     assert client.post(f"/skin/api/orders/{order.id}/pay", json={"paypal_order_id": order.paypal_order_id}).status_code == 200
     db.refresh(cfg)
     db.refresh(order)
-    assert cfg.stock == 0 and order.status == "paid" and order.goods_status == "preparing"
+    assert cfg.stock == 0 and order.status == "paid" and order.goods_status == "awaiting_review"
     address.detail_address = "Changed address"
     db.commit()
     assert client.get(f"/skin/api/orders/{order.id}").json()["address"]["detail_address"] == "Original address"
