@@ -469,7 +469,7 @@ def create_order(
                 raise HTTPException(status_code=403, detail="Unauthorized to use this private model for ordering")
             if not log_entry.result:
                 raise HTTPException(status_code=409, detail="Source skin image is unavailable")
-            saved_sticker = sticker_snapshot(db, log_entry, req.model_type, req.sticker_language)
+            saved_sticker = sticker_snapshot(db, log_entry, req.model_type, req.sticker_language, specifications)
             publisher = db.query(models.User).filter_by(id=log_entry.user_id).first() if log_entry.user_id else None
             items_to_create.extend({
                 "log_entry": log_entry,

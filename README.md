@@ -210,3 +210,5 @@ values, not guaranteed historical names. Unrecoverable fields are enumerated in
 `missing_fields`; production is blocked until those records are reviewed and
 corrected from reliable evidence. This migration does not change prices, stock,
 order totals or skin files. Apply migrations before enabling the new API.
+
+The active CUTE-10cm kit catalog is installed by `a9c64e280fb1`: approximately 10 × 6.7 × 4.1 cm, one pre-cut sticker sheet, six printed body parts, one long joint and four short joints. It uses no PTFE tubes. Existing order specifications and sticker snapshots retain the model purchased.
