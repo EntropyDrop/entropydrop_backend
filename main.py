@@ -13,6 +13,7 @@ import models
 from routers import (
     address,
     figure_admin,
+    figure_catalog,
     auth,
     collections,
     credit,
@@ -286,6 +287,7 @@ core_routers = [
     address.router,
     order.router,
     figure_admin.router,
+    figure_catalog.router,
     webhooks.router,
     monitor.router,
     ledger.router,
