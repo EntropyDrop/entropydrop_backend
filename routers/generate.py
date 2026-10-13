@@ -466,28 +466,50 @@ AVAILABLE_IMAGE_EDIT_MODELS = [
 ]
 
 
-def get_model_pricing_tiers(model_version: str) -> list[str]:
-    return ["pro", "standard"] if model_version == SKING_DDJ_V101C else []
+def get_model_pricing_tiers(model_version: str, aux_model_version: str | None = None) -> list[str]:
+    model_versions = [model_version] + ([aux_model_version] if aux_model_version else [])
+    free_cost = sum(backend_utils.get_model_credit_cost(model, is_pro=False) for model in model_versions)
+    pro_cost = sum(backend_utils.get_model_credit_cost(model, is_pro=True) for model in model_versions)
+    return ["pro", "standard"] if free_cost != pro_cost else []
 
 
 def generation_model_pricing(model_version, aux_model_version, is_pro, pricing_tier=None):
     if pricing_tier is not None:
-        if pricing_tier not in get_model_pricing_tiers(model_version) or aux_model_version:
+        available = (
+            model_version == LEGACY_SKIN_MODEL_VERSION
+            and aux_model_version in AVAILABlE_TEXT_TO_IMAGE_MODELS + AVAILABLE_IMAGE_EDIT_MODELS
+        ) if aux_model_version else model_version in AVAILABLE_IMAGE_TO_SKIN_MODELS
+        if pricing_tier not in ("pro", "standard") or not available:
             raise HTTPException(status_code=400, detail="Invalid pricing option for this model")
-        # Explicit options have fixed prices and permissions for every viewer.
+        # Open tabs may still send an explicit tier after the prices become equal.
+        # Explicit options have fixed prices; model-wide permissions still apply.
         price_is_pro = pricing_tier == "pro"
-        pro_only = price_is_pro
     else:
         # Preserve membership-based pricing for older clients without an option.
         price_is_pro = is_pro
-        pro_only = backend_utils.is_model_pro_exclusive(model_version)
+    pro_only = pricing_tier == "pro" or backend_utils.is_model_pro_exclusive(model_version)
     cost = backend_utils.get_model_credit_cost(model_version, is_pro=price_is_pro)
     maintenance = backend_utils.is_model_under_maintenance(model_version)
     if aux_model_version:
-        cost += backend_utils.get_model_credit_cost(aux_model_version, is_pro=is_pro)
+        cost += backend_utils.get_model_credit_cost(aux_model_version, is_pro=price_is_pro)
         pro_only = pro_only or backend_utils.is_model_pro_exclusive(aux_model_version)
         maintenance = maintenance or backend_utils.is_model_under_maintenance(aux_model_version)
     return {"credits": cost, "is_pro": pro_only, "under_maintenance": maintenance}
+
+
+def generation_model_options(model_versions, aux_model_versions=None):
+    options = []
+    for aux in ([None] if aux_model_versions is None else aux_model_versions):
+        for model in model_versions:
+            name = f"{aux} + {model}" if aux else model
+            for tier in get_model_pricing_tiers(model, aux) or [None]:
+                option = {"id": f"{name}:{tier}" if tier else name, "model_version": model}
+                if aux:
+                    option["aux_model_version"] = aux
+                if tier:
+                    option["pricing_tier"] = tier
+                options.append(option)
+    return options
 
 
 @router.get("/models")
@@ -500,12 +522,13 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
         "text_to_image_models": AVAILABlE_TEXT_TO_IMAGE_MODELS,
         "image_edit_models": AVAILABLE_IMAGE_EDIT_MODELS,
         "image_to_skin_models": AVAILABLE_IMAGE_TO_SKIN_MODELS,
-        "image_to_skin_options": [
-            {"id": f"{model}:{tier}", "model_version": model, "pricing_tier": tier}
-            if tier else {"id": model, "model_version": model}
-            for model in AVAILABLE_IMAGE_TO_SKIN_MODELS
-            for tier in (get_model_pricing_tiers(model) or [None])
-        ],
+        "image_to_skin_options": generation_model_options(AVAILABLE_IMAGE_TO_SKIN_MODELS),
+        "text_to_skin_options": generation_model_options(
+            [LEGACY_SKIN_MODEL_VERSION], AVAILABlE_TEXT_TO_IMAGE_MODELS
+        ),
+        "image_edit_to_skin_options": generation_model_options(
+            [LEGACY_SKIN_MODEL_VERSION], AVAILABLE_IMAGE_EDIT_MODELS
+        ),
     }
 
 

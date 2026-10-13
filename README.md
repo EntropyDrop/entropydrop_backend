@@ -80,30 +80,33 @@ and `.local/` directories.
 
 ## Model credit pricing
 
-In `/skin/monitor`, set `SKING_DDJ_v101c`'s **All users** price to **12** and
-**Pro only** price to **4**. The image-to-skin model selector shows two entries
-with the same model name and distinct access labels and prices. Both execute
-the same model and share the maintenance switch. The selector defaults to the
-first Pro-only option for everyone. Free users see the subscription action and
-can choose All users at its listed price; active Pro users can choose either.
-Deploy the backend before the frontend. No database migration is required;
-existing prices remain until an administrator saves a new All users price.
+In `/skin/monitor`, every model has **Free** and **Pro** prices plus independent
+**Pro only** and **Maintenance** switches. Generation shows one entry when the
+prices match and two entries with the same model name when they differ. Combined
+text/image-edit models use their total Free and Pro prices for this comparison.
+Both switches apply to the entire model, including its standard-price option.
+The selector defaults to the first available option; split models list Pro first.
+Free users can choose standard pricing when the model is not Pro-only; active Pro
+users automatically use the matching Pro option. Deploy the backend before the
+frontend. No database migration is required for this pricing change, and existing
+prices and switches remain until an administrator saves them.
 
 `POST /skin/api/monitor/model_prices` accepts `credits` (the existing Pro price)
 and `free_credits`, alongside `model_name`, `is_pro` (Pro-only access), and
 `under_maintenance`. Prices are stored in Redis as `config:model_price:<model>`
 and `config:model_free_price:<model>`. An unset Free price falls back to the
 existing price; older clients that omit `free_credits` preserve any override.
-`GET /skin/api/models` exposes `image_to_skin_options` with unique option IDs,
-the real `model_version`, and `pricing_tier` (`standard` or `pro`). Send the real
-model version and selected pricing tier to the quote and generation endpoints.
-These options have fixed access rules independent of the legacy model-wide
-`is_pro` flag: `standard` is open to everyone; `pro` requires an active, unexpired
-subscription. The frontend never sends an option ID as the real model version.
-The monitor saves both prices together and clears the legacy Pro-only flag for
-this model. Other models and older clients without `pricing_tier` retain their
-membership-based pricing. Combined models add each model's price for that tier.
-Refunds use the amount recorded when the task was submitted.
+`GET /skin/api/models` exposes `image_to_skin_options`, `text_to_skin_options`,
+and `image_edit_to_skin_options` with unique option IDs, the real `model_version`,
+an `aux_model_version` for combined models, and `pricing_tier` (`standard` or `pro`)
+only when prices differ. Send those model versions and the selected pricing tier
+to the quote and generation endpoints. Pro pricing requires an active, unexpired
+subscription. Standard pricing also requires Pro when either model's Pro-only
+switch is enabled. Maintenance on either model blocks both options.
+The frontend never sends an option ID as the real model version. Clients without
+`pricing_tier` retain membership-based pricing; explicit tiers from already-open
+tabs remain valid when prices become equal. Refunds use the amount recorded when
+the task was submitted.
 
 ## Tests
 

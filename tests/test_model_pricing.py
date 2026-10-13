@@ -251,34 +251,52 @@ def test_refund_uses_original_charge_after_prices_and_membership_change(
     assert db.query(models.CreditLog).filter_by(action="refund").one().amount == cost
 
 
-def test_model_list_has_distinct_options_for_one_real_model(client, pricing_user):
+@pytest.mark.parametrize("model", generate.AVAILABLE_IMAGE_TO_SKIN_MODELS)
+@pytest.mark.parametrize("free_price,pro_price", [(12, 4), (4, 4), (0, 0), (0, 4)])
+@pytest.mark.parametrize("pro_only", [False, True])
+def test_model_list_splits_only_different_prices(client, pricing_user, model, free_price, pro_price, pro_only):
+    saved = save_prices(client, pricing_user, model_name=model, free_credits=free_price,
+                        credits=pro_price, is_pro=pro_only)
     response = client.get("/skin/api/models")
     assert response.status_code == 200
     options = response.json()["image_to_skin_options"]
-    latest = [option for option in options if option["model_version"] == SKING_DDJ_V101C]
-    assert [option["pricing_tier"] for option in latest] == ["pro", "standard"]
+    entries = [option for option in options if option["model_version"] == model]
+    if free_price == pro_price:
+        assert entries == [{"id": model, "model_version": model}]
+        assert saved["pricing_tiers"] == []
+    else:
+        assert [option["pricing_tier"] for option in entries] == ["pro", "standard"]
+        assert saved["pricing_tiers"] == ["pro", "standard"]
     assert len({option["id"] for option in options}) == len(options)
-    assert response.json()["image_to_skin_models"].count(SKING_DDJ_V101C) == 1
+    assert response.json()["image_to_skin_models"].count(model) == 1
+
+
+def test_unconfigured_models_have_one_option_each(client, pricing_user):
+    response = client.get("/skin/api/models")
+    assert response.json()["image_to_skin_options"] == [
+        {"id": model, "model_version": model} for model in generate.AVAILABLE_IMAGE_TO_SKIN_MODELS
+    ]
 
 
 @pytest.mark.parametrize("tier", ["free", "expired", "pro-plus", "pro-max"])
 @pytest.mark.parametrize("option,cost", [("standard", 12), ("pro", 4)])
+@pytest.mark.parametrize("pro_only", [False, True])
+@pytest.mark.parametrize("model", generate.AVAILABLE_IMAGE_TO_SKIN_MODELS)
 def test_explicit_option_quote_permissions_and_charge(
-    client, db, pricing_user, generation_io, tier, option, cost
+    client, db, pricing_user, generation_io, tier, option, cost, pro_only, model
 ):
     set_membership(db, pricing_user, tier)
-    # The legacy model-wide flag must not restrict the explicit All users option.
-    save_prices(client, pricing_user, is_pro=True)
+    save_prices(client, pricing_user, model_name=model, is_pro=pro_only)
     quote = client.get("/skin/api/generation_credit_cost", params={
-        "model_version": SKING_DDJ_V101C, "pricing_tier": option,
+        "model_version": model, "pricing_tier": option,
     })
     assert quote.status_code == 200
     assert quote.json() == {
-        "credits": cost, "is_pro": option == "pro", "under_maintenance": False,
+        "credits": cost, "is_pro": pro_only or option == "pro", "under_maintenance": False,
     }
-    response = submit_image(client, pricing_tier=option)
+    response = submit_image(client, model_version=model, pricing_tier=option)
     db.refresh(pricing_user)
-    if option == "pro" and tier in ("free", "expired"):
+    if (pro_only or option == "pro") and tier in ("free", "expired"):
         assert response.status_code == 403
         assert "exclusive to Pro" in response.json()["detail"]
         assert pricing_user.credits == 100
@@ -288,28 +306,82 @@ def test_explicit_option_quote_permissions_and_charge(
     else:
         assert response.status_code == 200, response.text
         log = db.get(models.GenerationLog, response.json()["id"])
-        assert log.model_version == SKING_DDJ_V101C
+        assert log.model_version == model
         assert log.credits_charged == cost
         assert pricing_user.credits == 100 - cost
         assert db.query(models.CreditLog).filter_by(action="generation").one().amount == -cost
-        assert generation_io.call_args.args[0].model_version == SKING_DDJ_V101C
+        assert generation_io.call_args.args[0].model_version == model
 
 
+@pytest.mark.parametrize("model", generate.AVAILABLE_IMAGE_TO_SKIN_MODELS)
 @pytest.mark.parametrize("option", ["standard", "pro"])
-def test_maintenance_blocks_both_options(client, db, pricing_user, generation_io, option):
+def test_maintenance_blocks_both_options(client, db, pricing_user, generation_io, option, model):
     set_membership(db, pricing_user, "pro-plus")
-    save_prices(client, pricing_user, under_maintenance=True)
+    save_prices(client, pricing_user, model_name=model, under_maintenance=True)
     quote = client.get("/skin/api/generation_credit_cost", params={
-        "model_version": SKING_DDJ_V101C, "pricing_tier": option,
+        "model_version": model, "pricing_tier": option,
     })
     assert quote.json()["under_maintenance"] is True
-    assert submit_image(client, pricing_tier=option).status_code == 403
+    assert submit_image(client, model_version=model, pricing_tier=option).status_code == 403
+    generation_io.assert_not_called()
+
+
+@pytest.mark.parametrize("aux,key", [("z_image", "text_to_skin_options"), ("flux_4b", "image_edit_to_skin_options")])
+@pytest.mark.parametrize("free_price,pro_price", [(3, 2), (2, 2)])
+def test_combined_options_split_by_total_price(client, pricing_user, aux, key, free_price, pro_price):
+    model = generate.LEGACY_SKIN_MODEL_VERSION
+    save_prices(client, pricing_user, model_name=model, credits=4, free_credits=4)
+    save_prices(client, pricing_user, model_name=aux, credits=pro_price, free_credits=free_price)
+    options = client.get("/skin/api/models").json()[key]
+    assert len(options) == (1 if free_price == pro_price else 2)
+    for option in options:
+        assert option["model_version"] == model
+        assert option["aux_model_version"] == aux
+        params = {key: value for key, value in option.items() if key != "id"}
+        quote = client.get("/skin/api/generation_credit_cost", params=params)
+        assert quote.status_code == 200
+        assert quote.json()["credits"] == 4 + (pro_price if option.get("pricing_tier") == "pro" else free_price)
+
+
+@pytest.mark.parametrize("tier,option,cost", [("free", "standard", 15), ("pro-plus", "pro", 6)])
+def test_combined_explicit_options_quote_and_charge(client, db, pricing_user, generation_io, tier, option, cost):
+    set_membership(db, pricing_user, tier)
+    model = generate.LEGACY_SKIN_MODEL_VERSION
+    save_prices(client, pricing_user, model_name=model)
+    save_prices(client, pricing_user, model_name="z_image", credits=2, free_credits=3)
+    params = {"model_version": model, "aux_model_version": "z_image", "pricing_tier": option}
+    assert client.get("/skin/api/generation_credit_cost", params=params).json()["credits"] == cost
+    response = client.post("/skin/api/generate", data={
+        **params, "prompt": "robot", "mode": "aigc_text_to_skin", "is_public": True,
+        "public_license_consent": True,
+    })
+    assert response.status_code == 200, response.text
+    db.refresh(pricing_user)
+    assert pricing_user.credits == 100 - cost
+    assert db.get(models.GenerationLog, response.json()["id"]).credits_charged == cost
+
+
+@pytest.mark.parametrize("flag", ["is_pro", "under_maintenance"])
+@pytest.mark.parametrize("restricted_model", [generate.LEGACY_SKIN_MODEL_VERSION, "z_image"])
+def test_combined_standard_option_cannot_bypass_either_models_switches(
+    client, pricing_user, generation_io, flag, restricted_model
+):
+    model = generate.LEGACY_SKIN_MODEL_VERSION
+    save_prices(client, pricing_user, model_name=model)
+    save_prices(client, pricing_user, model_name=restricted_model, **{flag: True})
+    params = {"model_version": model, "aux_model_version": "z_image", "pricing_tier": "standard"}
+    assert client.get("/skin/api/generation_credit_cost", params=params).json()[flag] is True
+    response = client.post("/skin/api/generate", data={
+        **params, "prompt": "robot", "mode": "aigc_text_to_skin", "is_public": True,
+        "public_license_consent": True,
+    })
+    assert response.status_code == 403
     generation_io.assert_not_called()
 
 
 @pytest.mark.parametrize("params,status", [
     ({"model_version": SKING_DDJ_V101C, "pricing_tier": "invalid"}, 422),
-    ({"model_version": generate.LEGACY_SKIN_MODEL_VERSION, "pricing_tier": "pro"}, 400),
+    ({"model_version": "unknown-model", "pricing_tier": "pro"}, 400),
     ({"model_version": SKING_DDJ_V101C, "aux_model_version": "z_image", "pricing_tier": "pro"}, 400),
 ])
 def test_invalid_pricing_options_are_rejected(
@@ -318,3 +390,21 @@ def test_invalid_pricing_options_are_rejected(
     assert client.get("/skin/api/generation_credit_cost", params=params).status_code == status
     assert submit_image(client, **params).status_code == status
     generation_io.assert_not_called()
+
+
+@pytest.mark.parametrize("option", ["standard", "pro"])
+def test_open_tabs_can_submit_existing_options_after_prices_become_equal(
+    client, db, pricing_user, generation_io, option
+):
+    set_membership(db, pricing_user, "pro-plus")
+    save_prices(client, pricing_user)
+    save_prices(client, pricing_user, free_credits=4)
+    params = {"model_version": SKING_DDJ_V101C, "pricing_tier": option}
+    quote = client.get("/skin/api/generation_credit_cost", params=params)
+    assert quote.status_code == 200
+    assert quote.json()["credits"] == 4
+    response = submit_image(client, **params)
+    assert response.status_code == 200, response.text
+    db.refresh(pricing_user)
+    assert pricing_user.credits == 96
+    assert db.get(models.GenerationLog, response.json()["id"]).credits_charged == 4
