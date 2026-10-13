@@ -254,14 +254,21 @@ def test_refund_uses_original_charge_after_prices_and_membership_change(
 @pytest.mark.parametrize("model", generate.AVAILABLE_IMAGE_TO_SKIN_MODELS)
 @pytest.mark.parametrize("free_price,pro_price", [(12, 4), (4, 4), (0, 0), (0, 4)])
 @pytest.mark.parametrize("pro_only", [False, True])
-def test_model_list_splits_only_different_prices(client, pricing_user, model, free_price, pro_price, pro_only):
+def test_model_list_respects_pro_only_before_price_differences(client, pricing_user, model, free_price, pro_price, pro_only):
     saved = save_prices(client, pricing_user, model_name=model, free_credits=free_price,
                         credits=pro_price, is_pro=pro_only)
     response = client.get("/skin/api/models")
     assert response.status_code == 200
     options = response.json()["image_to_skin_options"]
     entries = [option for option in options if option["model_version"] == model]
-    if free_price == pro_price:
+    if pro_only:
+        assert entries == [{"id": f"{model}:pro", "model_version": model, "pricing_tier": "pro"}]
+        assert saved["pricing_tiers"] == ["pro"]
+        quote = client.get("/skin/api/generation_credit_cost", params={
+            "model_version": model, "pricing_tier": "pro",
+        })
+        assert quote.json() == {"credits": pro_price, "is_pro": True, "under_maintenance": False}
+    elif free_price == pro_price:
         assert entries == [{"id": model, "model_version": model}]
         assert saved["pricing_tiers"] == []
     else:
@@ -269,6 +276,16 @@ def test_model_list_splits_only_different_prices(client, pricing_user, model, fr
         assert saved["pricing_tiers"] == ["pro", "standard"]
     assert len({option["id"] for option in options}) == len(options)
     assert response.json()["image_to_skin_models"].count(model) == 1
+
+
+@pytest.mark.parametrize("model", generate.AVAILABLE_IMAGE_TO_SKIN_MODELS)
+def test_disabling_pro_only_restores_free_option_without_changing_prices(client, pricing_user, model):
+    for pro_only, tiers in [(True, ["pro"]), (False, ["pro", "standard"])]:
+        save_prices(client, pricing_user, model_name=model, is_pro=pro_only)
+        options = client.get("/skin/api/models").json()["image_to_skin_options"]
+        assert [option["pricing_tier"] for option in options if option["model_version"] == model] == tiers
+        assert backend_utils.get_model_credit_cost(model, is_pro=False) == 12
+        assert backend_utils.get_model_credit_cost(model, is_pro=True) == 4
 
 
 def test_unconfigured_models_have_one_option_each(client, pricing_user):
@@ -328,13 +345,16 @@ def test_maintenance_blocks_both_options(client, db, pricing_user, generation_io
 
 @pytest.mark.parametrize("aux,key", [("z_image", "text_to_skin_options"), ("flux_4b", "image_edit_to_skin_options")])
 @pytest.mark.parametrize("free_price,pro_price", [(3, 2), (2, 2)])
-def test_combined_options_split_by_total_price(client, pricing_user, aux, key, free_price, pro_price):
+@pytest.mark.parametrize("pro_only_model", [None, "skin", "aux"])
+def test_combined_options_respect_pro_only_and_total_price(client, pricing_user, aux, key, free_price, pro_price, pro_only_model):
     model = generate.LEGACY_SKIN_MODEL_VERSION
-    save_prices(client, pricing_user, model_name=model, credits=4, free_credits=4)
-    save_prices(client, pricing_user, model_name=aux, credits=pro_price, free_credits=free_price)
+    save_prices(client, pricing_user, model_name=model, credits=4, free_credits=4, is_pro=pro_only_model == "skin")
+    save_prices(client, pricing_user, model_name=aux, credits=pro_price, free_credits=free_price, is_pro=pro_only_model == "aux")
     options = client.get("/skin/api/models").json()[key]
-    assert len(options) == (1 if free_price == pro_price else 2)
+    assert len(options) == (1 if pro_only_model or free_price == pro_price else 2)
     for option in options:
+        if pro_only_model:
+            assert option["pricing_tier"] == "pro"
         assert option["model_version"] == model
         assert option["aux_model_version"] == aux
         params = {key: value for key, value in option.items() if key != "id"}

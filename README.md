@@ -81,9 +81,11 @@ and `.local/` directories.
 ## Model credit pricing
 
 In `/skin/monitor`, every model has **Free** and **Pro** prices plus independent
-**Pro only** and **Maintenance** switches. Generation shows one entry when the
-prices match and two entries with the same model name when they differ. Combined
-text/image-edit models use their total Free and Pro prices for this comparison.
+**Pro only** and **Maintenance** switches. When Pro only is enabled, generation
+shows only the Pro option, regardless of the Free price. Otherwise it shows one
+entry when prices match and two entries with the same model name when they differ.
+Combined text/image-edit models show only Pro when either model is Pro-only;
+otherwise they use their total Free and Pro prices for this comparison.
 Both switches apply to the entire model, including its standard-price option.
 The selector defaults to the first available option; split models list Pro first.
 Free users can choose standard pricing when the model is not Pro-only; active Pro
@@ -99,7 +101,7 @@ existing price; older clients that omit `free_credits` preserve any override.
 `GET /skin/api/models` exposes `image_to_skin_options`, `text_to_skin_options`,
 and `image_edit_to_skin_options` with unique option IDs, the real `model_version`,
 an `aux_model_version` for combined models, and `pricing_tier` (`standard` or `pro`)
-only when prices differ. Send those model versions and the selected pricing tier
+when prices differ or Pro-only access is enabled. Send those model versions and the selected pricing tier
 to the quote and generation endpoints. Pro pricing requires an active, unexpired
 subscription. Standard pricing also requires Pro when either model's Pro-only
 switch is enabled. Maintenance on either model blocks both options.

@@ -468,6 +468,8 @@ AVAILABLE_IMAGE_EDIT_MODELS = [
 
 def get_model_pricing_tiers(model_version: str, aux_model_version: str | None = None) -> list[str]:
     model_versions = [model_version] + ([aux_model_version] if aux_model_version else [])
+    if any(backend_utils.is_model_pro_exclusive(model) for model in model_versions):
+        return ["pro"]
     free_cost = sum(backend_utils.get_model_credit_cost(model, is_pro=False) for model in model_versions)
     pro_cost = sum(backend_utils.get_model_credit_cost(model, is_pro=True) for model in model_versions)
     return ["pro", "standard"] if free_cost != pro_cost else []
