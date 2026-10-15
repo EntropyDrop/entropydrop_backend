@@ -208,6 +208,7 @@ class OrderStickerSnapshot(BaseModel):
     publisher_id: str
     publisher_name: str
     source_url: str
+    source_is_public: Optional[bool] = None
     labels: StickerLabels
     missing_fields: List[str] = []
 

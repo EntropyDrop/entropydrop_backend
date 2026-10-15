@@ -190,6 +190,13 @@ def presign_order_items(items):
     results = []
     for item in items:
         data = schemas.OrderItemResponse.model_validate(item)
+        # Older sticker snapshots already have purchase-time visibility in the
+        # independent source snapshot. Enrich the response without rewriting it
+        # or consulting a source skin whose visibility may have changed.
+        if data.sticker_snapshot and data.sticker_snapshot.source_is_public is None:
+            source = item.source_snapshot
+            if isinstance(source, dict) and isinstance(source.get("is_public"), bool):
+                data.sticker_snapshot.source_is_public = source["is_public"]
         if data.skin_url:
             data.skin_url = generate_presigned_url_get(data.skin_url, bucket=settings.AWS_PRIVATE_BUCKET_NAME)
         results.append(data)

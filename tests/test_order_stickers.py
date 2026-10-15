@@ -177,3 +177,45 @@ def test_skin_copy_rejects_a_missing_source_with_a_clear_conflict():
     with pytest.raises(HTTPException) as error:
         original_clone(None, "order", "item")
     assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize("visibility", [True, False])
+def test_sticker_visibility_uses_purchase_snapshot_even_for_existing_orders(client, db, quantity_order, visibility):
+    source = db.query(models.GenerationLog).filter_by(id=quantity_order["log_id"]).one()
+    source.is_public = visibility
+    db.commit()
+    response = client.post("/api/orders", json={**quantity_order, "sticker_snapshot": {"source_is_public": not visibility}})
+    assert response.status_code == 200
+    data = response.json()
+    item = db.query(models.OrderItem).filter_by(id=data["items"][0]["id"]).one()
+    assert data["items"][0]["sticker_snapshot"]["source_is_public"] is visibility
+    assert item.sticker_snapshot["source_is_public"] is visibility
+    source.is_public = not visibility
+    db.commit()
+    assert client.get(f"/api/orders/{data['id']}").json()["items"][0]["sticker_snapshot"]["source_is_public"] is visibility
+
+    # Before this field existed, source_snapshot already stored the same fact.
+    legacy = {key: value for key, value in item.sticker_snapshot.items() if key != "source_is_public"}
+    item.sticker_snapshot = legacy
+    order = db.query(models.Order).filter_by(id=data["id"]).one()
+    order.status = "paid"
+    order.figure_review_status = "approved"
+    db.delete(source)
+    db.commit()
+    app.dependency_overrides[auth.get_current_admin] = lambda: db.query(models.User).filter_by(id="1").one()
+    production = client.get(f"/api/figure/orders/{data['id']}/items/{item.id}/production-source")
+    assert production.status_code == 200
+    assert production.json()["sticker_snapshot"]["source_is_public"] is visibility
+    db.refresh(item)
+    assert item.sticker_snapshot == legacy
+
+
+def test_sticker_visibility_stays_unknown_without_a_saved_boolean(client, db, quantity_order):
+    data = client.post("/api/orders", json=quantity_order).json()
+    item = db.query(models.OrderItem).filter_by(id=data["items"][0]["id"]).one()
+    item.sticker_snapshot = {key: value for key, value in item.sticker_snapshot.items() if key != "source_is_public"}
+    item.source_snapshot = {"is_public": "false"}
+    db.commit()
+    response = client.get(f"/api/orders/{data['id']}")
+    assert response.status_code == 200
+    assert response.json()["items"][0]["sticker_snapshot"]["source_is_public"] is None
