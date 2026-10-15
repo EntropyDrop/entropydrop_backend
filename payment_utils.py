@@ -5,6 +5,7 @@ from config import settings
 PAYPAL_TIMEOUT_SECONDS = 15
 # Marks purchase units created with the website address locked in PayPal.
 PAYPAL_WEBSITE_SHIPPING_REFERENCE = "website-shipping-v2"
+PAYPAL_WALLET_SHIPPING_REFERENCE = "paypal-shipping-v1"
 
 def get_paypal_access_token():
     """Get OAuth2 token from PayPal."""
@@ -26,8 +27,10 @@ def get_paypal_access_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
-def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "USD", return_url: str | None = None, cancel_url: str | None = None, shipping_address: dict | None = None, shipping_name: str | None = None):
-    """Create an order, optionally locking shipping to the merchant address."""
+def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "USD", return_url: str | None = None, cancel_url: str | None = None, shipping_address: dict | None = None, shipping_name: str | None = None, use_paypal_shipping: bool = False):
+    """Create an order using merchant shipping or the buyer's PayPal address."""
+    if use_paypal_shipping and shipping_address is not None:
+        raise ValueError("Choose exactly one shipping source")
     if shipping_address is not None:
         shipping_name = (shipping_name or "").strip()
         if not shipping_name or len(shipping_name) > 300:
@@ -60,6 +63,10 @@ def create_paypal_order_api(amount: float, order_id: str, currency_code: str = "
         unit["reference_id"] = PAYPAL_WEBSITE_SHIPPING_REFERENCE
         unit["shipping"] = {"name": {"full_name": shipping_name}, "address": shipping_address}
         experience_context["shipping_preference"] = "SET_PROVIDED_ADDRESS"
+        order_payload["payment_source"] = {"paypal": {"experience_context": experience_context}}
+    elif use_paypal_shipping:
+        order_payload["purchase_units"][0]["reference_id"] = PAYPAL_WALLET_SHIPPING_REFERENCE
+        experience_context["shipping_preference"] = "GET_FROM_FILE"
         order_payload["payment_source"] = {"paypal": {"experience_context": experience_context}}
     elif experience_context:
         # Preserve existing Credits / non-shipping checkout behavior.

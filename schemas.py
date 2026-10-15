@@ -162,6 +162,9 @@ class ShippingAddressResponse(ShippingAddressBase):
 from datetime import datetime
 
 class OrderBase(BaseModel):
+    checkout_mode: Literal["cart", "buy_now"] = "cart"
+    # Legacy clients retain their explicitly selected website address.
+    shipping_source: Literal["address_book", "paypal"] = "address_book"
     address_id: Optional[str] = None
     order_type: str = Field("print", max_length=20) # 'print', 'subscription'
     model_config = ConfigDict(protected_namespaces=())

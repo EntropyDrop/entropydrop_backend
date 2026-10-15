@@ -14,6 +14,7 @@ from config import settings
 from s3_utils import s3_client
 from payment_utils import (
     PAYPAL_WEBSITE_SHIPPING_REFERENCE,
+    PAYPAL_WALLET_SHIPPING_REFERENCE,
     create_paypal_order_api,
     capture_paypal_order_api,
     get_paypal_order_api,
@@ -24,6 +25,7 @@ from payment_utils import (
 import backend_utils
 import generation_priority
 from order_stickers import sticker_snapshot
+from paypal_shipping import paypal_address_snapshot
 from shipping_address_rules import ADDRESS_FIELDS, ShippingAddressError, normalize_address, paypal_shipping_address, validate_address
 from order_inventory import lock_order, reserve_inventory, release_inventory, expire_inventory_holds
 from rate_limit import limiter, get_authenticated_or_remote_address
@@ -256,6 +258,22 @@ def complete_order_payment(db, order, paypal_order_id):
     _validate_paypal_payload_for_order(order, payload)
     if payload.get("status") not in ("APPROVED", "COMPLETED"):
         raise HTTPException(status_code=400, detail="PayPal payment is not approved")
+    if order.order_type == "print" and order.shipping_source == "paypal" and not (order.capture_started and order.address_snapshot):
+        try:
+            order.address_snapshot = paypal_address_snapshot(payload, order.id, order.user_id)
+        except ShippingAddressError as exc:
+            if payload.get("status") == "APPROVED" and not order.capture_started:
+                # Keep the voucher so browser confirmation and background
+                # reconciliation see the same validation result. A new checkout
+                # replaces it only while capture has not started.
+                raise HTTPException(status_code=409, detail={"code": "invalid_paypal_shipping_address", "fields": exc.fields})
+            # A completed/uncertain payment must retain its voucher and stock
+            # even if shipping data needs manual recovery. Expiry must never
+            # replace it with a new checkout that could charge the buyer again.
+            order.capture_started = True
+            order.inventory_reserved_until = None
+            db.commit()
+            raise HTTPException(status_code=409, detail="PayPal shipping address requires review before fulfillment")
     backordered = False
     try:
         reserve_inventory(db, order)
@@ -425,17 +443,22 @@ def create_order(
         db.add(item)
     else:
         # Direct link print order creation
-        address = db.query(models.ShippingAddress).filter(
-            models.ShippingAddress.id == req.address_id,
-            models.ShippingAddress.user_id == current_user.id
-        ).first()
-        if not address:
-            raise HTTPException(status_code=400, detail="Invalid shipping address or address does not belong to you")
-
-        try:
-            shipping_fields = validate_address({key: getattr(address, key) for key in ADDRESS_FIELDS})
-        except ShippingAddressError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
+        address = None
+        shipping_fields = None
+        if req.shipping_source == "paypal":
+            if req.address_id is not None:
+                raise HTTPException(status_code=400, detail="PayPal shipping must not include an address-book ID")
+        else:
+            address = db.query(models.ShippingAddress).filter(
+                models.ShippingAddress.id == req.address_id,
+                models.ShippingAddress.user_id == current_user.id
+            ).first()
+            if not address:
+                raise HTTPException(status_code=400, detail="Invalid shipping address or address does not belong to you")
+            try:
+                shipping_fields = validate_address({key: getattr(address, key) for key in ADDRESS_FIELDS})
+            except ShippingAddressError as exc:
+                raise HTTPException(status_code=409, detail=str(exc))
 
         items_to_create = []
 
@@ -487,16 +510,23 @@ def create_order(
 
         # Address IDs survive edits. Merge only when the saved shipping fields
         # still match; default-address metadata does not affect fulfillment.
-        candidates = db.query(models.Order).filter(
-            models.Order.user_id == current_user.id,
-            models.Order.address_id == req.address_id,
-            models.Order.status == "pending_payment",
-            models.Order.order_type == "print",
-            models.Order.capture_started == False,
-        ).order_by(models.Order.created_at.asc(), models.Order.id.asc()).with_for_update().populate_existing().all()
+        # Direct purchases remain separate even when the buyer later adds
+        # another item to their cart while the PayPal popup is still open.
+        candidates = []
+        if req.checkout_mode == "cart":
+            candidates = db.query(models.Order).filter(
+                models.Order.user_id == current_user.id,
+                models.Order.address_id == req.address_id,
+                models.Order.shipping_source == req.shipping_source,
+                models.Order.checkout_mode == "cart",
+                models.Order.status == "pending_payment",
+                models.Order.order_type == "print",
+                models.Order.capture_started == False,
+            ).order_by(models.Order.created_at.asc(), models.Order.id.asc()).with_for_update().populate_existing().all()
         existing_order = next((candidate for candidate in candidates
-                               if candidate.address_snapshot
-                               and normalize_address(candidate.address_snapshot) == shipping_fields), None)
+                               if (req.shipping_source == "paypal" and candidate.address_snapshot is None)
+                               or (req.shipping_source == "address_book" and candidate.address_snapshot
+                                   and normalize_address(candidate.address_snapshot) == shipping_fields)), None)
 
         if existing_order:
             current_count = db.query(models.OrderItem).filter(models.OrderItem.order_id == existing_order.id).count()
@@ -524,10 +554,12 @@ def create_order(
             order = models.Order(
                 user_id=current_user.id,
                 address_id=req.address_id,
+                shipping_source=req.shipping_source,
+                checkout_mode=req.checkout_mode,
                 address_snapshot={
                     **schemas.ShippingAddressResponse.model_validate(address).model_dump(mode="json"),
                     **shipping_fields,
-                },
+                } if address is not None else None,
                 order_type="print",
                 status="pending_payment", 
                 price=added_price,
@@ -751,19 +783,32 @@ def create_paypal_order(
             db.commit()
             return {"id": order.paypal_order_id}
         paypal_order = get_paypal_order_api(order.paypal_order_id) if order.paypal_order_id else None
+        if paypal_order and order.order_type == "print" and order.shipping_source == "paypal" and paypal_order.get("status") == "APPROVED":
+            _validate_paypal_payload_for_order(order, paypal_order)
+            try:
+                paypal_address_snapshot(paypal_order, order.id, order.user_id)
+            except ShippingAddressError:
+                # Reopen the PayPal address chooser after a rejected address.
+                # capture_started is guarded above; completed payments stay bound.
+                paypal_order = None
         if paypal_order and order.order_type == "print" and paypal_order.get("status") in ("CREATED", "PAYER_ACTION_REQUIRED"):
-            _paypal_shipping_address(order)
+            if order.shipping_source != "paypal":
+                _paypal_shipping_address(order)
             units = paypal_order.get("purchase_units") or []
-            shipping_locked = len(units) == 1 and units[0].get("reference_id") == PAYPAL_WEBSITE_SHIPPING_REFERENCE
-            if not shipping_locked:
+            reference = PAYPAL_WALLET_SHIPPING_REFERENCE if order.shipping_source == "paypal" else PAYPAL_WEBSITE_SHIPPING_REFERENCE
+            shipping_matches = len(units) == 1 and units[0].get("reference_id") == reference
+            if not shipping_matches:
                 # Reuse the inventory hold. Approved/completed payments must
                 # keep their original voucher so they can be reconciled safely.
                 paypal_order = None
         if paypal_order is None:
             checkout_options = {"return_url": str(req.return_url), "cancel_url": str(req.return_url)} if req else {}
             if order.order_type == "print":
-                checkout_options["shipping_address"] = _paypal_shipping_address(order)
-                checkout_options["shipping_name"] = order.address_snapshot["recipient_name"].strip()
+                if order.shipping_source == "paypal":
+                    checkout_options["use_paypal_shipping"] = True
+                else:
+                    checkout_options["shipping_address"] = _paypal_shipping_address(order)
+                    checkout_options["shipping_name"] = order.address_snapshot["recipient_name"].strip()
             paypal_order = create_paypal_order_api(order.total_price, order.id, **checkout_options)
             order.paypal_order_id = paypal_order["id"]
         db.commit()

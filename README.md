@@ -217,3 +217,20 @@ corrected from reliable evidence. This migration does not change prices, stock,
 order totals or skin files. Apply migrations before enabling the new API.
 
 The active CUTE-10cm kit catalog is installed by `a9c64e280fb1`: approximately 10 × 6.7 × 4.1 cm, one pre-cut sticker sheet, six printed body parts, one long joint and four short joints. It uses no PTFE tubes. Existing order specifications and sticker snapshots retain the model purchased.
+
+### PayPal shipping address selection
+
+Apply migration `b7d8e9a10264` (`alembic upgrade head`) before deploying the API.
+The figure checkout defaults to `shipping_source: paypal` without an address ID.
+Legacy clients and existing orders default to `address_book` and retain their
+original shipping snapshots. PayPal and address-book carts merge separately.
+The server validates the approved PayPal order binding, amount, and shipping
+address before capture, then durably stores the address with the inventory hold.
+Missing PayPal phone numbers remain empty; address-book validation still requires
+a phone. Invalid shipping is not captured and a fresh checkout allows correction.
+PayPal addresses are saved on the order without adding them to the address book.
+
+Buy Now requires migration `c6a841f2309d`. It creates an order with
+`checkout_mode: buy_now`, which never merges into shopping carts. Existing
+orders and clients retain `checkout_mode: cart`. Deploy the migration and API
+before enabling the new frontend button.

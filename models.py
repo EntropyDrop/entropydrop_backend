@@ -270,6 +270,8 @@ class Order(Base):
     user_id = Column(String(16), index=True, nullable=False)
     address_id = Column(String(16), index=True, nullable=True) # Shipping address ID (none for subscriptions)
     address_snapshot = Column(JSON, nullable=True)
+    shipping_source = Column(String(20), nullable=False, default="address_book", server_default="address_book")
+    checkout_mode = Column(String(20), nullable=False, default="cart", server_default="cart")
     inventory_reserved = Column(Boolean, nullable=False, default=False, server_default="0")
     inventory_reserved_until = Column(DateTime(timezone=True), nullable=True)
     capture_started = Column(Boolean, nullable=False, default=False, server_default="0")

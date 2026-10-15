@@ -48,11 +48,12 @@ def street_lines(street):
     return first, rest
 
 
-def validate_address(data):
+def validate_address(data, *, require_phone=True):
     result = normalize_address(data)
     errors = {}
     rule = RULES['countries'].get(result['country'])
-    for field in ('recipient_name', 'country', 'detail_address', 'phone'):
+    required_fields = ('recipient_name', 'country', 'detail_address') + (('phone',) if require_phone else ())
+    for field in required_fields:
         if not result[field]:
             errors[field] = 'required'
     if result['country'] and not rule:
