@@ -74,7 +74,7 @@ def test_private_order_copy_and_sticker_survive_source_withdrawal_and_profile_re
     monkeypatch.setattr("routers.order.create_paypal_order_api", create_payment)
     payment = client.post(f"/api/orders/{data['id']}/create-paypal-order")
     assert payment.status_code == 200, payment.text
-    create_payment.assert_called_once_with(80, data["id"],
+    create_payment.assert_called_once_with(70, data["id"],
         shipping_name=saved_address["recipient_name"], shipping_address={"country_code": "US", "admin_area_1": "NY", "admin_area_2": "NYC", "address_line_1": "Test address", "postal_code": "10001"})
     order = db.query(models.Order).filter_by(id=data["id"]).one()
     order.status = "paid"
