@@ -33,6 +33,11 @@ from rate_limit import limiter, get_authenticated_or_remote_address
 PAYPAL_CURRENCY_CODE = "USD"
 
 
+def _model_shipping_fee(order_type: str, model_type: str) -> float:
+    """One flat fee per CUTE kit order, independent of item quantity."""
+    return 10.0 if order_type == "print" and model_type == "Cute DIY Kit" else 0.0
+
+
 def _paypal_shipping_address(order: models.Order) -> dict:
     """Validate the order snapshot before creating a PayPal checkout."""
     try:
@@ -389,6 +394,7 @@ def get_model_stock(order_type: Optional[str] = None, db: Session = Depends(get_
             "available": limit.stock > 0,
             "stock": max(0, limit.stock),
             "price": limit.price,
+            "shipping_fee": _model_shipping_fee(limit.order_type, limit.model_type),
             "kit_specifications": limit.kit_specifications,
         })
     return result
@@ -549,13 +555,15 @@ def create_order(
 
 
         added_price = sum(item["price"] for item in items_to_create)
+        shipping_fee = _model_shipping_fee(req.order_type, req.model_type)
 
 
         if existing_order:
             order = existing_order
             release_inventory(db, order)
             order.price += added_price
-            order.total_price += added_price
+            order.shipping_fee = max(order.shipping_fee, shipping_fee)
+            order.total_price = order.price + order.shipping_fee
             order.paypal_order_id = None
         else:
             order = models.Order(
@@ -570,8 +578,8 @@ def create_order(
                 order_type="print",
                 status="pending_payment", 
                 price=added_price,
-                shipping_fee=0.0,
-                total_price=added_price
+                shipping_fee=shipping_fee,
+                total_price=added_price + shipping_fee
             )
             db.add(order)
             db.flush()
@@ -751,6 +759,8 @@ def delete_order_item(
     if remaining_count == 0:
         # If no items left, cancel the order
         order.status = "cancelled"
+        order.shipping_fee = 0.0
+        order.total_price = 0.0
         
     db.commit()
     return {"status": "success", "message": "Item deleted"}

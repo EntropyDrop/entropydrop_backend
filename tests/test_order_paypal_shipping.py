@@ -62,11 +62,11 @@ def test_paypal_orders_need_no_saved_address_and_merge_only_with_paypal_orders(c
     wallet = response.json()
     assert wallet['shipping_source'] == 'paypal'
     assert wallet['address_id'] is None and wallet['address'] is None
-    assert wallet['id'] != website['id'] and wallet['total_price'] == 80
+    assert wallet['id'] != website['id'] and wallet['total_price'] == 70
     assert website['shipping_source'] == 'address_book'
     assert client.delete(f"/api/addresses/{quantity_order['address_id']}").status_code == 200
     merged = client.post('/api/orders', json=request).json()
-    assert merged['id'] == wallet['id'] and merged['total_price'] == 120
+    assert merged['id'] == wallet['id'] and merged['total_price'] == 100
     assert len(merged['items']) == 3 and merged['address'] is None
     assert db.query(models.ShippingAddress).count() == 0
 

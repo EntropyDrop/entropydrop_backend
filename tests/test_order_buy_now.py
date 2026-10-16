@@ -25,15 +25,15 @@ def test_direct_purchase_is_separate_from_cart_before_and_after_checkout(client,
     direct = direct_response.json()
     assert direct["id"] != cart["id"]
     assert direct["checkout_mode"] == "buy_now" and cart["checkout_mode"] == "cart"
-    assert len(direct["items"]) == 3 and direct["total_price"] == 120
+    assert len(direct["items"]) == 3 and direct["total_price"] == 100
     create = Mock(return_value={"id": "DIRECT-PAYPAL", "status": "CREATED"})
     monkeypatch.setattr("routers.order.create_paypal_order_api", create)
     assert client.post(f"/api/orders/{direct['id']}/create-paypal-order").status_code == 200
-    assert create.call_args.args == (120, direct["id"])
+    assert create.call_args.args == (100, direct["id"])
     added = client.post("/api/orders", json=request).json()
     assert added["id"] == cart["id"] and len(added["items"]) == 3
     unchanged = client.get(f"/api/orders/{direct['id']}").json()
-    assert len(unchanged["items"]) == 3 and unchanged["total_price"] == 120
+    assert len(unchanged["items"]) == 3 and unchanged["total_price"] == 100
     stored = db.query(models.Order).filter_by(id=direct["id"]).one()
     db.refresh(stored)
     assert stored.paypal_order_id == "DIRECT-PAYPAL" and stored.inventory_reserved

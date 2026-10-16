@@ -686,11 +686,12 @@ def seed_cute_figure_kit(db, monkeypatch):
     return migration
 
 
-def update_cute_figure_kit_price(db, monkeypatch):
+def update_cute_figure_kit_price(db, monkeypatch, current=False):
     import importlib.util
     from pathlib import Path
     from types import SimpleNamespace
-    path = Path(__file__).resolve().parents[1] / "alembic/versions/b8d62a4f901c_update_cute_kit_price.py"
+    filename = "e2c49a710b35_update_cute10_kit_price.py" if current else "b8d62a4f901c_update_cute_kit_price.py"
+    path = Path(__file__).resolve().parents[1] / "alembic/versions" / filename
     spec = importlib.util.spec_from_file_location("cute_kit_price_migration", path)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
@@ -716,13 +717,13 @@ def test_cute_kit_seed_preserves_existing_inventory_and_prices(db, monkeypatch):
 
 
 @patch("routers.order.clone_skin_for_order")
-def test_cute_kit_costs_forty_dollars_with_free_shipping(mock_clone, client, db, monkeypatch):
+def test_cute_kit_costs_thirty_dollars_with_flat_shipping(mock_clone, client, db, monkeypatch):
     from models import GenerationLog, ShippingAddress
     seed_cute_figure_kit(db, monkeypatch)
-    update_cute_figure_kit_price(db, monkeypatch)
+    update_cute_figure_kit_price(db, monkeypatch, current=True)
     response = client.get("/skin/api/orders/model-stock?order_type=print")
     kit = next(item for item in response.json() if item["model_type"] == "Cute DIY Kit")
-    assert kit == {"model_type": "Cute DIY Kit", "available": True, "price": 40.0, "stock": 300, "kit_specifications": load_kit_spec_migration().CUTE_KIT_SPECIFICATIONS}
+    assert kit == {"model_type": "Cute DIY Kit", "available": True, "price": 30.0, "shipping_fee": 10.0, "stock": 300, "kit_specifications": load_kit_spec_migration().CUTE_KIT_SPECIFICATIONS}
     mock_clone.return_value = "orders/cute/skin.png"
     log = GenerationLog(prompt="Cute test", is_public=True, user_id="1", mode="edit", result="test.png", status="success")
     address = ShippingAddress(recipient_name="Test Recipient", user_id="1", country="US", phone="123456", zip_code="10001", state="NY", city="NYC", detail_address="Test address")
@@ -731,34 +732,36 @@ def test_cute_kit_costs_forty_dollars_with_free_shipping(mock_clone, client, db,
     payload = {"order_type": "print", "model_type": "Cute DIY Kit", "log_id": log.id, "address_id": address.id}
     response = client.post("/skin/api/orders", json=payload)
     assert response.status_code == 200
-    assert (response.json()["price"], response.json()["shipping_fee"], response.json()["total_price"]) == (40, 0, 40)
+    assert (response.json()["price"], response.json()["shipping_fee"], response.json()["total_price"]) == (30, 10, 40)
     assert response.json()["items"][0]["model_type"] == "Cute DIY Kit"
     second = client.post("/skin/api/orders", json=payload)
     assert second.status_code == 200
     assert second.json()["id"] == response.json()["id"]
-    assert (second.json()["price"], second.json()["shipping_fee"], second.json()["total_price"]) == (80, 0, 80)
+    assert (second.json()["price"], second.json()["shipping_fee"], second.json()["total_price"]) == (60, 10, 70)
 
 
 @pytest.mark.parametrize("status", ["pending_payment", "paid"])
-def test_cute_price_update_preserves_stock_other_products_and_existing_orders(db, monkeypatch, status):
+@pytest.mark.parametrize("current, expected_price", [(False, 40), (True, 30)])
+def test_cute_price_update_preserves_stock_other_products_and_existing_orders(db, monkeypatch, status, current, expected_price):
     from models import ModelSalesLimit
     seed_cute_figure_kit(db, monkeypatch)
     kit = db.query(ModelSalesLimit).filter_by(model_type="Cute DIY Kit").one()
     kit.stock = 287
+    kit.price = 43
     order = Order(user_id="1", order_type="print", status=status, price=30, shipping_fee=0, total_price=30)
     db.add(order)
     db.flush()
     item = OrderItem(order_id=order.id, model_type="Cute DIY Kit", price=30, refer_log_id="previous-skin")
     db.add(item)
     db.commit()
-    migration = update_cute_figure_kit_price(db, monkeypatch)
+    migration = update_cute_figure_kit_price(db, monkeypatch, current=current)
     migration.upgrade()
     migration.downgrade()
     db.commit()
     db.refresh(kit)
     db.refresh(order)
     db.refresh(item)
-    assert (kit.price, kit.stock) == (40, 287)
+    assert (kit.price, kit.stock) == (expected_price, 287)
     assert db.query(ModelSalesLimit).filter_by(model_type="PLA+sticker").one().price == 60
     assert db.query(ModelSalesLimit).filter_by(model_type="pro_1m").one().price == 10
     assert (order.price, order.shipping_fee, order.total_price, item.price) == (30, 0, 30, 30)
@@ -769,7 +772,7 @@ def test_cute_price_update_preserves_stock_other_products_and_existing_orders(db
 def quantity_order(db, monkeypatch):
     from models import GenerationLog, ShippingAddress
     seed_cute_figure_kit(db, monkeypatch)
-    update_cute_figure_kit_price(db, monkeypatch)
+    update_cute_figure_kit_price(db, monkeypatch, current=True)
     log = GenerationLog(prompt="Quantity test", is_public=True, user_id="1", mode="edit", result="test.png", status="success")
     address = ShippingAddress(recipient_name="Test Recipient", user_id="1", country="US", phone="123456", zip_code="10001", state="NY", city="NYC", detail_address="Test address")
     db.add_all([log, address])
@@ -782,10 +785,10 @@ def test_multiple_kits_have_correct_total_snapshots_and_merged_quantity(client, 
     response = client.post("/skin/api/orders", json={**quantity_order, "quantity": 3})
     assert response.status_code == 200
     order = response.json()
-    assert (order["price"], order["shipping_fee"], order["total_price"]) == (120, 0, 120)
+    assert (order["price"], order["shipping_fee"], order["total_price"]) == (90, 10, 100)
     assert len(order["items"]) == 3
     assert len({item["id"] for item in order["items"]}) == 3
-    assert all(item["refer_log_id"] == quantity_order["log_id"] and item["price"] == 40 for item in order["items"])
+    assert all(item["refer_log_id"] == quantity_order["log_id"] and item["price"] == 30 for item in order["items"])
     stored = db.query(OrderItem).filter_by(order_id=order["id"]).all()
     assert len({item.skin_url for item in stored}) == 3
     assert all(item.source_snapshot["skin_id"] == quantity_order["log_id"] for item in stored)
@@ -793,14 +796,16 @@ def test_multiple_kits_have_correct_total_snapshots_and_merged_quantity(client, 
     assert response.status_code == 200
     assert response.json()["id"] == order["id"]
     assert len(response.json()["items"]) == 5
-    assert response.json()["total_price"] == 200
+    assert response.json()["total_price"] == 160
+    assert response.json()["shipping_fee"] == 10
     detail = client.get(f"/skin/api/orders/{order['id']}").json()
     assert all(item["refer_log_id"] == quantity_order["log_id"] for item in detail["items"])
     item_id = detail["items"][-1]["id"]
     with patch("routers.order.s3_client.delete_object"):
         assert client.delete(f"/skin/api/orders/items/{item_id}").status_code == 200
     detail = client.get(f"/skin/api/orders/{order['id']}").json()
-    assert (len(detail["items"]), detail["total_price"]) == (4, 160)
+    assert (len(detail["items"]), detail["total_price"]) == (4, 130)
+    assert detail["shipping_fee"] == 10
 
 
 @pytest.mark.parametrize("quantity", [0, -1, 11, 1.5, "2", True, None])
@@ -818,7 +823,7 @@ def test_quantity_cannot_exceed_unpaid_order_limit(client, db, quantity_order):
     response = client.post("/skin/api/orders", json={**quantity_order, "quantity": 2})
     assert response.status_code == 400
     order = client.get(f"/skin/api/orders/{order_id}").json()
-    assert (len(order["items"]), order["total_price"]) == (9, 360)
+    assert (len(order["items"]), order["total_price"]) == (9, 280)
 
 
 def test_quantity_cannot_exceed_stock_even_after_merging(client, db, quantity_order):
@@ -833,7 +838,7 @@ def test_quantity_cannot_exceed_stock_even_after_merging(client, db, quantity_or
     order_id = response.json()["id"]
     assert client.post("/skin/api/orders", json={**quantity_order, "quantity": 2}).status_code == 400
     order = client.get(f"/skin/api/orders/{order_id}").json()
-    assert (len(order["items"]), order["total_price"]) == (2, 80)
+    assert (len(order["items"]), order["total_price"]) == (2, 70)
 
 
 def test_subscription_quantity_remains_one(client, db):
@@ -858,7 +863,7 @@ def test_quantity_merge_releases_own_hold_without_double_counting_stock(client, 
     assert kit.stock == 1
     response = client.post("/skin/api/orders", json={**quantity_order, "quantity": 1})
     assert response.status_code == 200
-    assert (len(response.json()["items"]), response.json()["total_price"]) == (3, 120)
+    assert (len(response.json()["items"]), response.json()["total_price"]) == (3, 100)
     db.refresh(kit)
     db.refresh(order)
     assert kit.stock == 3
@@ -980,3 +985,32 @@ def test_order_keeps_recipient_snapshot_after_address_edit_and_deletion(client, 
     db.delete(saved)
     db.commit()
     assert client.get(f'/api/orders/{order_id}').json()['address']['recipient_name'] == 'Test Recipient'
+
+
+@pytest.mark.parametrize("quantity", [1, 2, 10])
+@pytest.mark.parametrize("checkout_mode", ["cart", "buy_now"])
+def test_cute_shipping_is_flat_and_cannot_be_overridden(client, db, quantity_order, quantity, checkout_mode):
+    response = client.post("/api/orders", json={**quantity_order, "quantity": quantity, "checkout_mode": checkout_mode, "price": 1, "shipping_fee": 0, "total_price": 1})
+    assert response.status_code == 200, response.text
+    order = response.json()
+    assert (order["price"], order["shipping_fee"], order["total_price"]) == (30 * quantity, 10, 30 * quantity + 10)
+
+
+def test_adding_to_legacy_cart_keeps_old_item_price_and_charges_shipping_once(client, db, quantity_order):
+    response = client.post("/api/orders", json=quantity_order)
+    saved = db.query(Order).filter_by(id=response.json()["id"]).one()
+    item = db.query(OrderItem).filter_by(order_id=saved.id).one()
+    item.price = saved.price = saved.total_price = 40
+    saved.shipping_fee = 0
+    db.commit()
+    response = client.post("/api/orders", json={**quantity_order, "quantity": 2})
+    assert response.status_code == 200, response.text
+    order = response.json()
+    assert order["id"] == saved.id
+    assert sorted(item["price"] for item in order["items"]) == [30, 30, 40]
+    assert (order["price"], order["shipping_fee"], order["total_price"]) == (100, 10, 110)
+    with patch("routers.order.s3_client.delete_object"):
+        for item in order["items"]:
+            assert client.delete(f"/api/orders/items/{item['id']}").status_code == 200
+    db.refresh(saved)
+    assert (saved.status, saved.price, saved.shipping_fee, saved.total_price) == ("cancelled", 0, 0, 0)

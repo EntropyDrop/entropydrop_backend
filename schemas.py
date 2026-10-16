@@ -191,6 +191,7 @@ class ModelStockResponse(BaseModel):
     available: bool
     stock: int
     price: float
+    shipping_fee: float
     kit_specifications: Optional[KitSpecifications] = None
 
 class StickerLabels(BaseModel):

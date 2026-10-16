@@ -55,7 +55,7 @@ def test_changed_shipping_creates_separate_order_and_preserves_original_checkout
     again = client.post("/api/orders", json=quantity_order)
     assert again.status_code == 200, again.text
     assert again.json()["id"] == new["id"]
-    assert len(again.json()["items"]) == 2 and again.json()["total_price"] == 80
+    assert len(again.json()["items"]) == 2 and again.json()["total_price"] == 70
     assert db.query(models.Order).count() == 2
     assert client.get(f"/api/orders/{order_id}").json()["address"] == original["address"]
 
