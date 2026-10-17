@@ -73,6 +73,7 @@ async def forward(request: Request, path: str):
         headers=response_headers, background=BackgroundTask(close))
 
 
+@router.websocket("/space/ws/v2/entity-messages")
 @router.websocket("/space/ws/v2")
 async def forward_socket(socket: WebSocket):
     url = target(socket.url.path).replace("https://", "wss://", 1).replace("http://", "ws://", 1)
