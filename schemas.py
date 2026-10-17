@@ -234,7 +234,7 @@ class OrderItemResponse(BaseModel):
 class OrderResponse(OrderBase):
     discount_amount: float = 0
     creator_discount: Optional[dict] = None
-    creator_code_locked: bool = False
+    creator_code_locked: bool = True
     id: str
     user_id: str
     status: str

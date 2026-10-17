@@ -122,6 +122,6 @@ def public_offer(offer):
             "discount_percent": offer["discount_bps"] / 100, "version": offer["version"]} if offer else None
 
 
-def ensure_offer_editable(order):
+def ensure_discounted_items_editable(order):
     if order.status != "pending_payment" or order.paypal_order_id or order.capture_started:
         raise HTTPException(409, "creator_code_locked")

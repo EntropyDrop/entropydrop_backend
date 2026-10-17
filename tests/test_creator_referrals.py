@@ -47,16 +47,17 @@ def test_default_and_order_override_preserve_acquisition_and_next_order_default(
     order = create(client, quantity_order, quantity=2)
     assert order["creator_discount"]["code"] == "ALPHA"
     assert order["price"] == 60 and order["discount_amount"] == 6 and order["total_price"] == 64
-    changed = client.patch(f"/api/orders/{order['id']}/creator-code", json={"code": "beta", "expected_code": "ALPHA"})
-    assert changed.status_code == 200, changed.text
-    assert changed.json()["total_price"] == 58
-    saved = db.query(models.Order).filter_by(id=order["id"]).one()
+    changed = create(client, quantity_order, quantity=2, creator_code="beta")
+    assert changed["id"] != order["id"] and changed["total_price"] == 58
+    original = client.get(f"/api/orders/{order['id']}").json()
+    assert original["creator_discount"]["code"] == "ALPHA" and original["total_price"] == 64
+    saved = db.query(models.Order).filter_by(id=changed["id"]).one()
     assert saved.creator_commission == 4.8 and saved.creator_code == "BETA"
     source = db.query(models.UserCreatorReferral).one()
     assert source.original_code == source.current_code == "ALPHA"
     following = create(client, quantity_order, checkout_mode="buy_now")
     assert following["creator_discount"]["code"] == "ALPHA"
-    assert "commission_bps" not in changed.json()["creator_discount"]
+    assert "commission_bps" not in changed["creator_discount"]
 
 
 def test_link_receipts_keep_first_source_but_update_recent_source_without_extending_replays(client, db, codes):
@@ -155,19 +156,23 @@ def test_referral_receipt_cannot_authenticate_as_an_access_token(client, codes):
     assert response.status_code == 401
 
 
-@pytest.mark.parametrize("case", ["missing", "disabled", "expired"])
-def test_invalid_replacement_does_not_change_order_or_money(client, db, codes, quantity_order, case):
-    order = create(client, quantity_order, creator_code="ALPHA")
-    value = "MISSING"
-    if case != "missing":
-        value = "BETA"
-        if case == "disabled": codes[1].active = False
-        else: codes[1].expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-        db.commit()
-    response = client.patch(f"/api/orders/{order['id']}/creator-code", json={"code": value, "expected_code": "ALPHA"})
-    assert response.status_code == 400
+@pytest.mark.parametrize("prefix", ["/api", "/skin/api"])
+@pytest.mark.parametrize("original_code", ["ALPHA", ""])
+@pytest.mark.parametrize("requested_code", ["BETA", "", "ALPHA", "MISSING"])
+def test_cart_code_cannot_be_added_replaced_or_removed(client, db, codes, quantity_order, prefix, original_code, requested_code):
+    order = create(client, quantity_order, creator_code=original_code)
+    assert order["creator_code_locked"] is True
+    saved = db.query(models.Order).filter_by(id=order["id"]).one()
+    before = (saved.creator_code, saved.creator_user_id, saved.creator_snapshot.copy() if saved.creator_snapshot else None,
+              saved.price, saved.total_price, saved.discount_amount, saved.creator_commission, saved.creator_commission_cents)
+    response = client.patch(f"{prefix}/orders/{order['id']}/creator-code", json={"code": requested_code, "expected_code": original_code or None})
+    assert response.status_code == 409 and response.json()["detail"] == "creator_code_locked"
+    db.refresh(saved)
+    after = (saved.creator_code, saved.creator_user_id, saved.creator_snapshot, saved.price, saved.total_price,
+             saved.discount_amount, saved.creator_commission, saved.creator_commission_cents)
+    assert after == before
     unchanged = client.get(f"/api/orders/{order['id']}").json()
-    assert unchanged["creator_discount"]["code"] == "ALPHA" and unchanged["total_price"] == 37
+    assert unchanged["creator_discount"] == order["creator_discount"] and unchanged["total_price"] == order["total_price"]
 
 
 def test_quotes_defaults_and_forged_prices_are_computed_by_server(client, db, codes, quantity_order):
@@ -189,7 +194,7 @@ def test_code_change_races_and_wrong_owner_cannot_overwrite_order(client, db, co
     assert client.patch(f"/api/orders/{order['id']}/creator-code", json={"code": "BETA", "expected_code": "ALPHA"}).status_code == 404
 
 
-@pytest.mark.parametrize("state", ["paid", "shipping", "completed", "refund_pending", "refunded", "voucher", "capture"])
+@pytest.mark.parametrize("state", ["pending_payment", "paid", "shipping", "completed", "refund_pending", "refunded", "voucher", "capture"])
 def test_payment_and_fulfillment_lock_discount_and_commission(client, db, codes, quantity_order, state):
     order = create(client, quantity_order, creator_code="ALPHA")
     saved = db.query(models.Order).filter_by(id=order["id"]).one()
@@ -205,6 +210,7 @@ def test_payment_and_fulfillment_lock_discount_and_commission(client, db, codes,
 
 def test_coupon_pricing_survives_cart_merge_item_removal_and_paypal(client, db, codes, quantity_order, monkeypatch):
     order = create(client, quantity_order, creator_code="ALPHA", quantity=2)
+    assert order["creator_code_locked"] is True
     merged = create(client, quantity_order, creator_code="ALPHA")
     assert merged["id"] == order["id"] and merged["total_price"] == 91
     separate = create(client, quantity_order, creator_code="BETA")
@@ -220,13 +226,17 @@ def test_coupon_pricing_survives_cart_merge_item_removal_and_paypal(client, db, 
     assert client.get(f"/api/orders/{order['id']}").json()["creator_code_locked"] is True
 
 
-def test_remove_code_and_catalog_changes_leave_purchase_snapshots_intact(client, db, codes, quantity_order):
+def test_code_removal_is_rejected_and_catalog_changes_leave_purchase_snapshots_intact(client, db, codes, quantity_order):
     order = create(client, quantity_order, creator_code="ALPHA")
     codes[0].discount_bps = 5000; codes[0].version = 2; db.commit()
     assert client.get(f"/api/orders/{order['id']}").json()["total_price"] == 37
     assert client.post("/api/orders", json={**quantity_order, "creator_code": "ALPHA", "creator_offer_version": 1}).status_code == 409
     cleared = client.patch(f"/api/orders/{order['id']}/creator-code", json={"code": "", "expected_code": "ALPHA"})
-    assert cleared.status_code == 200 and cleared.json()["creator_discount"] is None and cleared.json()["total_price"] == 40
+    assert cleared.status_code == 409 and cleared.json()["detail"] == "creator_code_locked"
+    unchanged = client.get(f"/api/orders/{order['id']}").json()
+    assert unchanged["creator_discount"] == order["creator_discount"] and unchanged["total_price"] == 37
+    without_code = create(client, quantity_order, creator_code="")
+    assert without_code["id"] != order["id"] and without_code["creator_discount"] is None and without_code["total_price"] == 40
 
 
 def test_management_requires_admin_and_excludes_refunds_from_commissions(client, db, codes, quantity_order, monkeypatch):
