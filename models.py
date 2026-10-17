@@ -27,6 +27,7 @@ class User(Base):
     credits = Column(Integer, default=0, nullable=False)
     last_login_date = Column(Date, nullable=True)
     terms_agreed = Column(Boolean, default=False) # Whether user agreed to terms of service
+    is_creator = Column(Boolean, nullable=False, default=False, server_default="0")
     figure_print_terms_version = Column(String(32), nullable=True)
     figure_print_terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
     
@@ -285,6 +286,12 @@ class Order(Base):
     price = Column(Float, nullable=False, default=60.0)
     shipping_fee = Column(Float, nullable=False, default=0.0)
     total_price = Column(Float, nullable=False, default=60.0)
+    creator_code = Column(String(32), nullable=True, index=True)
+    creator_user_id = Column(String(16), ForeignKey("users.id"), nullable=True, index=True)
+    creator_snapshot = Column(JSON, nullable=True)
+    discount_amount = Column(Float, nullable=False, default=0.0, server_default="0")
+    creator_commission = Column(Float, nullable=False, default=0.0, server_default="0")
+    creator_commission_cents = Column(Integer, nullable=False, default=0, server_default="0")
 
     paid_at = Column(DateTime(timezone=True), nullable=True) # Timestamp of successful payment
     paypal_order_id = Column(String(100), unique=True, nullable=True, index=True)
@@ -304,6 +311,74 @@ class Order(Base):
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
+
+class CreatorCode(Base):
+    __tablename__ = "creator_codes"
+    code = Column(String(32), primary_key=True)
+    creator_name = Column(String(100), nullable=False, default="") # Legacy display name; no longer accepted or exposed.
+    creator_user_id = Column(String(16), ForeignKey("users.id"), nullable=True, index=True)
+    discount_bps = Column(Integer, nullable=False)
+    commission_bps = Column(Integer, nullable=False)
+    active = Column(Boolean, nullable=False, default=True, server_default="1")
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.datetime.now(timezone.utc))
+    __table_args__ = (
+        CheckConstraint("discount_bps >= 0 AND discount_bps <= 9900", name="ck_creator_discount"),
+        CheckConstraint("commission_bps >= 0 AND commission_bps <= 10000", name="ck_creator_commission"),
+    )
+
+
+class UserCreatorReferral(Base):
+    __tablename__ = "user_creator_referrals"
+    user_id = Column(String(16), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    original_code = Column(String(32), nullable=False, index=True)
+    original_at = Column(DateTime(timezone=True), nullable=False)
+    current_code = Column(String(32), nullable=False)
+    current_clicked_at = Column(DateTime(timezone=True), nullable=False)
+    # Retained receipt expiry for audit/compatibility; the bound default never ages out.
+    current_expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class CreatorPayout(Base):
+    __tablename__ = "creator_payouts"
+    id = Column(String(16), primary_key=True, default=generate_base58_id)
+    creator_user_id = Column(String(16), ForeignKey("users.id"), nullable=False, index=True)
+    request_key = Column(String(64), nullable=False)
+    amount_cents = Column(Integer, nullable=False)
+    currency = Column(String(3), nullable=False, default="USD")
+    paypal_email = Column(String(127), nullable=False)
+    status = Column(String(32), nullable=False, default="pending_review", index=True)
+    reviewed_by = Column(String(16), ForeignKey("users.id"), nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    review_note = Column(String(500), nullable=True)
+    paypal_batch_id = Column(String(100), nullable=True, unique=True)
+    paypal_item_id = Column(String(100), nullable=True, unique=True)
+    paypal_transaction_id = Column(String(100), nullable=True)
+    paypal_status = Column(String(32), nullable=True)
+    first_sent_at = Column(DateTime(timezone=True), nullable=True)
+    next_check_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    processing_until = Column(DateTime(timezone=True), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    last_error = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.datetime.now(timezone.utc), onupdate=lambda: datetime.datetime.now(timezone.utc))
+    __table_args__ = (
+        UniqueConstraint("creator_user_id", "request_key", name="uq_creator_payout_request"),
+        CheckConstraint("amount_cents > 0", name="ck_creator_payout_amount"),
+        CheckConstraint("currency = 'USD'", name="ck_creator_payout_currency"),
+    )
+
+
+class CreatorPayoutEvent(Base):
+    __tablename__ = "creator_payout_events"
+    id = Column(String(16), primary_key=True, default=generate_base58_id)
+    payout_id = Column(String(16), ForeignKey("creator_payouts.id"), nullable=False, index=True)
+    status = Column(String(32), nullable=False)
+    event = Column(String(100), nullable=False)
+    actor_user_id = Column(String(16), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.datetime.now(timezone.utc))
+
 
 class OrderItem(Base):
     """Order item model"""

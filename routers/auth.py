@@ -92,6 +92,10 @@ def google_login(
         db.commit()
         db.refresh(user)
         
+    if req.referral_token:
+        from creator_referrals import bind_referral
+        bind_referral(db, user.id, req.referral_token)
+        db.commit()
     session, raw_session_token = auth.create_auth_session(db, user.id)
     auth.set_auth_session_cookie(
         response,
@@ -110,6 +114,7 @@ def google_login(
         "google_id": user.google_id,
         "is_pro": user.is_pro,
         "is_admin": user.is_admin,
+        "is_creator": user.is_creator,
         "pro_expires_at": user.pro_expires_at,
         "terms_agreed": user.terms_agreed,
         "figure_print_terms_version": user.figure_print_terms_version,
@@ -213,6 +218,7 @@ def get_my_profile(db: Session = Depends(get_db), current_user: models.User = De
         "google_id": current_user.google_id,
         "is_pro": current_user.is_pro,
         "is_admin": current_user.is_admin,
+        "is_creator": current_user.is_creator,
         "pro_expires_at": current_user.pro_expires_at,
         "terms_agreed": current_user.terms_agreed,
         "figure_print_terms_version": current_user.figure_print_terms_version,
@@ -266,6 +272,7 @@ def agree_terms(db: Session = Depends(get_db), current_user: models.User = Depen
         "google_id": current_user.google_id,
         "is_pro": current_user.is_pro,
         "is_admin": current_user.is_admin,
+        "is_creator": current_user.is_creator,
         "pro_expires_at": current_user.pro_expires_at,
         "terms_agreed": current_user.terms_agreed,
         "figure_print_terms_version": current_user.figure_print_terms_version,
@@ -325,6 +332,7 @@ def update_username(
         "google_id": current_user.google_id,
         "is_pro": current_user.is_pro,
         "is_admin": current_user.is_admin,
+        "is_creator": current_user.is_creator,
         "pro_expires_at": current_user.pro_expires_at,
         "terms_agreed": current_user.terms_agreed,
         "figure_print_terms_version": current_user.figure_print_terms_version,
@@ -399,6 +407,7 @@ def update_minecraft_skin(
         "google_id": current_user.google_id,
         "is_pro": current_user.is_pro,
         "is_admin": current_user.is_admin,
+        "is_creator": current_user.is_creator,
         "pro_expires_at": current_user.pro_expires_at,
         "terms_agreed": current_user.terms_agreed,
         "figure_print_terms_version": current_user.figure_print_terms_version,

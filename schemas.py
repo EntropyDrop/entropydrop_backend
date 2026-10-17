@@ -3,6 +3,7 @@ from typing import Optional, List, Literal
 from datetime import datetime
 
 class GoogleAuthRequest(BaseModel):
+    referral_token: Optional[str] = Field(None, max_length=2048)
     token: str
 
 class UpdateUsernameRequest(BaseModel):
@@ -37,6 +38,7 @@ class UserResponse(BaseModel):
     figure_print_terms_accepted_at: Optional[datetime] = None
     is_pro: bool = False
     is_admin: bool = False
+    is_creator: bool = False
     pro_expires_at: Optional[datetime] = None
     pro_level: str = "free"
     credits: int = 0
@@ -170,6 +172,8 @@ class OrderBase(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
 class OrderCreate(OrderBase):
+    creator_code: Optional[str] = Field(None, max_length=32)
+    creator_offer_version: Optional[int] = Field(None, ge=1, strict=True)
     sticker_language: Literal["en", "zh-hans"] = "en"
     quantity: int = Field(1, ge=1, le=10, strict=True)
     log_id: Optional[str] = None # Used for direct link/Pro ordering
@@ -228,6 +232,9 @@ class OrderItemResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
 class OrderResponse(OrderBase):
+    discount_amount: float = 0
+    creator_discount: Optional[dict] = None
+    creator_code_locked: bool = False
     id: str
     user_id: str
     status: str

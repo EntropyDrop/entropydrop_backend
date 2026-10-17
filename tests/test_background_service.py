@@ -15,7 +15,7 @@ def test_background_jobs_respect_standalone_space_cutover(monkeypatch, space_url
 
     async def run_test():
         started, cancelled = set(), set()
-        expected = {"discovery", "results", "recovery", "ledger", "withdrawal", "orders", "priority"}
+        expected = {"discovery", "results", "recovery", "ledger", "withdrawal", "orders", "priority", "payouts"}
         ready = asyncio.Event()
 
         async def job(name):
@@ -28,6 +28,7 @@ def test_background_jobs_respect_standalone_space_cutover(monkeypatch, space_url
                 cancelled.add(name)
 
         for target, method, name in (
+            (background_service.creator_payouts, "start_payout_reconciliation_job", "payouts"),
             (background_service.generation_priority, "start_pro_priority_job", "priority"),
             (skin_withdrawal, "start_withdrawal_job", "withdrawal"),
             (background_service.order, "start_order_reconciliation_job", "orders"),

@@ -29,6 +29,7 @@ from paypal_shipping import paypal_address_snapshot
 from shipping_address_rules import ADDRESS_FIELDS, ShippingAddressError, normalize_address, paypal_shipping_address, validate_address
 from order_inventory import lock_order, reserve_inventory, release_inventory, expire_inventory_holds
 from rate_limit import limiter, get_authenticated_or_remote_address
+from creator_referrals import active_code, ensure_offer_editable, public_offer, reprice_order, select_offer, set_order_offer
 
 PAYPAL_CURRENCY_CODE = "USD"
 
@@ -210,6 +211,8 @@ def presign_order_items(items):
 
 def order_response(db, order):
     data = schemas.OrderResponse.model_validate(order)
+    data.creator_discount = public_offer(order.creator_snapshot)
+    data.creator_code_locked = order.status != "pending_payment" or bool(order.paypal_order_id) or bool(order.capture_started)
     data.address = schemas.ShippingAddressResponse.model_validate(order.address_snapshot) if order.address_snapshot else None
     data.items = presign_order_items(db.query(models.OrderItem).filter_by(order_id=order.id).all())
     # Legacy orders have no purchase-time specification. Return current catalog
@@ -424,6 +427,8 @@ def create_order(
         raise HTTPException(status_code=429, detail="Daily order limit reached (100 times)")
 
     if req.order_type == "subscription":
+        if req.creator_code:
+            raise HTTPException(400, "creator_print_only")
         if req.quantity != 1:
             raise HTTPException(status_code=400, detail="Subscriptions must be ordered individually")
         limit_cfg = db.query(models.ModelSalesLimit).filter(
@@ -456,6 +461,7 @@ def create_order(
         db.add(item)
     else:
         # Direct link print order creation
+        offer = select_offer(db, current_user.id, req.creator_code, req.creator_offer_version)
         address = None
         shipping_fields = None
         if req.shipping_source == "paypal":
@@ -537,9 +543,11 @@ def create_order(
                 models.Order.capture_started == False,
             ).order_by(models.Order.created_at.asc(), models.Order.id.asc()).with_for_update().populate_existing().all()
         existing_order = next((candidate for candidate in candidates
-                               if (req.shipping_source == "paypal" and candidate.address_snapshot is None)
-                               or (req.shipping_source == "address_book" and candidate.address_snapshot
-                                   and normalize_address(candidate.address_snapshot) == shipping_fields)), None)
+                               if candidate.creator_snapshot == offer
+                               and not (offer and candidate.paypal_order_id)
+                               and ((req.shipping_source == "paypal" and candidate.address_snapshot is None)
+                                    or (req.shipping_source == "address_book" and candidate.address_snapshot
+                                        and normalize_address(candidate.address_snapshot) == shipping_fields))), None)
 
         if existing_order:
             current_count = db.query(models.OrderItem).filter(models.OrderItem.order_id == existing_order.id).count()
@@ -614,11 +622,33 @@ def create_order(
 
 
         item = created_items[0] if created_items else None # Keep item reference for compatibility
+        set_order_offer(order, offer)
 
     
     db.commit()
     db.refresh(order)
     return order_response(db, order)
+
+class CreatorCodeUpdate(schemas.BaseModel):
+    code: str = schemas.Field(max_length=32)
+    expected_code: Optional[str] = schemas.Field(None, max_length=32)
+
+
+@router.patch("/{id}/creator-code", response_model=schemas.OrderResponse)
+def update_creator_code(id: str, req: CreatorCodeUpdate, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    order = lock_order(db, id, current_user.id)
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if order.order_type != "print":
+        raise HTTPException(400, "creator_print_only")
+    ensure_offer_editable(order)
+    if order.creator_code != req.expected_code:
+        raise HTTPException(409, "creator_offer_changed")
+    offer = select_offer(db, current_user.id, req.code)
+    set_order_offer(order, offer)
+    db.commit()
+    return order_response(db, order)
+
 
 @router.get("/{id}", response_model=schemas.OrderResponse)
 def get_order(
@@ -735,12 +765,15 @@ def delete_order_item(
          
     if order.status != "pending_payment":
          raise HTTPException(status_code=400, detail="Items can only be deleted from pending payment orders")
+
+    if order.creator_snapshot:
+        ensure_offer_editable(order)
          
     release_inventory(db, order)
 
     # Deduct amount, clamped to zero
     order.price = max(0.0, order.price - item.price)
-    order.total_price = max(0.0, order.total_price - item.price)
+    reprice_order(order)
     order.paypal_order_id = None
     
     if item.skin_url:
@@ -760,7 +793,7 @@ def delete_order_item(
         # If no items left, cancel the order
         order.status = "cancelled"
         order.shipping_fee = 0.0
-        order.total_price = 0.0
+        reprice_order(order)
         
     db.commit()
     return {"status": "success", "message": "Item deleted"}
@@ -793,6 +826,8 @@ def create_paypal_order(
             return {"id": order.paypal_order_id, "status": "CAPTURE_PENDING"}
         raise HTTPException(status_code=409, detail="Payment confirmation is pending")
     try:
+        if order.creator_code and not order.paypal_order_id:
+            active_code(db, order.creator_code)
         reserve_inventory(db, order)
         # Print orders also inspect SDK-created vouchers to replace old,
         # unapproved checkouts that still let the buyer choose another address.

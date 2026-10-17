@@ -117,6 +117,7 @@ class Settings(BaseSettings):
     PAYPAL_PRO_PLUS_PLAN_ID: str = ""
     PAYPAL_PRO_MAX_PLAN_ID: str = ""
     PAYPAL_WEBHOOK_ID: str = ""
+    PAYPAL_PAYOUTS_ENABLED: bool = False
 
     # Public ledger sync
     LEDGER_SYNC_INTERVAL_SECONDS: int = 86400
