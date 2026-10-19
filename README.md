@@ -87,6 +87,11 @@ entry when prices match and two entries with the same model name when they diffe
 Combined text/image-edit models show only Pro when either model is Pro-only;
 otherwise they use their total Free and Pro prices for this comparison.
 Both switches apply to the entire model, including its standard-price option.
+Each model also has a nonnegative integer **Display priority** (default `0`).
+Higher priorities appear earlier in the generation dropdown; ties keep the original
+catalog order. Pro and Free options stay together, with Pro first. Combined
+text/image-edit options follow their auxiliary model's priority. Save in Monitor
+and reopen the generation page to load the new order.
 The selector defaults to the first available option; split models list Pro first.
 Free users can choose standard pricing when the model is not Pro-only; active Pro
 users automatically use the matching Pro option. Deploy the backend before the
@@ -98,6 +103,10 @@ and `free_credits`, alongside `model_name`, `is_pro` (Pro-only access), and
 `under_maintenance`. Prices are stored in Redis as `config:model_price:<model>`
 and `config:model_free_price:<model>`. An unset Free price falls back to the
 existing price; older clients that omit `free_credits` preserve any override.
+The same endpoint accepts optional `display_priority`, stored in Redis as
+`config:model_display_priority:<model>` and returned by both Monitor endpoints.
+Omitting it preserves the existing priority; `0` resets it to the default.
+The model lists and option arrays from `/skin/api/models` use this ordering.
 `GET /skin/api/models` exposes `image_to_skin_options`, `text_to_skin_options`,
 and `image_edit_to_skin_options` with unique option IDs, the real `model_version`,
 an `aux_model_version` for combined models, and `pricing_tier` (`standard` or `pro`)

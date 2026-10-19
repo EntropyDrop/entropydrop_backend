@@ -82,6 +82,17 @@ def get_model_credit_cost(model_name: str, *, is_pro: bool = False) -> int:
     return get_generation_credit_cost()
 
 
+def get_model_display_priority(model_name: str) -> int:
+    """Higher values appear first; unconfigured models keep their catalog order."""
+    try:
+        val = redis_conn.get(f"config:model_display_priority:{model_name}")
+        if val is not None:
+            return max(0, int(val))
+    except Exception as e:
+        print(f"Failed to read config:model_display_priority:{model_name} from Redis: {e}")
+    return 0
+
+
 def is_model_pro_exclusive(model_name: str) -> bool:
     try:
         val = redis_conn.get(f"config:model_pro:{model_name}")

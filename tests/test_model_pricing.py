@@ -128,6 +128,85 @@ def test_monitor_legacy_save_without_override_uses_shared_price(client, pricing_
     assert response.json()["free_credits"] == 4
 
 
+@pytest.mark.parametrize("model", generate.AVAILABLE_IMAGE_TO_SKIN_MODELS
+                         + generate.AVAILABlE_TEXT_TO_IMAGE_MODELS + generate.AVAILABLE_IMAGE_EDIT_MODELS)
+def test_monitor_display_priority_round_trip_legacy_save_and_reset(client, pricing_user, pricing_store, model):
+    saved = save_prices(client, pricing_user, model_name=model, display_priority=25)
+    assert saved["display_priority"] == 25
+    assert pricing_store.get(f"config:model_display_priority:{model}") == b"25"
+    assert client.get("/skin/api/monitor/model_prices").json()[model]["display_priority"] == 25
+
+    # Updating prices from an older client must not erase the saved priority.
+    saved = save_prices(client, pricing_user, model_name=model, credits=6)
+    assert saved["display_priority"] == 25
+    saved = save_prices(client, pricing_user, model_name=model, display_priority=0)
+    assert saved["display_priority"] == 0
+    assert client.get("/skin/api/monitor/model_prices").json()[model]["display_priority"] == 0
+
+
+@pytest.mark.parametrize("priority", [-1, 1.5, "invalid"])
+def test_monitor_rejects_invalid_priority_without_changing_config(client, pricing_user, pricing_store, priority):
+    save_prices(client, pricing_user, display_priority=10)
+    response = client.post("/skin/api/monitor/model_prices", json={
+        "model_name": SKING_DDJ_V101C, "credits": 6, "is_pro": True,
+        "display_priority": priority,
+    })
+    assert response.status_code == 422
+    assert pricing_store.get(f"config:model_display_priority:{SKING_DDJ_V101C}") == b"10"
+    assert backend_utils.get_model_credit_cost(SKING_DDJ_V101C, is_pro=True) == 4
+    assert not backend_utils.is_model_pro_exclusive(SKING_DDJ_V101C)
+
+
+@pytest.mark.parametrize("stored,expected", [(None, 0), (b"invalid", 0), (b"-2", 0), (b"0", 0), (b"25", 25)])
+def test_display_priority_defaults_and_invalid_redis_values(pricing_store, stored, expected):
+    if stored is not None:
+        pricing_store.set(f"config:model_display_priority:{SKING_DDJ_V101C}", stored)
+    assert backend_utils.get_model_display_priority(SKING_DDJ_V101C) == expected
+
+
+def test_display_priority_defaults_when_redis_is_unavailable(pricing_store, monkeypatch):
+    monkeypatch.setattr(pricing_store, "get", Mock(side_effect=ConnectionError("Redis unavailable")))
+    assert backend_utils.get_model_display_priority(SKING_DDJ_V101C) == 0
+
+
+def test_model_priority_sorts_catalog_and_keeps_pricing_tiers_adjacent(client, pricing_user):
+    legacy = generate.LEGACY_SKIN_MODEL_VERSION
+    original_order = list(generate.AVAILABLE_IMAGE_TO_SKIN_MODELS)
+    save_prices(client, pricing_user, model_name=legacy, display_priority=100)
+    save_prices(client, pricing_user, display_priority=20)
+    catalog = client.get("/skin/api/models").json()
+    assert catalog["image_to_skin_models"] == [legacy, SKING_DDJ_V101C]
+    assert [option["id"] for option in catalog["image_to_skin_options"]] == [
+        f"{model}:{tier}" for model in [legacy, SKING_DDJ_V101C] for tier in ["pro", "standard"]
+    ]
+    assert generate.AVAILABLE_IMAGE_TO_SKIN_MODELS == original_order
+
+    save_prices(client, pricing_user, display_priority=100)
+    assert client.get("/skin/api/models").json()["image_to_skin_models"] == original_order
+    save_prices(client, pricing_user, model_name=legacy, display_priority=0)
+    assert client.get("/skin/api/models").json()["image_to_skin_models"] == original_order
+
+
+@pytest.mark.parametrize("catalog_name,list_key,options_key,base", [
+    ("AVAILABlE_TEXT_TO_IMAGE_MODELS", "text_to_image_models", "text_to_skin_options", "z_image"),
+    ("AVAILABLE_IMAGE_EDIT_MODELS", "image_edit_models", "image_edit_to_skin_options", "flux_4b"),
+])
+def test_combined_model_options_follow_auxiliary_priority(
+    client, pricing_user, monkeypatch, catalog_name, list_key, options_key, base
+):
+    other = f"another_{base}"
+    monkeypatch.setattr(generate, catalog_name, [base, other])
+    save_prices(client, pricing_user, model_name=base, credits=0, free_credits=0, display_priority=1)
+    save_prices(client, pricing_user, model_name=other, credits=0, free_credits=0, display_priority=10)
+    save_prices(client, pricing_user, model_name=generate.LEGACY_SKIN_MODEL_VERSION)
+    catalog = client.get("/skin/api/models").json()
+    assert catalog[list_key] == [other, base]
+    assert [option["id"] for option in catalog[options_key]] == [
+        f"{aux} + {generate.LEGACY_SKIN_MODEL_VERSION}:{tier}"
+        for aux in [other, base] for tier in ["pro", "standard"]
+    ]
+
+
 @pytest.mark.parametrize("field", ["credits", "free_credits"])
 @pytest.mark.parametrize("value,status", [(-1, 400), (1.5, 422)])
 def test_monitor_rejects_invalid_prices_without_changing_config(

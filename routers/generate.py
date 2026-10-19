@@ -520,16 +520,21 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
     Get the list of available models, grouped by generation mode
     """
     
+    # Sort models before expanding pricing tiers so Pro/Free options stay adjacent.
+    # Python's stable sort preserves the catalog order for equal priorities.
+    image_models = sorted(AVAILABLE_IMAGE_TO_SKIN_MODELS, key=backend_utils.get_model_display_priority, reverse=True)
+    text_models = sorted(AVAILABlE_TEXT_TO_IMAGE_MODELS, key=backend_utils.get_model_display_priority, reverse=True)
+    edit_models = sorted(AVAILABLE_IMAGE_EDIT_MODELS, key=backend_utils.get_model_display_priority, reverse=True)
     return {
-        "text_to_image_models": AVAILABlE_TEXT_TO_IMAGE_MODELS,
-        "image_edit_models": AVAILABLE_IMAGE_EDIT_MODELS,
-        "image_to_skin_models": AVAILABLE_IMAGE_TO_SKIN_MODELS,
-        "image_to_skin_options": generation_model_options(AVAILABLE_IMAGE_TO_SKIN_MODELS),
+        "text_to_image_models": text_models,
+        "image_edit_models": edit_models,
+        "image_to_skin_models": image_models,
+        "image_to_skin_options": generation_model_options(image_models),
         "text_to_skin_options": generation_model_options(
-            [LEGACY_SKIN_MODEL_VERSION], AVAILABlE_TEXT_TO_IMAGE_MODELS
+            [LEGACY_SKIN_MODEL_VERSION], text_models
         ),
         "image_edit_to_skin_options": generation_model_options(
-            [LEGACY_SKIN_MODEL_VERSION], AVAILABLE_IMAGE_EDIT_MODELS
+            [LEGACY_SKIN_MODEL_VERSION], edit_models
         ),
     }
 

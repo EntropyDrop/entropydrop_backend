@@ -427,7 +427,7 @@ def admin_delete_all_failed_tasks(
     return {"message": "Failed tasks deleted and public files withdrawn", "deleted_count": count}
 
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ModeMaintenanceToggleRequest(BaseModel):
@@ -474,6 +474,7 @@ class SetModelPriceRequest(BaseModel):
     free_credits: int | None = None
     is_pro: bool = False
     under_maintenance: bool = False
+    display_priority: int | None = Field(default=None, ge=0)
 
 
 @router.get("/model_prices")
@@ -488,7 +489,7 @@ async def get_model_prices_endpoint(
         AVAILABLE_IMAGE_EDIT_MODELS,
         get_model_pricing_tiers,
     )
-    from backend_utils import get_model_credit_cost, is_model_pro_exclusive, is_model_under_maintenance
+    from backend_utils import get_model_credit_cost, get_model_display_priority, is_model_pro_exclusive, is_model_under_maintenance
     
     all_models = (
         [m.replace(".safetensors", "") for m in AVAILABLE_IMAGE_TO_SKIN_MODELS] +
@@ -502,7 +503,8 @@ async def get_model_prices_endpoint(
             "free_credits": get_model_credit_cost(m, is_pro=False),
             "pricing_tiers": get_model_pricing_tiers(m),
             "is_pro": is_model_pro_exclusive(m),
-            "under_maintenance": is_model_under_maintenance(m)
+            "under_maintenance": is_model_under_maintenance(m),
+            "display_priority": get_model_display_priority(m),
         }
     return prices
 
@@ -525,8 +527,11 @@ async def set_model_price_endpoint(
         # Older clients can still update the shared price without erasing an override.
         if req.free_credits is not None:
             values[f"config:model_free_price:{req.model_name}"] = str(req.free_credits)
+        # Older clients must preserve an administrator's configured ordering.
+        if req.display_priority is not None:
+            values[f"config:model_display_priority:{req.model_name}"] = str(req.display_priority)
         redis_conn.mset(values)
-        from backend_utils import get_model_credit_cost
+        from backend_utils import get_model_credit_cost, get_model_display_priority
         from routers.generate import get_model_pricing_tiers
         return {
             "model_name": req.model_name,
@@ -534,7 +539,8 @@ async def set_model_price_endpoint(
             "free_credits": get_model_credit_cost(req.model_name, is_pro=False),
             "pricing_tiers": get_model_pricing_tiers(req.model_name),
             "is_pro": req.is_pro,
-            "under_maintenance": req.under_maintenance
+            "under_maintenance": req.under_maintenance,
+            "display_priority": get_model_display_priority(req.model_name),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")
