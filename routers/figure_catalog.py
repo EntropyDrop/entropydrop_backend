@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 import auth
 import models
 from database import get_db
+from figure_discounts import current_discount
+from sqlalchemy.exc import IntegrityError
 
 router = APIRouter(prefix="/api/figure/models", tags=["figure-admin"], dependencies=[Depends(auth.get_current_admin)])
 
@@ -39,6 +41,38 @@ def settings_response(product):
 def list_models(db: Session = Depends(get_db)):
     products = db.query(models.ModelSalesLimit).filter_by(order_type="print").order_by(models.ModelSalesLimit.model_type).all()
     return [settings_response(product) for product in products]
+
+
+class GlobalDiscountUpdate(BaseModel):
+    discount_bps: int = Field(ge=0, le=9900, strict=True)
+    expected_version: int = Field(ge=0, strict=True)
+    model_config = ConfigDict(extra="forbid")
+
+
+@router.get("/discount")
+def get_discount(db: Session = Depends(get_db)):
+    return current_discount(db)
+
+
+@router.patch("/discount")
+def update_discount(req: GlobalDiscountUpdate, db: Session = Depends(get_db)):
+    if req.expected_version == 0:
+        db.add(models.FigureDiscount(id=1, discount_bps=req.discount_bps, version=1))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "figure_discount_changed")
+    else:
+        changed = db.query(models.FigureDiscount).filter_by(id=1, version=req.expected_version).update(
+            {models.FigureDiscount.discount_bps: req.discount_bps, models.FigureDiscount.version: req.expected_version + 1},
+            synchronize_session=False,
+        )
+        if changed != 1:
+            db.rollback()
+            raise HTTPException(409, "figure_discount_changed")
+        db.commit()
+    return current_discount(db)
 
 
 @router.patch("/{model_id}", response_model=ModelSettingsResponse)

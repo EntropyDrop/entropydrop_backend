@@ -97,16 +97,19 @@ def money(value):
     return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def price_offer(subtotal, shipping, offer):
+def price_offer(subtotal, shipping, offer, global_discount_bps=0):
     subtotal, shipping = money(subtotal), money(shipping)
-    discount = money(subtotal * Decimal(offer["discount_bps"]) / 10000) if offer else Decimal(0)
+    global_discount = money(subtotal * Decimal(global_discount_bps) / 10000)
+    after_global = subtotal - global_discount
+    creator_discount = money(after_global * Decimal(offer["discount_bps"]) / 10000) if offer else Decimal(0)
+    discount = global_discount + creator_discount
     net = subtotal - discount
     commission = money(net * Decimal(offer["commission_bps"]) / 10000) if offer else Decimal(0)
     return float(discount), float(net + shipping), float(commission)
 
 
 def reprice_order(order):
-    order.discount_amount, order.total_price, order.creator_commission = price_offer(order.price, order.shipping_fee, order.creator_snapshot)
+    order.discount_amount, order.total_price, order.creator_commission = price_offer(order.price, order.shipping_fee, order.creator_snapshot, order.global_discount_bps or 0)
     order.creator_commission_cents = int(money(order.creator_commission) * 100)
 
 

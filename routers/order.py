@@ -31,6 +31,8 @@ from order_inventory import lock_order, reserve_inventory, release_inventory, ex
 from rate_limit import limiter, get_authenticated_or_remote_address
 from creator_referrals import active_code, ensure_discounted_items_editable, public_offer, reprice_order, select_offer, set_order_offer
 
+from figure_discounts import current_discount, discount_amount
+
 PAYPAL_CURRENCY_CODE = "USD"
 
 
@@ -212,6 +214,8 @@ def presign_order_items(items):
 def order_response(db, order):
     data = schemas.OrderResponse.model_validate(order)
     data.creator_discount = public_offer(order.creator_snapshot)
+    data.global_discount_amount = float(discount_amount(order.price, order.global_discount_bps))
+    data.creator_discount_amount = float(_money(order.discount_amount) - _money(data.global_discount_amount))
     data.creator_code_locked = True
     data.address = schemas.ShippingAddressResponse.model_validate(order.address_snapshot) if order.address_snapshot else None
     data.items = presign_order_items(db.query(models.OrderItem).filter_by(order_id=order.id).all())
@@ -391,8 +395,13 @@ def get_model_stock(order_type: Optional[str] = None, db: Session = Depends(get_
     limits = query.all()
     result = []
 
+    promotion = current_discount(db)
     for limit in limits:
+        bps = promotion["discount_bps"] if limit.order_type == "print" else 0
         result.append({
+            "global_discount_bps": bps,
+            "global_discount_version": promotion["version"] if limit.order_type == "print" else 0,
+            "discounted_price": float(_money(limit.price) - discount_amount(limit.price, bps)),
             "model_type": limit.model_type,
             "available": limit.stock > 0,
             "stock": max(0, limit.stock),
@@ -461,6 +470,7 @@ def create_order(
         db.add(item)
     else:
         # Direct link print order creation
+        promotion = current_discount(db, req.global_discount_version)
         offer = select_offer(db, current_user.id, req.creator_code, req.creator_offer_version)
         address = None
         shipping_fields = None
@@ -544,7 +554,9 @@ def create_order(
             ).order_by(models.Order.created_at.asc(), models.Order.id.asc()).with_for_update().populate_existing().all()
         existing_order = next((candidate for candidate in candidates
                                if candidate.creator_snapshot == offer
-                               and not (offer and candidate.paypal_order_id)
+                               and candidate.global_discount_bps == promotion["discount_bps"]
+                               and candidate.global_discount_version == promotion["version"]
+                               and not ((offer or candidate.global_discount_bps) and candidate.paypal_order_id)
                                and ((req.shipping_source == "paypal" and candidate.address_snapshot is None)
                                     or (req.shipping_source == "address_book" and candidate.address_snapshot
                                         and normalize_address(candidate.address_snapshot) == shipping_fields))), None)
@@ -587,7 +599,9 @@ def create_order(
                 status="pending_payment", 
                 price=added_price,
                 shipping_fee=shipping_fee,
-                total_price=added_price + shipping_fee
+                total_price=added_price + shipping_fee,
+                global_discount_bps=promotion["discount_bps"],
+                global_discount_version=promotion["version"],
             )
             db.add(order)
             db.flush()
@@ -761,7 +775,7 @@ def delete_order_item(
     if order.status != "pending_payment":
          raise HTTPException(status_code=400, detail="Items can only be deleted from pending payment orders")
 
-    if order.creator_snapshot:
+    if order.creator_snapshot or order.global_discount_bps:
         ensure_discounted_items_editable(order)
          
     release_inventory(db, order)

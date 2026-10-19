@@ -77,9 +77,14 @@ def quote(req: QuoteRequest, db: Session = Depends(get_db), user: models.User = 
     offer = select_offer(db, user.id, req.code)
     subtotal = float(product.price) * req.quantity
     shipping = _model_shipping_fee("print", product.model_type)
-    discount, total, _ = price_offer(subtotal, shipping, offer)
+    from figure_discounts import current_discount, discount_amount
+    promotion = current_discount(db)
+    global_amount = discount_amount(subtotal, promotion["discount_bps"])
+    discount, total, _ = price_offer(subtotal, shipping, offer, promotion["discount_bps"])
     db.commit()
-    return {"offer": public_offer(offer), "subtotal": subtotal, "shipping_fee": shipping, "discount_amount": discount, "total_price": total}
+    return {"offer": public_offer(offer), "subtotal": subtotal, "shipping_fee": shipping, "discount_amount": discount, "total_price": total,
+            "global_discount_bps": promotion["discount_bps"], "global_discount_version": promotion["version"],
+            "global_discount_amount": float(global_amount), "creator_discount_amount": round(discount - float(global_amount), 2)}
 
 
 def settings_response(code, db):

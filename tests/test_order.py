@@ -723,7 +723,7 @@ def test_cute_kit_costs_thirty_dollars_with_flat_shipping(mock_clone, client, db
     update_cute_figure_kit_price(db, monkeypatch, current=True)
     response = client.get("/skin/api/orders/model-stock?order_type=print")
     kit = next(item for item in response.json() if item["model_type"] == "Cute DIY Kit")
-    assert kit == {"model_type": "Cute DIY Kit", "available": True, "price": 30.0, "shipping_fee": 10.0, "stock": 300, "kit_specifications": load_kit_spec_migration().CUTE_KIT_SPECIFICATIONS}
+    assert kit == {"discounted_price": 30.0, "global_discount_bps": 0, "global_discount_version": 0, "model_type": "Cute DIY Kit", "available": True, "price": 30.0, "shipping_fee": 10.0, "stock": 300, "kit_specifications": load_kit_spec_migration().CUTE_KIT_SPECIFICATIONS}
     mock_clone.return_value = "orders/cute/skin.png"
     log = GenerationLog(prompt="Cute test", is_public=True, user_id="1", mode="edit", result="test.png", status="success")
     address = ShippingAddress(recipient_name="Test Recipient", user_id="1", country="US", phone="123456", zip_code="10001", state="NY", city="NYC", detail_address="Test address")

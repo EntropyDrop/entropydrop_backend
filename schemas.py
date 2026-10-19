@@ -172,6 +172,7 @@ class OrderBase(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
 class OrderCreate(OrderBase):
+    global_discount_version: Optional[int] = Field(None, ge=0, strict=True)
     creator_code: Optional[str] = Field(None, max_length=32)
     creator_offer_version: Optional[int] = Field(None, ge=1, strict=True)
     sticker_language: Literal["en", "zh-hans"] = "en"
@@ -191,6 +192,9 @@ class KitSpecifications(BaseModel):
     assembly_note: str = Field(min_length=1, max_length=2000)
 
 class ModelStockResponse(BaseModel):
+    discounted_price: float
+    global_discount_bps: int = 0
+    global_discount_version: int = 0
     model_type: str
     available: bool
     stock: int
@@ -232,6 +236,9 @@ class OrderItemResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, protected_namespaces=())
 
 class OrderResponse(OrderBase):
+    global_discount_bps: int = 0
+    global_discount_amount: float = 0
+    creator_discount_amount: float = 0
     discount_amount: float = 0
     creator_discount: Optional[dict] = None
     creator_code_locked: bool = True
