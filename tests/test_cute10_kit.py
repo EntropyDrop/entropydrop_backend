@@ -62,15 +62,25 @@ def test_cute10_catalog_migration_preserves_prices_stock_and_existing_order_snap
 @pytest.mark.parametrize("filename", [
     "d7f4c8302a91_add_cute10_spare_sticker.py",
     "e8a42f617c03_add_cute10_sticker_tools.py",
+    "a5d9e4072b63_update_cute10_sticker_material.py",
+    "b6e28d915c40_refine_cute10_sticker_description.py",
+    "c8f43a601d92_clarify_cute10_precut_stickers.py",
 ])
 def test_material_updates_preserve_existing_snapshots(client, db, quantity_order, monkeypatch, mock_auth, filename):
     cute10 = migration()
     monkeypatch.setattr(cute10, "op", SimpleNamespace(get_bind=db.connection))
     cute10.upgrade()
-    if filename.endswith("add_cute10_sticker_tools.py"):
-        spare = migration("d7f4c8302a91_add_cute10_spare_sticker.py")
-        monkeypatch.setattr(spare, "op", SimpleNamespace(get_bind=db.connection))
-        spare.upgrade()
+    for prerequisite in [
+        "d7f4c8302a91_add_cute10_spare_sticker.py",
+        "e8a42f617c03_add_cute10_sticker_tools.py",
+        "a5d9e4072b63_update_cute10_sticker_material.py",
+        "b6e28d915c40_refine_cute10_sticker_description.py",
+    ]:
+        if prerequisite == filename:
+            break
+        previous = migration(prerequisite)
+        monkeypatch.setattr(previous, "op", SimpleNamespace(get_bind=db.connection))
+        previous.upgrade()
     db.commit()
     product = db.query(models.ModelSalesLimit).filter_by(model_type="Cute DIY Kit").one()
     product.price = 31
@@ -90,11 +100,20 @@ def test_material_updates_preserve_existing_snapshots(client, db, quantity_order
     expected = deepcopy(original)
     if filename.endswith("add_cute10_spare_sticker.py"):
         expected["materials"][0].update(quantity=2, description="Includes 1 spare sheet.")
-    else:
+    elif filename.endswith("add_cute10_sticker_tools.py"):
         expected["materials"].extend([
             {"name": "Tweezers", "quantity": 1, "description": "For sticker application."},
             {"name": "Flat-head screwdriver", "quantity": 1, "description": "For sticker application."},
         ])
+    elif filename.endswith("update_cute10_sticker_material.py"):
+        expected["materials"][0]["name"] = "Pre-cut translucent waterproof sticker sheet"
+    elif filename.endswith("refine_cute10_sticker_description.py"):
+        expected["materials"][0]["name"] = "Translucent, waterproof and durable sticker sheet"
+    else:
+        expected["materials"][0].update(
+            name="Pre-cut translucent, waterproof and durable sticker sheet",
+            description="No cutting required. Includes 1 spare sheet.",
+        )
     assert product.kit_specifications == expected
     assert (product.price, product.stock) == (31, 278)
     public = client.get("/api/orders/model-stock?order_type=print")
