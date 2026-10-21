@@ -16,7 +16,8 @@ def mock_auth(db):
     db.commit()
     db.refresh(user)
     
-    from models import ModelSalesLimit
+    from models import ModelSalesLimit, FigureShipping
+    db.add(FigureShipping(id=1, shipping_fee=10, version=1))
     # Seed items for dynamic pricing
     db.add_all([
         ModelSalesLimit(model_type="10cm Model V1", stock=100, price=60.0),
@@ -996,7 +997,7 @@ def test_cute_shipping_is_flat_and_cannot_be_overridden(client, db, quantity_ord
     assert (order["price"], order["shipping_fee"], order["total_price"]) == (30 * quantity, 10, 30 * quantity + 10)
 
 
-def test_adding_to_legacy_cart_keeps_old_item_price_and_charges_shipping_once(client, db, quantity_order):
+def test_adding_with_new_shipping_keeps_legacy_cart_separate_and_charges_once(client, db, quantity_order):
     response = client.post("/api/orders", json=quantity_order)
     saved = db.query(Order).filter_by(id=response.json()["id"]).one()
     item = db.query(OrderItem).filter_by(order_id=saved.id).one()
@@ -1006,9 +1007,12 @@ def test_adding_to_legacy_cart_keeps_old_item_price_and_charges_shipping_once(cl
     response = client.post("/api/orders", json={**quantity_order, "quantity": 2})
     assert response.status_code == 200, response.text
     order = response.json()
-    assert order["id"] == saved.id
-    assert sorted(item["price"] for item in order["items"]) == [30, 30, 40]
-    assert (order["price"], order["shipping_fee"], order["total_price"]) == (100, 10, 110)
+    assert order["id"] != saved.id
+    assert sorted(item["price"] for item in order["items"]) == [30, 30]
+    assert (order["price"], order["shipping_fee"], order["total_price"]) == (60, 10, 70)
+    db.refresh(saved)
+    assert (saved.price, saved.shipping_fee, saved.total_price) == (40, 0, 40)
+    saved = db.get(Order, order["id"])
     with patch("routers.order.s3_client.delete_object"):
         for item in order["items"]:
             assert client.delete(f"/api/orders/items/{item['id']}").status_code == 200

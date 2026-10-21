@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, HttpUrl
 from typing import Optional, List, Literal
 from datetime import datetime
@@ -172,6 +173,7 @@ class OrderBase(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
 class OrderCreate(OrderBase):
+    expected_shipping_fee: Optional[Decimal] = Field(None, ge=0, le=Decimal("999999.99"), max_digits=8, decimal_places=2, allow_inf_nan=False)
     global_discount_version: Optional[int] = Field(None, ge=0, strict=True)
     creator_code: Optional[str] = Field(None, max_length=32)
     creator_offer_version: Optional[int] = Field(None, ge=1, strict=True)

@@ -69,14 +69,14 @@ def save_referral(req: ReferralRequest, db: Session = Depends(get_db), user: mod
 
 @router.post("/quote")
 def quote(req: QuoteRequest, db: Session = Depends(get_db), user: models.User = Depends(auth.get_current_user)):
-    from routers.order import _model_shipping_fee
+    from figure_shipping import model_shipping_fee
     bind_referral(db, user.id, req.referral_token)
     product = db.query(models.ModelSalesLimit).filter_by(model_type=req.model_type, order_type="print").first()
     if not product or product.stock < req.quantity:
         raise HTTPException(409, "creator_product_unavailable")
     offer = select_offer(db, user.id, req.code)
     subtotal = float(product.price) * req.quantity
-    shipping = _model_shipping_fee("print", product.model_type)
+    shipping = model_shipping_fee(db, "print", product.model_type)
     from figure_discounts import current_discount, discount_amount
     promotion = current_discount(db)
     global_amount = discount_amount(subtotal, promotion["discount_bps"])

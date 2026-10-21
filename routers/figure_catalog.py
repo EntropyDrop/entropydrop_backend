@@ -9,6 +9,7 @@ import auth
 import models
 from database import get_db
 from figure_discounts import current_discount
+from figure_shipping import current_shipping
 from sqlalchemy.exc import IntegrityError
 
 router = APIRouter(prefix="/api/figure/models", tags=["figure-admin"], dependencies=[Depends(auth.get_current_admin)])
@@ -73,6 +74,38 @@ def update_discount(req: GlobalDiscountUpdate, db: Session = Depends(get_db)):
             raise HTTPException(409, "figure_discount_changed")
         db.commit()
     return current_discount(db)
+
+
+class ShippingUpdate(BaseModel):
+    shipping_fee: Decimal = Field(ge=0, le=Decimal("999999.99"), max_digits=8, decimal_places=2, allow_inf_nan=False)
+    expected_version: int = Field(ge=0, strict=True)
+    model_config = ConfigDict(extra="forbid")
+
+
+@router.get("/shipping")
+def get_shipping(db: Session = Depends(get_db)):
+    return current_shipping(db)
+
+
+@router.patch("/shipping")
+def update_shipping(req: ShippingUpdate, db: Session = Depends(get_db)):
+    if req.expected_version == 0:
+        db.add(models.FigureShipping(id=1, shipping_fee=req.shipping_fee, version=1))
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "figure_shipping_changed")
+    else:
+        changed = db.query(models.FigureShipping).filter_by(id=1, version=req.expected_version).update(
+            {models.FigureShipping.shipping_fee: req.shipping_fee, models.FigureShipping.version: req.expected_version + 1},
+            synchronize_session=False,
+        )
+        if changed != 1:
+            db.rollback()
+            raise HTTPException(409, "figure_shipping_changed")
+        db.commit()
+    return current_shipping(db)
 
 
 @router.patch("/{model_id}", response_model=ModelSettingsResponse)

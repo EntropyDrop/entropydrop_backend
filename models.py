@@ -4,7 +4,7 @@ from datetime import timezone
 import uuid
 import random
 import secrets
-from sqlalchemy import Column, Integer, BigInteger, SmallInteger, String, DateTime, Text, JSON, Boolean, Float, Index, UniqueConstraint, CheckConstraint, Date, ForeignKey, Uuid, LargeBinary
+from sqlalchemy import Column, Integer, BigInteger, SmallInteger, String, DateTime, Text, JSON, Boolean, Float, Numeric, Index, UniqueConstraint, CheckConstraint, Date, ForeignKey, Uuid, LargeBinary
 from database import Base
 
 from ids import generate_base58_id
@@ -313,6 +313,17 @@ class Order(Base):
 
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.datetime.now(datetime.timezone.utc), onupdate=lambda: datetime.datetime.now(datetime.timezone.utc))
+
+class FigureShipping(Base):
+    __tablename__ = "figure_shipping"
+    id = Column(Integer, primary_key=True, default=1)
+    shipping_fee = Column(Numeric(8, 2), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_figure_shipping_singleton"),
+        CheckConstraint("shipping_fee >= 0 AND shipping_fee <= 999999.99", name="ck_figure_shipping_fee"),
+    )
+
 
 class FigureDiscount(Base):
     __tablename__ = "figure_discounts"

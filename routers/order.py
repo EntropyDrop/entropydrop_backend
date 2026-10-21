@@ -32,13 +32,9 @@ from rate_limit import limiter, get_authenticated_or_remote_address
 from creator_referrals import active_code, ensure_discounted_items_editable, public_offer, reprice_order, select_offer, set_order_offer
 
 from figure_discounts import current_discount, discount_amount
+from figure_shipping import model_shipping_fee
 
 PAYPAL_CURRENCY_CODE = "USD"
-
-
-def _model_shipping_fee(order_type: str, model_type: str) -> float:
-    """One flat fee per CUTE kit order, independent of item quantity."""
-    return 10.0 if order_type == "print" and model_type == "Cute DIY Kit" else 0.0
 
 
 def _paypal_shipping_address(order: models.Order) -> dict:
@@ -406,7 +402,7 @@ def get_model_stock(order_type: Optional[str] = None, db: Session = Depends(get_
             "available": limit.stock > 0,
             "stock": max(0, limit.stock),
             "price": limit.price,
-            "shipping_fee": _model_shipping_fee(limit.order_type, limit.model_type),
+            "shipping_fee": model_shipping_fee(db, limit.order_type, limit.model_type),
             "kit_specifications": limit.kit_specifications,
         })
     return result
@@ -537,6 +533,8 @@ def create_order(
         if not items_to_create:
             raise HTTPException(status_code=400, detail="Checkout queue is empty")
 
+        shipping_fee = model_shipping_fee(db, req.order_type, req.model_type, req.expected_shipping_fee)
+
         # Address IDs survive edits. Merge only when the saved shipping fields
         # still match; default-address metadata does not affect fulfillment.
         # Direct purchases remain separate even when the buyer later adds
@@ -556,6 +554,7 @@ def create_order(
                                if candidate.creator_snapshot == offer
                                and candidate.global_discount_bps == promotion["discount_bps"]
                                and candidate.global_discount_version == promotion["version"]
+                               and _money(candidate.shipping_fee) == _money(shipping_fee)
                                and not ((offer or candidate.global_discount_bps) and candidate.paypal_order_id)
                                and ((req.shipping_source == "paypal" and candidate.address_snapshot is None)
                                     or (req.shipping_source == "address_book" and candidate.address_snapshot
@@ -575,14 +574,12 @@ def create_order(
 
 
         added_price = sum(item["price"] for item in items_to_create)
-        shipping_fee = _model_shipping_fee(req.order_type, req.model_type)
 
 
         if existing_order:
             order = existing_order
             release_inventory(db, order)
             order.price += added_price
-            order.shipping_fee = max(order.shipping_fee, shipping_fee)
             order.total_price = order.price + order.shipping_fee
             order.paypal_order_id = None
         else:
