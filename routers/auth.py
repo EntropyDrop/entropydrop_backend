@@ -12,7 +12,7 @@ import auth
 from figure_print_terms import FIGURE_PRINT_TERMS_VERSION, acceptance_status, record_acceptance
 from datetime import datetime, date
 import backend_utils
-from backend_utils import is_text_to_skin_enabled, is_image_to_skin_enabled, is_image_edit_to_skin_enabled
+from backend_utils import is_text_to_skin_enabled, is_image_to_skin_enabled, is_image_edit_to_skin_enabled, is_payment_enabled
 from rate_limit import limiter, get_authenticated_or_remote_address
 
 router = APIRouter(tags=["auth"])
@@ -122,6 +122,7 @@ def google_login(
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
+        "payment_enabled": is_payment_enabled(),
         "pro_level": user.pro_level,
         "credits": user.credits,
         "paypal_subscription_id": user.paypal_subscription_id,
@@ -226,6 +227,7 @@ def get_my_profile(db: Session = Depends(get_db), current_user: models.User = De
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
+        "payment_enabled": is_payment_enabled(),
         "pro_level": current_user.pro_level,
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
@@ -280,6 +282,7 @@ def agree_terms(db: Session = Depends(get_db), current_user: models.User = Depen
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
+        "payment_enabled": is_payment_enabled(),
         "pro_level": current_user.pro_level,
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
@@ -340,6 +343,7 @@ def update_username(
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
+        "payment_enabled": is_payment_enabled(),
         "pro_level": current_user.pro_level,
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,
@@ -415,6 +419,7 @@ def update_minecraft_skin(
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
+        "payment_enabled": is_payment_enabled(),
         "pro_level": current_user.pro_level,
         "credits": current_user.credits,
         "paypal_subscription_id": current_user.paypal_subscription_id,

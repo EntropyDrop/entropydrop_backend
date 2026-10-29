@@ -440,11 +440,12 @@ async def get_modes_status(
     request: Request,
     admin: User = Depends(get_current_admin)
 ):
-    from backend_utils import is_text_to_skin_enabled, is_image_to_skin_enabled, is_image_edit_to_skin_enabled
+    from backend_utils import is_text_to_skin_enabled, is_image_to_skin_enabled, is_image_edit_to_skin_enabled, is_payment_enabled
     return {
         "text_to_skin_enabled": is_text_to_skin_enabled(),
         "image_to_skin_enabled": is_image_to_skin_enabled(),
         "image_edit_to_skin_enabled": is_image_edit_to_skin_enabled(),
+        "payment_enabled": is_payment_enabled(),
     }
 
 @router.post("/mode_status/{mode_name}")
@@ -455,7 +456,7 @@ async def toggle_mode_status(
     req: ModeMaintenanceToggleRequest,
     admin: User = Depends(get_current_admin)
 ):
-    if mode_name not in ("text_to_skin", "image_to_skin", "image_edit_to_skin"):
+    if mode_name not in ("text_to_skin", "image_to_skin", "image_edit_to_skin", "payment"):
         raise HTTPException(status_code=400, detail="Invalid mode name")
     try:
         redis_conn.set(f"config:{mode_name}_enabled", "1" if req.enabled else "0")

@@ -41,6 +41,16 @@ def is_image_edit_to_skin_enabled() -> bool:
         print(f"Failed to check config:image_edit_to_skin_enabled in Redis: {e}")
         return True
 
+def is_payment_enabled() -> bool:
+    try:
+        val = redis_conn.get("config:payment_enabled")
+        if val is None:
+            return True
+        return val == b"1"
+    except Exception as e:
+        print(f"Failed to check config:payment_enabled in Redis: {e}")
+        return True
+
 
 
 def get_daily_login_credits(user: models.User) -> int:

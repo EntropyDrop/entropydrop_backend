@@ -740,6 +740,9 @@ def pay_order(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """Confirm PayPal payment for an order."""
+    if not backend_utils.is_payment_enabled():
+        raise HTTPException(status_code=503, detail="Payment service is under maintenance")
+
     order = lock_order(db, id, current_user.id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -818,6 +821,9 @@ def create_paypal_order(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """Create PayPal order"""
+    if not backend_utils.is_payment_enabled():
+        raise HTTPException(status_code=503, detail="Payment service is under maintenance")
+
     order = lock_order(db, id, current_user.id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -898,7 +904,15 @@ def get_paypal_config():
     return {
         "client_id": settings.PAYPAL_CLIENT_ID,
         "pro_plus_plan_id": settings.PAYPAL_PRO_PLUS_PLAN_ID,
-        "pro_max_plan_id": settings.PAYPAL_PRO_MAX_PLAN_ID
+        "pro_max_plan_id": settings.PAYPAL_PRO_MAX_PLAN_ID,
+        "payment_enabled": backend_utils.is_payment_enabled()
+    }
+
+@router.get("/payment/status")
+def get_payment_status():
+    """Get live payment maintenance status"""
+    return {
+        "payment_enabled": backend_utils.is_payment_enabled()
     }
 
 @router.post("/subscription/create")
@@ -914,6 +928,9 @@ def create_subscription(
     current_user: models.User = Depends(auth.get_current_user)
 ):
     """Create a new subscription or revise an existing subscription (for upgrades)"""
+    if not backend_utils.is_payment_enabled():
+        raise HTTPException(status_code=503, detail="Payment service is under maintenance")
+
     if req.tier not in ("pro_plus", "pro_max"):
         raise HTTPException(status_code=400, detail="Invalid subscription tier")
         

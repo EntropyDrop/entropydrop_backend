@@ -9,6 +9,7 @@ import uuid
 from database import get_db
 import models
 import auth
+import backend_utils
 from payment_utils import create_paypal_order_api, capture_paypal_order_api, get_paypal_order_api
 from rate_limit import limiter, get_authenticated_or_remote_address
 
@@ -50,6 +51,9 @@ def purchase_credits(
     current_user: models.User = Depends(auth.get_current_user),
 ):
     """Create a PayPal order for a credit purchase."""
+    if not backend_utils.is_payment_enabled():
+        raise HTTPException(status_code=503, detail="Payment service is under maintenance")
+
     if req.amount < MIN_AMOUNT:
         raise HTTPException(status_code=400, detail=f"Minimum purchase amount is ${MIN_AMOUNT}")
 

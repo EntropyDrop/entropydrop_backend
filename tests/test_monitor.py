@@ -813,19 +813,25 @@ def test_mode_status_endpoints(client, db):
         return admin_user
     app.dependency_overrides[get_current_admin] = mock_get_current_admin
 
-    # 4. Admin GET (should default to True for all 3)
+    # 4. Admin GET (should default to True for all 4)
     response = client.get("/skin/api/monitor/mode_status")
     assert response.status_code == 200
     assert response.json() == {
         "text_to_skin_enabled": True,
         "image_to_skin_enabled": True,
         "image_edit_to_skin_enabled": True,
+        "payment_enabled": True,
     }
 
     # 5. Admin POST turn OFF image_to_skin
     response = client.post("/skin/api/monitor/mode_status/image_to_skin", json={"enabled": False})
     assert response.status_code == 200
     assert response.json() == {"mode": "image_to_skin", "enabled": False}
+
+    # 5b. Admin POST turn OFF payment
+    response = client.post("/skin/api/monitor/mode_status/payment", json={"enabled": False})
+    assert response.status_code == 200
+    assert response.json() == {"mode": "payment", "enabled": False}
 
     # 6. Admin GET (should reflect change)
     response = client.get("/skin/api/monitor/mode_status")
@@ -834,6 +840,7 @@ def test_mode_status_endpoints(client, db):
         "text_to_skin_enabled": True,
         "image_to_skin_enabled": False,
         "image_edit_to_skin_enabled": True,
+        "payment_enabled": False,
     }
 
     # 7. Admin POST invalid mode name

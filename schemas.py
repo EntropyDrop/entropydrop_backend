@@ -48,6 +48,7 @@ class UserResponse(BaseModel):
     text_to_skin_enabled: Optional[bool] = True
     image_to_skin_enabled: Optional[bool] = True
     image_edit_to_skin_enabled: Optional[bool] = True
+    payment_enabled: Optional[bool] = True
 
     paypal_subscription_id: Optional[str] = None
     paypal_subscription_status: Optional[str] = None
