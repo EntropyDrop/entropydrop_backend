@@ -19,7 +19,7 @@ from generation_priority import STAGE_QUEUES
 from config import settings
 from pipeline_registry import (
     MODEL_PIPELINES,
-    SKING_DDJ_V101C,
+    SKING_DDJ_V130,
     SKING_DDJ_MODEL_PREFIX,
     get_pipeline,
     is_sking_ddj_model,
@@ -232,6 +232,16 @@ def enqueue_image_to_skin_task(log: models.GenerationLog, is_pro_active: bool, c
     )
 
 
+def real_to_render_task_payload(log: models.GenerationLog) -> dict[str, object]:
+    payload = get_pipeline(log.model_version).to_task_payload()
+    seed = getattr(log, "seed", None)
+    if seed is not None:
+        if type(seed) is not int or not 0 <= seed <= 0x7FFFFFFF:
+            raise ValueError("seed must be an integer in [0, 2147483647]")
+        payload["seed"] = seed
+    return payload
+
+
 def enqueue_real_to_render_task(
     log: models.GenerationLog,
     is_pro_active: bool,
@@ -260,7 +270,7 @@ def enqueue_real_to_render_task(
             content_type,
             prefix,
             log.model_version,
-            pipeline.to_task_payload(),
+            real_to_render_task_payload(log),
         ),
         job_timeout="60s",
         retry=None,
@@ -300,7 +310,7 @@ def enqueue_real_to_render_resume_task(
             prefix,
             log.provider_task_id,
             log.model_version,
-            pipeline.to_task_payload(),
+            real_to_render_task_payload(log),
         ),
         job_timeout="60s",
         retry=Retry(max=5, interval=[5, 15, 30, 60, 120]),
@@ -452,10 +462,7 @@ def display_log_name(log):
 
 ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
 
-AVAILABLE_IMAGE_TO_SKIN_MODELS = [
-    SKING_DDJ_V101C,
-    LEGACY_SKIN_MODEL_VERSION,
-]
+AVAILABLE_IMAGE_TO_SKIN_MODELS = [SKING_DDJ_V130]
 
 AVAILABlE_TEXT_TO_IMAGE_MODELS = [
     'z_image'
@@ -530,12 +537,9 @@ async def get_models(current_user: models.User = Depends(auth.get_current_user))
         "image_edit_models": edit_models,
         "image_to_skin_models": image_models,
         "image_to_skin_options": generation_model_options(image_models),
-        "text_to_skin_options": generation_model_options(
-            [LEGACY_SKIN_MODEL_VERSION], text_models
-        ),
-        "image_edit_to_skin_options": generation_model_options(
-            [LEGACY_SKIN_MODEL_VERSION], edit_models
-        ),
+        # Retired v73 combinations have no live skin worker.
+        "text_to_skin_options": [],
+        "image_edit_to_skin_options": [],
     }
 
 
@@ -659,7 +663,7 @@ async def generate_image(
     parent: Optional[str] = Form(None),
     source_rights: Optional[Literal["original", "external"]] = Form(None),
     public_license_consent: bool = Form(False),
-    seed: Optional[int] = Form(None),
+    seed: Optional[int] = Form(None, ge=0, le=2147483647),
     n_step: Optional[int] = Form(None),
     guidance: Optional[float] = Form(None),
     db: Session = Depends(get_db),
@@ -683,16 +687,6 @@ async def generate_image(
     # Calculate allowed combinations set of (aux, skin) pairs
     if mode == "aigc_image_to_skin":
         allowed_combinations = {(None, skin) for skin in AVAILABLE_IMAGE_TO_SKIN_MODELS}
-    elif mode == "aigc_text_to_skin":
-        allowed_combinations = {
-            (base, LEGACY_SKIN_MODEL_VERSION)
-            for base in AVAILABlE_TEXT_TO_IMAGE_MODELS
-        }
-    elif mode == "aigc_image_edit_to_skin":
-        allowed_combinations = {
-            (base, LEGACY_SKIN_MODEL_VERSION)
-            for base in AVAILABLE_IMAGE_EDIT_MODELS
-        }
     else:
         allowed_combinations = set()
 
