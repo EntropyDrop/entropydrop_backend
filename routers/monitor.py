@@ -427,7 +427,7 @@ def admin_delete_all_failed_tasks(
     return {"message": "Failed tasks deleted and public files withdrawn", "deleted_count": count}
 
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 
 class ModeMaintenanceToggleRequest(BaseModel):
@@ -635,9 +635,20 @@ def admin_delete_user_by_email(
     return {"message": f"User with email {email} and all associated data have been permanently deleted."}
 
 
-class GiftActiveUsersRequest(BaseModel):
+class GiftCreditsRequest(BaseModel):
     amount: int
     message: str
+
+
+class GiftActiveUsersRequest(GiftCreditsRequest):
+    action_url: Optional[HttpUrl] = None
+
+    @field_validator("action_url", mode="before")
+    @classmethod
+    def normalize_action_url(cls, value):
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
 
 @router.post("/gift_active_users")
@@ -688,6 +699,7 @@ async def gift_credits_to_seven_day_active_users(
                 type="system_gift",
                 post_id=gift_log.id,
                 comment_id=str(req.amount),
+                action_url=str(req.action_url) if req.action_url else None,
                 is_read=False
             )
             db.add(notif)
@@ -708,7 +720,7 @@ async def gift_credits_to_seven_day_active_users(
 @limiter.limit(MONITOR_BULK_GIFT_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
 async def gift_credits_to_pro_users(
     request: Request,
-    req: GiftActiveUsersRequest,
+    req: GiftCreditsRequest,
     admin: User = Depends(get_current_admin),
     db: Session = Depends(get_db)
 ):

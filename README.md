@@ -2,6 +2,15 @@
 
 FastAPI backend for EntropyDrop skin generation, collections, orders, subscriptions, and the public ledger API.
 
+## Campaign notification links
+
+Apply migration `d6a28f7c913e` with `alembic upgrade head` before deploying this
+API version. The seven-day active-user gift endpoint accepts an optional
+`action_url` (HTTP/HTTPS), stored on each notification and returned as `actionUrl`
+by the notification list and credit history APIs. Both the mailbox and transaction
+history display the same destination button. Existing notifications and gifts
+without a URL continue to work without an action button.
+
 ## Local Development
 
 ```bash

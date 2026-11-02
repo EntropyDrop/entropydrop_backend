@@ -567,6 +567,7 @@ class ForumNotification(Base):
     order_id = Column(String(16), nullable=True, index=True)
     message = Column(Text, nullable=True)
     event_key = Column(String(100), nullable=True, unique=True)
+    action_url = Column(Text, nullable=True)
     post_id = Column(String(16), index=True, nullable=True)
     comment_id = Column(String(16), index=True, nullable=True)
     is_read = Column(Boolean, default=False, index=True)

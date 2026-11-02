@@ -2,7 +2,7 @@ import datetime
 import pytest
 from unittest.mock import MagicMock, patch
 from main import app
-from auth import get_current_admin
+from auth import get_current_admin, get_current_user
 import models
 
 pytestmark = pytest.mark.usefixtures("withdrawal_storage")
@@ -860,7 +860,14 @@ def test_gift_all_endpoint_is_removed(client):
     assert response.status_code == 404
 
 
-def test_gift_credits_to_seven_day_active_users_success(client, db):
+@pytest.mark.parametrize("link_fields, expected_url", [
+    ({}, None),
+    ({"action_url": None}, None),
+    ({"action_url": "   "}, None),
+    ({"action_url": " https://example.com/campaign?from=gift#details "}, "https://example.com/campaign?from=gift#details"),
+    ({"action_url": "http://example.com/campaign"}, "http://example.com/campaign"),
+])
+def test_gift_credits_to_seven_day_active_users_success(client, db, link_fields, expected_url):
     # 1. Create admin user
     admin_user = models.User(
         id="ADMIN_GIFT_001",
@@ -914,7 +921,7 @@ def test_gift_credits_to_seven_day_active_users_success(client, db):
     assert response.status_code == 400
 
     # 5. Execute successful gift request
-    response = client.post("/skin/api/monitor/gift_active_users", json={"amount": 15, "message": "Maintenance Gift"})
+    response = client.post("/skin/api/monitor/gift_active_users", json={"amount": 15, "message": "Maintenance Gift", **link_fields})
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     assert response.json()["gifted_users"] == 1
@@ -938,9 +945,79 @@ def test_gift_credits_to_seven_day_active_users_success(client, db):
     assert {n.user_id for n in notifs} == {"GIFT_USER_001"}
     assert all(n.comment_id == "15" for n in notifs)
     assert all(n.sender_id is None for n in notifs)
+    assert notifs[0].action_url == expected_url
+
+    # The recipient receives the saved link alongside the existing gift content.
+    app.dependency_overrides[get_current_user] = lambda: user1
+    response = client.get("/skin/api/forum/notifications")
+    assert response.status_code == 200
+    notification = response.json()["notifications"][0]
+    assert notification["actionUrl"] == expected_url
+    assert notification["postTitle"] == "15|Maintenance Gift"
+    assert notification["isRead"] is False
+    assert client.post(f"/skin/api/forum/notifications/{notification['id']}/read").status_code == 200
+    db.refresh(notifs[0])
+    assert notifs[0].is_read is True
+    assert notifs[0].action_url == expected_url
+
+    response = client.get("/skin/api/users/me/credits/history")
+    assert response.status_code == 200
+    gift = next(item for item in response.json()["items"] if item["action"] == "system_gift")
+    assert gift["actionUrl"] == expected_url
+    assert gift["source"] == "Maintenance Gift"
+    assert gift["amount"] == 15
 
     # Clean up
     app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize("action_url", [
+    "javascript:alert(1)",
+    "data:text/html,test",
+    "ftp://example.com/campaign",
+    "//example.com/campaign",
+    "not a URL",
+    "https://",
+    "https://example.com/" + "x" * 2083,
+])
+def test_active_user_gift_invalid_url_does_not_grant_credits(client, db, action_url):
+    user = models.User(id="LINK_USER", email="link@example.com", username="LinkUser", credits=5)
+    db.add(user)
+    db.add(models.CreditLog(user_id=user.id, amount=1, action="daily_login"))
+    db.commit()
+    app.dependency_overrides[get_current_admin] = lambda: user
+
+    response = client.post("/skin/api/monitor/gift_active_users", json={
+        "amount": 15, "message": "Campaign", "action_url": action_url,
+    })
+    assert response.status_code == 422
+    db.refresh(user)
+    assert user.credits == 5
+    assert db.query(models.CreditLog).filter_by(action="system_gift").count() == 0
+    assert db.query(models.ForumNotification).count() == 0
+
+
+def test_notification_action_url_migration_preserves_existing_notifications():
+    import importlib.util
+    from pathlib import Path
+    from sqlalchemy import create_engine, text
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    migration_path = Path(__file__).resolve().parents[1] / "alembic/versions/d6a28f7c913e_add_notification_action_url.py"
+    spec = importlib.util.spec_from_file_location("notification_link_migration", migration_path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE forum_notifications (id TEXT PRIMARY KEY, is_read BOOLEAN)"))
+        connection.execute(text("INSERT INTO forum_notifications VALUES ('existing', false)"))
+        with Operations.context(MigrationContext.configure(connection)):
+            migration.upgrade()
+            assert connection.execute(text("SELECT id, is_read, action_url FROM forum_notifications")).one() == ("existing", 0, None)
+            migration.downgrade()
+            assert connection.execute(text("SELECT * FROM forum_notifications")).one() == ("existing", 0)
+    engine.dispose()
 
 
 def test_gift_credits_to_pro_users_success(client, db):

@@ -441,6 +441,18 @@ def get_my_credit_history(
     )
     total = query.count()
     logs = query.order_by(models.CreditLog.created_at.desc()).offset(skip).limit(page_size).all()
+
+    # Reuse the campaign URL saved on the recipient's notification for each gift.
+    gift_log_ids = [log.id for log in logs if log.action == "system_gift"]
+    gift_action_urls = {}
+    if gift_log_ids:
+        notifications = db.query(models.ForumNotification.post_id, models.ForumNotification.action_url).filter(
+            models.ForumNotification.user_id == current_user.id,
+            models.ForumNotification.type == "system_gift",
+            models.ForumNotification.post_id.in_(gift_log_ids),
+            models.ForumNotification.action_url.isnot(None),
+        ).all()
+        gift_action_urls = {notification.post_id: notification.action_url for notification in notifications}
     
     results = []
     for log in logs:
@@ -449,6 +461,7 @@ def get_my_credit_history(
             "amount": log.amount,
             "action": log.action,
             "source": log.source,
+            "actionUrl": gift_action_urls.get(log.id),
             "timestamp": log.created_at.replace(tzinfo=None).isoformat() + "Z"
         })
         

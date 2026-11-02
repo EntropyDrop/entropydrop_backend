@@ -457,8 +457,50 @@ def test_get_my_credit_history(client, db):
     assert data["items"][0]["action"] == "generation"
     assert data["items"][1]["amount"] == 6
     assert data["items"][1]["action"] == "daily_login"
+    assert all(item["actionUrl"] is None for item in data["items"])
 
     app.dependency_overrides.clear()
+
+
+def test_credit_history_campaign_links_are_scoped_to_recipient_and_gift(client, db):
+    from main import app
+    from models import CreditLog, ForumNotification
+
+    user = User(id="history_user", email="history@example.com", username="HistoryUser")
+    other = User(id="other_user", email="other-history@example.com", username="OtherUser")
+    now = datetime.now(timezone.utc)
+    db.add_all([user, other])
+    db.add_all([
+        CreditLog(id="linked_gift", user_id=user.id, amount=10, action="system_gift", source="Campaign", created_at=now),
+        CreditLog(id="unlinked_gift", user_id=user.id, amount=10, action="system_gift", source="Legacy", created_at=now - timedelta(minutes=1)),
+        CreditLog(id="login_log", user_id=user.id, amount=1, action="daily_login", created_at=now - timedelta(minutes=2)),
+        CreditLog(id="other_gift", user_id=other.id, amount=10, action="system_gift", created_at=now),
+    ])
+    db.add_all([
+        ForumNotification(user_id=user.id, type="system_gift", post_id="linked_gift", action_url="https://example.com/campaign", is_read=True),
+        ForumNotification(user_id=user.id, type="system_gift", post_id="unlinked_gift"),
+        # A different recipient or notification type must not supply a gift URL.
+        ForumNotification(user_id=other.id, type="system_gift", post_id="unlinked_gift", action_url="https://example.com/other-recipient"),
+        ForumNotification(user_id=user.id, type="like", post_id="unlinked_gift", action_url="https://example.com/other-type"),
+        ForumNotification(user_id=user.id, type="system_gift", post_id="login_log", action_url="https://example.com/non-gift"),
+        ForumNotification(user_id=other.id, type="system_gift", post_id="other_gift", action_url="https://example.com/private"),
+    ])
+    db.commit()
+    app.dependency_overrides[get_current_user] = lambda: user
+
+    items = []
+    for page, expected_count in [(1, 2), (2, 1)]:
+        response = client.get(f"/skin/api/users/me/credits/history?page={page}&page_size=2")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 3
+        assert len(data["items"]) == expected_count
+        items.extend(data["items"])
+    assert {item["id"]: item["actionUrl"] for item in items} == {
+        "linked_gift": "https://example.com/campaign",
+        "unlinked_gift": None,
+        "login_log": None,
+    }
 
 
 def test_update_minecraft_skin_rejects_another_creators_skin(client, db):

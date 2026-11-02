@@ -357,6 +357,7 @@ class ForumNotificationResponse(BaseModel):
     postTitle: Optional[str] = None
     orderId: Optional[str] = None
     message: Optional[str] = None
+    actionUrl: Optional[str] = None
     isRead: bool = False
     createdAt: str
 

@@ -764,6 +764,7 @@ async def list_notifications(
             postTitle=post_title,
             orderId=n.order_id,
             message=n.message,
+            actionUrl=n.action_url,
             isRead=n.is_read,
             createdAt=get_relative_time(n.created_at)
         ))
