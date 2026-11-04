@@ -1,12 +1,15 @@
 import json
+import re
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import NoResultFound
 from starlette.concurrency import run_in_threadpool
 
 import models
 import generation_priority
+import subscription_lifecycle as subscriptions
 from config import settings
 from database import get_db
 from rate_limit import limiter
@@ -23,42 +26,25 @@ def _paypal_plan_to_pro_level(plan_id: str):
     return None
 
 
-def _resolve_subscription_user(db, sub_id: str, subscription: dict):
-    """Resolve the owner when a PayPal webhook beats browser activation."""
-    user = (
-        db.query(models.User)
-        .filter(models.User.paypal_subscription_id == sub_id)
-        .with_for_update()
-        .populate_existing()
-        .first()
-    )
-    if user:
-        return user
-
-    custom_id = subscription.get("custom_id")
-    if not isinstance(custom_id, str) or not custom_id:
-        raise HTTPException(
-            status_code=409,
-            detail="Subscription owner is not linked yet; retry webhook",
-        )
-
-    user = (
-        db.query(models.User)
-        .filter(models.User.id == custom_id)
-        .with_for_update()
-        .populate_existing()
-        .first()
-    )
-    if not user:
-        raise HTTPException(
-            status_code=409,
-            detail="Subscription owner does not exist yet; retry webhook",
-        )
-
-    # custom_id comes from a fresh authenticated lookup of this exact PayPal
-    # subscription, so it can safely replace a stale subscription binding.
-    user.paypal_subscription_id = sub_id
-    return user
+def _subscription_context(db, sub_id):
+    if not isinstance(sub_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,100}", sub_id):
+        raise HTTPException(status_code=400, detail="Invalid subscription ID")
+    contract = db.query(models.PaypalSubscription).filter_by(paypal_id=sub_id).first()
+    user_id = contract.user_id if contract else db.query(models.User.id).filter_by(paypal_subscription_id=sub_id).scalar()
+    if not user_id:
+        user_id = _paypal_subscription(sub_id).get("custom_id")
+    try:
+        user = subscriptions.lock_user(db, user_id) if user_id else None
+    except NoResultFound:
+        user = None
+    if user is None:
+        raise HTTPException(status_code=409, detail="Subscription owner is not linked yet; retry webhook")
+    # Fetch AFTER the owner lock. A concurrent cancel must not be overwritten by
+    # an ACTIVE snapshot fetched before that cancellation completed.
+    data = _paypal_subscription(sub_id)
+    if data.get("custom_id") and data["custom_id"] != user.id:
+        raise HTTPException(status_code=403, detail="Subscription owner mismatch")
+    return user, data
 
 
 def _completed_sale_amount(resource: dict, subscription: dict) -> float:
@@ -126,40 +112,21 @@ def _process_paypal_webhook(body, headers, db):
             db.commit()
         return {"status": "success"}
 
-    if event_type == "BILLING.SUBSCRIPTION.ACTIVATED":
+    if event_type in {
+        "BILLING.SUBSCRIPTION.CREATED", "BILLING.SUBSCRIPTION.ACTIVATED",
+        "BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.SUSPENDED",
+        "BILLING.SUBSCRIPTION.EXPIRED", "BILLING.SUBSCRIPTION.UPDATED",
+    }:
         sub_id = resource.get("id")
-        if not sub_id:
-            raise HTTPException(status_code=400, detail="Subscription ID is missing")
-        user = (
-            db.query(models.User)
-            .filter(models.User.paypal_subscription_id == sub_id)
-            .with_for_update()
-            .populate_existing()
-            .first()
-        )
-        if not user:
-            sub_data = _paypal_subscription(sub_id)
-            if not _paypal_plan_to_pro_level(sub_data.get("plan_id")):
-                raise HTTPException(status_code=400, detail="Subscription plan is not supported")
-            user = _resolve_subscription_user(db, sub_id, sub_data)
-        user.paypal_subscription_status = "ACTIVE"
-        db.commit()
-        print(f"Linked activated subscription {sub_id} to user {user.id} from event {event_id}")
-
-    elif event_type == "BILLING.SUBSCRIPTION.CANCELLED":
-        sub_id = resource.get("id")
-        if not sub_id:
-            raise HTTPException(status_code=400, detail="Subscription ID is missing")
-        user = (
-            db.query(models.User)
-            .filter(models.User.paypal_subscription_id == sub_id)
-            .with_for_update()
-            .populate_existing()
-            .first()
-        )
-        if not user:
-            user = _resolve_subscription_user(db, sub_id, _paypal_subscription(sub_id))
-        user.paypal_subscription_status = "CANCELLED"
+        user, sub_data = _subscription_context(db, sub_id)
+        if event_type in {"BILLING.SUBSCRIPTION.CANCELLED", "BILLING.SUBSCRIPTION.EXPIRED"}:
+            # A signed terminal event is authoritative even if GET lags behind.
+            sub_data = {**sub_data, "status": event_type.rsplit(".", 1)[-1],
+                        "status_update_time": resource.get("status_update_time") or payload.get("create_time")}
+        elif not _paypal_plan_to_pro_level(sub_data.get("plan_id")):
+            raise HTTPException(status_code=400, detail="Subscription plan is not supported")
+        contract = subscriptions.remember(db, user, sub_id, sub_data)
+        subscriptions.select_contract(db, user, contract)
         db.commit()
 
     elif event_type == "PAYMENT.SALE.COMPLETED":
@@ -171,7 +138,7 @@ def _process_paypal_webhook(body, headers, db):
                 detail="Subscription payment identifiers are missing",
             )
 
-        sub_data = _paypal_subscription(sub_id)
+        user, sub_data = _subscription_context(db, sub_id)
         pro_level = _paypal_plan_to_pro_level(sub_data.get("plan_id"))
         if not pro_level:
             raise HTTPException(status_code=400, detail="Subscription plan is not supported")
@@ -180,7 +147,8 @@ def _process_paypal_webhook(body, headers, db):
         from subscription_billing import paid_cycle
 
         paid_at, expires_at = paid_cycle(sub_data)
-        user = _resolve_subscription_user(db, sub_id, sub_data)
+        contract = subscriptions.remember(db, user, sub_id, sub_data)
+        subscriptions.select_contract(db, user, contract)
 
         # The user row lock serializes duplicate delivery across API tasks.
         existing_order = (
@@ -189,13 +157,16 @@ def _process_paypal_webhook(body, headers, db):
             .first()
         )
         if existing_order:
-            db.rollback()
+            db.commit()
             generation_priority.sync_after_payment(db, user.id)
             return {"status": "success"}
 
-        user.pro_expires_at = expires_at
-        user.paypal_subscription_status = "ACTIVE"
-        user.pro_level = pro_level
+        # Historical payments still belong in the ledger, but must not shorten
+        # newer paid entitlements or change the selected subscription's plan.
+        if not user.pro_expires_at or expires_at > subscriptions.utc(user.pro_expires_at):
+            user.pro_expires_at = expires_at
+        if user.paypal_subscription_id == sub_id or user.pro_level == "free":
+            user.pro_level = pro_level
 
         order = models.Order(
             user_id=user.id,

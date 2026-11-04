@@ -130,12 +130,14 @@ def get_paypal_subscription_api(subscription_id: str):
     response.raise_for_status()
     return response.json()
 
-def create_paypal_subscription_api(plan_id: str, custom_id: str, return_url: str, cancel_url: str):
+def create_paypal_subscription_api(plan_id: str, custom_id: str, return_url: str, cancel_url: str, *, request_id: str):
     """Create subscription using PayPal API."""
     access_token = get_paypal_access_token()
     headers = {
         "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "PayPal-Request-Id": request_id,
+        "Prefer": "return=representation",
     }
 
     payload = {
@@ -200,6 +202,8 @@ def cancel_paypal_subscription_api(subscription_id: str, reason: str = "User req
     )
     response.raise_for_status()
     # 204 No Content expected on success
+    if response.status_code != 204:
+        raise RuntimeError("PayPal did not confirm subscription cancellation")
     return True
 
 def verify_paypal_webhook_signature(headers: dict, body: bytes, webhook_id: str):

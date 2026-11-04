@@ -36,6 +36,7 @@ class User(Base):
     pro_level = Column(String(20), default="free") # free, pro-plus, pro-max
     paypal_subscription_id = Column(String(100), unique=True, index=True, nullable=True)
     paypal_subscription_status = Column(String(50), nullable=True) # ACTIVE, CANCELLED, etc
+    subscription_cancel_requested_at = Column(DateTime(timezone=True), nullable=True)
     
     @property
     def is_pro(self):
@@ -59,6 +60,27 @@ class User(Base):
     @property
     def is_pro_active(self):
         return self.is_pro
+
+
+class PaypalSubscription(Base):
+    """Durable contracts and checkout attempts; User fields are only a display pointer."""
+    __tablename__ = "paypal_subscriptions"
+
+    id = Column(String(100), primary_key=True, default=lambda: uuid.uuid4().hex)
+    user_id = Column(String(16), ForeignKey("users.id"), nullable=False, index=True)
+    paypal_id = Column(String(100), unique=True, nullable=True)
+    status = Column(String(32), nullable=False, default="CREATE_PENDING")
+    plan_id = Column(String(100), nullable=True)
+    request_id = Column(String(38), unique=True, nullable=True)
+    return_url = Column(Text, nullable=True)
+    approval_url = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.datetime.now(timezone.utc))
+    create_requested_at = Column(DateTime(timezone=True), nullable=True)
+    provider_updated_at = Column(DateTime(timezone=True), nullable=True)
+    cancel_requested_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    next_check_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    last_error = Column(String(100), nullable=True)
 
 
 class AuthSession(Base):

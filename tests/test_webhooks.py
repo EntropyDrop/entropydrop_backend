@@ -15,6 +15,8 @@ def test_paypal_webhook_rejects_missing_webhook_id(monkeypatch, client):
 
 def test_paypal_webhook_accepts_lowercase_headers_after_signature(monkeypatch, client, db):
     monkeypatch.setattr("routers.webhooks.settings.PAYPAL_WEBHOOK_ID", "WH-123")
+    monkeypatch.setattr("routers.webhooks.settings.PAYPAL_PRO_PLUS_PLAN_ID", "PLAN-PLUS")
+    monkeypatch.setattr(payment_utils, "get_paypal_subscription_api", lambda sid: {"id": sid, "status": "ACTIVE", "plan_id": "PLAN-PLUS"})
 
     def fake_verify(headers, body, webhook_id):
         assert webhook_id == "WH-123"
@@ -83,6 +85,8 @@ def test_verify_paypal_webhook_signature_reads_lowercase_headers(monkeypatch):
 def test_paypal_webhook_dual_route_compatibility(monkeypatch, client, db):
     """Verify PayPal webhooks work identically on both new /api/webhooks/paypal and legacy /skin/api/webhooks/paypal."""
     monkeypatch.setattr("routers.webhooks.settings.PAYPAL_WEBHOOK_ID", "WH-123")
+    monkeypatch.setattr("routers.webhooks.settings.PAYPAL_PRO_PLUS_PLAN_ID", "PLAN-PLUS")
+    monkeypatch.setattr(payment_utils, "get_paypal_subscription_api", lambda sid: {"id": sid, "status": "ACTIVE", "plan_id": "PLAN-PLUS"})
     monkeypatch.setattr("payment_utils.verify_paypal_webhook_signature", lambda headers, body, webhook_id: True)
 
     user_new = models.User(
@@ -161,6 +165,7 @@ def test_paypal_webhook_subscription_payment_sale_completed_dual_route(monkeypat
     def fake_get_subscription(sub_id):
         return {
             "id": sub_id,
+            "status": "ACTIVE",
             "plan_id": "PLAN-PRO-PLUS",
             "billing_info": {
                 "last_payment": {

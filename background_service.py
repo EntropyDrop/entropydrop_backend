@@ -9,6 +9,7 @@ from config import settings
 from routers import generate, order, ledger
 import generation_priority
 import creator_payouts
+import subscription_lifecycle
 
 
 LOCK_KEY = os.getenv("BACKGROUND_LOCK_KEY", "ed:background:singleton")
@@ -66,6 +67,7 @@ async def run_background_tasks() -> None:
 
     from skin_withdrawal import start_withdrawal_job
     tasks = [
+        asyncio.create_task(subscription_lifecycle.start_subscription_reconciliation_job(), name="subscription-reconciliation-job"),
         asyncio.create_task(creator_payouts.start_payout_reconciliation_job(), name="creator-payouts-job"),
         asyncio.create_task(generation_priority.start_pro_priority_job(), name="pro-priority-job"),
         asyncio.create_task(start_withdrawal_job(), name="skin-withdrawal-job"),

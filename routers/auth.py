@@ -302,21 +302,9 @@ def cancel_subscription(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
-    from payment_utils import cancel_paypal_subscription_api
-    
-    sub_id = current_user.paypal_subscription_id
-    if not sub_id or current_user.paypal_subscription_status != "ACTIVE":
-        raise HTTPException(status_code=400, detail="No active auto-renewing subscription found")
-        
-    try:
-        cancel_paypal_subscription_api(sub_id, reason="User cancelled via dashboard")
-        current_user.paypal_subscription_status = "CANCELLED"
-        db.commit()
-        db.refresh(current_user)
-        return {"status": "success", "message": "Subscription cancelled successfully"}
-    except Exception as e:
-        print(f"Failed to cancel subscription: {e}")
-        raise HTTPException(status_code=500, detail="Failed to cancel subscription with PayPal")
+    from subscription_lifecycle import cancel_all
+    return cancel_all(db, current_user.id)
+
 
 @router.post("/api/users/me/username", response_model=schemas.UserResponse)
 def update_username(

@@ -87,6 +87,41 @@ and `.local/` directories.
   `billing_info.last_payment` identifies the paid cycle. Approval preceding
   the first payment preserves the owner binding for the subsequent webhook.
 
+## Subscription cancellation and checkout recovery
+
+Apply migration `e1b75a09c632` before deploying this API and background worker.
+It preserves existing user subscription fields and backfills a separate
+`paypal_subscriptions` contract history. A stored `CANCELLED` display value alone
+is not treated as provider confirmation. The migration does not call PayPal or
+cancel any existing subscriptions. Historical contracts whose IDs were already
+overwritten must be reconciled from PayPal; the migration cannot reconstruct them.
+
+Checkout requests lock the owner row, persist a request ID before contacting
+PayPal, and reuse pending approval links. Retries keep the same request ID and
+original plan/return URL. An unresolved creation older than 71 hours requires
+manual PayPal reconciliation; it must not be retried with a new request ID.
+PayPal documents a [72-hour idempotency retention period](https://developer.paypal.com/api/subscriptions/v1/subscriptions-create).
+
+Cancellation records its intent before external calls and attempts every known
+contract, including pending and suspended subscriptions. HTTP 200 means every
+known contract is confirmed terminal; HTTP 503 means confirmation is incomplete
+and the worker will retry. `CANCELLATION_PENDING` is a local display status that
+keeps the cancellation control available. Paid credits and remaining Pro time
+are preserved. Keep `background_service.py` running for the one-minute retry job.
+
+Callbacks update the matching contract rather than replacing the selected one.
+Provider-confirmed terminal states cannot be restored by delayed events. Legacy
+duplicate approvals and approvals predating a user's cancellation request are
+recorded and cancelled; a completed payment still enters the payment ledger.
+These operations stop further renewal; they do not automatically refund a
+payment already collected by PayPal.
+
+Deploy the API and worker with the migration, then the frontend cancellation
+controls. Avoid running the previous billing code concurrently after reopening
+checkout. Regression coverage is in `tests/test_subscription_lifecycle.py` and
+`tests/test_subscription_postgres.py`; the latter uses disposable PostgreSQL
+databases selected by `REVIEW_POSTGRES_URL`.
+
 ## Model credit pricing
 
 In `/skin/monitor`, every model has **Free** and **Pro** prices plus independent

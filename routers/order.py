@@ -19,8 +19,6 @@ from payment_utils import (
     capture_paypal_order_api,
     get_paypal_order_api,
     get_paypal_subscription_api,
-    create_paypal_subscription_api,
-    revise_paypal_subscription_api,
 )
 import backend_utils
 import generation_priority
@@ -936,35 +934,15 @@ def create_subscription(
         
     plan_id = settings.PAYPAL_PRO_MAX_PLAN_ID if req.tier == "pro_max" else settings.PAYPAL_PRO_PLUS_PLAN_ID
     
-    is_upgrade = current_user.paypal_subscription_status == "ACTIVE" and current_user.paypal_subscription_id
-    
+    from subscription_lifecycle import create_checkout
     try:
-        if is_upgrade:
-            rev_res = revise_paypal_subscription_api(current_user.paypal_subscription_id, plan_id)
-            approve_link = next((link["href"] for link in rev_res.get("links", []) if link["rel"] == "approve"), None)
-            if not approve_link:
-                raise HTTPException(status_code=500, detail="Failed to retrieve approval URL from revision response")
-            return {
-                "approval_url": approve_link,
-                "subscription_id": current_user.paypal_subscription_id
-            }
-        else:
-            sub_res = create_paypal_subscription_api(
-                plan_id=plan_id,
-                custom_id=current_user.id,
-                return_url=req.return_url,
-                cancel_url=req.return_url
-            )
-            approve_link = next((link["href"] for link in sub_res.get("links", []) if link["rel"] == "approve"), None)
-            if not approve_link:
-                raise HTTPException(status_code=500, detail="Failed to retrieve approval URL from subscription response")
-            return {
-                "approval_url": approve_link,
-                "subscription_id": sub_res["id"]
-            }
-    except Exception as e:
-        print(f"Error creating/revising subscription: {e}")
-        raise HTTPException(status_code=500, detail="Failed to initialize subscription checkout")
+        return create_checkout(db, current_user.id, plan_id, req.return_url)
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Subscription checkout could not be verified; retry shortly")
+
 
 
 @router.post("/subscription/activate")
@@ -983,7 +961,8 @@ def activate_subscription(
     if not req.paypal_order_id:
         raise HTTPException(status_code=400, detail="Subscription ID required")
 
-    current_user = db.query(models.User).filter_by(id=current_user.id).with_for_update().populate_existing().one()
+    from subscription_lifecycle import lock_user
+    current_user = lock_user(db, current_user.id)
     sub_id = req.paypal_order_id # We reuse paypal_order_id field for subscription ID in PayRequest
     _validate_paypal_id(sub_id, "Subscription ID")
     
@@ -1019,8 +998,11 @@ def activate_subscription(
             if subscriber_email != current_user.email.lower():
                 raise HTTPException(status_code=403, detail="Subscription does not belong to current user")
 
-        current_user.paypal_subscription_id = sub_id
-        current_user.paypal_subscription_status = "ACTIVE"
+        from subscription_lifecycle import remember, select_contract
+        contract = remember(db, current_user, sub_id, sub_data)
+        if not select_contract(db, current_user, contract, explicit=True):
+            db.commit()
+            raise HTTPException(status_code=409, detail="This subscription was cancelled; refresh your account")
 
         from subscription_billing import paid_cycle
         try:
