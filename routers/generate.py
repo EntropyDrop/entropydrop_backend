@@ -20,6 +20,7 @@ from config import settings
 from pipeline_registry import (
     MODEL_PIPELINES,
     SKING_DDJ_V130,
+    SKING_DDJ_V131,
     SKING_DDJ_MODEL_PREFIX,
     get_pipeline,
     is_sking_ddj_model,
@@ -462,7 +463,7 @@ def display_log_name(log):
 
 ALLOWED_MODES = {"aigc_image_to_skin", "aigc_text_to_skin", "aigc_image_edit_to_skin"}
 
-AVAILABLE_IMAGE_TO_SKIN_MODELS = [SKING_DDJ_V130]
+AVAILABLE_IMAGE_TO_SKIN_MODELS = [SKING_DDJ_V131, SKING_DDJ_V130]
 
 AVAILABlE_TEXT_TO_IMAGE_MODELS = [
     'z_image'
