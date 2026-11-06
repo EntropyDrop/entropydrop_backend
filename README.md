@@ -287,3 +287,30 @@ Buy Now requires migration `c6a841f2309d`. It creates an order with
 `checkout_mode: buy_now`, which never merges into shopping carts. Existing
 orders and clients retain `checkout_mode: cart`. Deploy the migration and API
 before enabling the new frontend button.
+
+
+## Public financial ledger
+
+`GET /api/public/ledger` and its `/api/open/ledger` and `/skin` aliases publish
+PayPal totals grouped by UTC calendar month, currency, and a fixed category.
+Categories use structured event codes (including historical refund/reversal
+records) or an allowlisted category; transaction titles are never classifiers.
+Public PayPal rows contain monthly net inflow and positive/negative flow totals,
+not payer names/emails, transaction IDs, original titles, individual timestamps,
+raw payloads or sync error details. `summaries.*.count` counts published rows.
+`by_currency` contains separate totals; legacy scalar totals are null for mixed
+currencies. No currency conversion is performed. AWS rows keep their existing
+format. Responses use `Cache-Control: no-store`.
+
+This is a read-time projection: existing internal `ExternalLedgerEntry` records
+and the PayPal synchronization/reconciliation path are unchanged. No migration
+or deletion of accounting data is needed. Deploy the backend before the updated
+frontend, and invalidate any existing public ledger API caches (including legacy
+URLs). Previously downloaded or externally cached copies cannot be recalled by
+this change. Frontend clients reject legacy individual PayPal rows and render
+fixed category labels; financial charts select a single currency.
+
+Verify with `python -m pytest -q tests/test_ledger.py tests/test_api_routes.py` in
+the isolated test environment. Tests cover all four public route aliases,
+monthly/currency/category separation, refunds, UTC boundaries, private-field
+exclusion, internal-record preservation, and sync errors.

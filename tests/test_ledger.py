@@ -1,4 +1,7 @@
 import datetime
+import json
+
+import pytest
 
 import models
 from routers import ledger
@@ -204,3 +207,110 @@ def test_anonymization_in_synced_ledger():
     assert anonymize_name("John", "Doe") == "J*** D***"
     assert anonymize_name("A", "B") == "A B"
     assert anonymize_name("", "") == "User"
+
+
+@pytest.mark.parametrize("route", [
+    "/api/public/ledger", "/skin/api/public/ledger",
+    "/api/open/ledger", "/skin/api/open/ledger",
+])
+def test_public_paypal_monthly_groups_hide_details_and_preserve_internal_records(client, db, route):
+    private_title = "Private title for 明 王 private-payer@example.test"
+    for external_id, amount, currency, event_code, month in [
+        ("PRIVATE-TX-ONE", 19.01, "USD", "T0000", 5),
+        ("PRIVATE-TX-TWO", 5.02, "usd", "T0000", 5),
+        ("PRIVATE-TX-REFUND", -8.00, "USD", "T1107", 5),
+        ("PRIVATE-TX-EUR", 7.00, "EUR", "T0000", 5),
+        ("PRIVATE-TX-JUNE", 4.00, "USD", "T0000", 6),
+    ]:
+        add_external_entry(db, external_id=external_id, amount=amount, currency=currency,
+            posted_at=datetime.datetime(2026, month, 24, 8, 30, tzinfo=datetime.timezone.utc),
+            provider_account="private-payer@example.test", description=private_title,
+            public_description=private_title, source="Private source",
+            raw_payload={"event_code": event_code, "private_data": private_title})
+    add_external_entry(db, external_id="PRIVATE-PENDING", amount=1000, status="pending")
+    add_external_entry(db, external_id="PRIVATE-FAILED", amount=2000, status="failed")
+    db.add(models.LedgerSyncRun(provider="paypal", source=ledger.PAYPAL_SOURCE,
+        status="error", started_at=ledger.utc_now(), error_message=private_title))
+    db.commit()
+    before = {row.id: {column.name: getattr(row, column.name) for column in row.__table__.columns}
+        for row in db.query(models.ExternalLedgerEntry).all()}
+
+    response = client.get(route)
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    data = response.json()
+    serialized = json.dumps(data, ensure_ascii=False)
+    for private in ["PRIVATE-", "明", "王", "private-payer", "Private title", "Private source", "08:30"]:
+        assert private not in serialized
+    rows = {(row["date"], row["currency"], row["category"]): row for row in data["entries"]}
+    assert len(rows) == 4
+    assert rows[("2026-05", "USD", "payment")]["amount_value"] == 24.03
+    assert rows[("2026-05", "USD", "refund_reversal")]["amount_value"] == -8
+    assert rows[("2026-05", "EUR", "payment")]["amount_value"] == 7
+    assert rows[("2026-06", "USD", "payment")]["amount_value"] == 4
+    for row in rows.values():
+        assert set(row) == {"id", "date", "aggregation", "type", "provider", "category",
+            "source", "desc", "amount", "amount_value", "revenue_value", "expense_value", "currency", "status"}
+        assert row["aggregation"] == "monthly"
+        assert row["id"] == f"paypal-monthly:{row['date']}:{row['currency']}:{row['category']}"
+    summary = data["summaries"]["paypal"]
+    assert summary["total"] is None
+    assert summary["total_value"] is None
+    assert summary["by_currency"]["USD"]["total_value"] == 20.03
+    assert summary["by_currency"]["EUR"]["total_value"] == 7
+    assert summary["by_currency"]["USD"]["revenue_value"] == 28.03
+    assert summary["by_currency"]["USD"]["expense_value"] == -8
+    assert data["sync"]["paypal"]["status"] == "error"
+    db.expire_all()
+    after = {row.id: {column.name: getattr(row, column.name) for column in row.__table__.columns}
+        for row in db.query(models.ExternalLedgerEntry).all()}
+    assert after == before
+
+
+def test_public_paypal_keeps_inflows_and_outflows_within_same_group(client, db):
+    for external_id, amount in [("POSITIVE", 10), ("NEGATIVE", -3), ("CENT-A", 0.1), ("CENT-B", 0.2)]:
+        add_external_entry(db, external_id=external_id, amount=amount)
+    db.commit()
+    data = client.get("/api/public/ledger").json()
+    assert len(data["entries"]) == 1
+    row = data["entries"][0]
+    assert row["amount_value"] == 7.3
+    assert row["revenue_value"] == 10.3
+    assert row["expense_value"] == -3
+    assert data["summaries"]["paypal"]["total_value"] == 7.3
+
+
+def test_public_paypal_uses_utc_month_and_fixed_categories():
+    row = models.ExternalLedgerEntry(provider="paypal", posted_at=datetime.datetime(
+        2026, 5, 1, 0, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=8))),
+        currency="eur", category="PRIVATE-CATEGORY", amount=2, raw_payload={})
+    public = ledger.public_paypal_monthly_entries([row])[0]
+    assert public["date"] == "2026-04"
+    assert public["currency"] == "EUR"
+    assert public["category"] == "other"
+    assert "PRIVATE" not in json.dumps(public)
+    row.currency = "PRIVATE"
+    assert ledger.public_paypal_monthly_entries([row])[0]["currency"] == "XXX"
+    with pytest.raises(ValueError):
+        ledger.public_entry_from_model(row)
+
+
+def test_public_sync_does_not_expose_fallback_errors(client, monkeypatch):
+    monkeypatch.setattr(ledger, "_paypal_sync_state", {
+        "status": "error", "message": "PRIVATE-TX payer@example.test", "raw_payload": {"name": "Private"},
+    })
+    data = client.get("/api/public/ledger").json()
+    assert data["sync"]["paypal"]["status"] == "error"
+    assert "PRIVATE" not in json.dumps(data)
+    assert "message" not in data["sync"]["paypal"]
+
+
+@pytest.mark.parametrize("event_code,category", [
+    ("T0002", "payment"), ("T1107", "refund_reversal"), ("T0107", "fee"),
+    ("T0201", "currency_conversion"), ("T0300", "transfer"), ("T0400", "transfer"),
+    ("T1700", "transfer"), ("T2000", "transfer"), ("T9900", "other"),
+])
+def test_public_paypal_classifies_historical_records_from_structured_event_codes(event_code, category):
+    row = models.ExternalLedgerEntry(category="payment", raw_payload={"event_code": event_code},
+        description="PRIVATE-TITLE", public_description="PRIVATE-TITLE")
+    assert ledger.paypal_public_category(row) == category

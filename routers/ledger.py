@@ -1,10 +1,12 @@
 import asyncio
 import datetime
 import hashlib
+import re
+from decimal import Decimal
 from typing import Any
 
 import boto3
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from sqlalchemy.orm import Session
 
 import models
@@ -20,6 +22,14 @@ AWS_SOURCE = "AWS Cost Explorer"
 PAYPAL_SUCCESS_STATUSES = {"S", "SUCCESS", "COMPLETED"}
 PUBLIC_LEDGER_STATUSES = {"posted", "estimated"}
 PUBLIC_LEDGER_PROVIDERS = {"paypal", "aws", "bank"}
+PAYPAL_PUBLIC_CATEGORIES = {
+    "payment": "Payments",
+    "refund_reversal": "Refunds and reversals",
+    "fee": "Fees",
+    "transfer": "Transfers",
+    "currency_conversion": "Currency conversions",
+    "other": "Other activity",
+}
 
 _paypal_sync_state: dict[str, Any] = {"status": "not_synced", "last_synced_at": None}
 _aws_sync_state: dict[str, Any] = {"status": "not_synced", "last_synced_at": None}
@@ -50,7 +60,7 @@ def parse_amount_value(value: Any) -> float:
         return 0.0
 
 
-def format_money(amount: float, currency: str = "USD") -> str:
+def format_money(amount: float | Decimal, currency: str = "USD") -> str:
     sign = "+" if amount >= 0 else "-"
     prefix = "$" if currency.upper() == "USD" else f"{currency.upper()} "
     return f"{sign}{prefix}{abs(amount):.2f}"
@@ -155,21 +165,20 @@ def sync_state_from_db(db: Session, provider: str, fallback: dict[str, Any]) -> 
         models.LedgerSyncRun.provider == provider
     ).order_by(models.LedgerSyncRun.started_at.desc()).first()
 
-    if not run:
-        return fallback
-
+    # Error messages and provider responses can contain customer identifiers.
+    # Keep them in the internal sync log, never in the public response.
+    status = run.status if run else fallback.get("status")
     return {
-        "status": run.status,
-        "last_synced_at": isoformat_z(run.finished_at or run.started_at) if run.status == "ok" else None,
-        "records_inserted": run.records_inserted or 0,
-        "records_updated": run.records_updated or 0,
-        "range_start": isoformat_z(run.range_start) if run.range_start else None,
-        "range_end": isoformat_z(run.range_end) if run.range_end else None,
-        "message": run.error_message,
+        "status": status if status in {"ok", "error", "not_synced", "not_configured", "skipped"} else "unknown",
+        "last_synced_at": (
+            isoformat_z(run.finished_at or run.started_at) if run else fallback.get("last_synced_at")
+        ) if status == "ok" else None,
     }
 
 
 def public_entry_from_model(entry: models.ExternalLedgerEntry) -> dict[str, Any]:
+    if entry.provider == "paypal":
+        raise ValueError("PayPal entries must be aggregated before publication")
     posted_at = entry.posted_at or entry.created_at or utc_now()
     amount = round(entry.amount or 0.0, 2)
     public_type = entry.entry_type if entry.entry_type in {"revenue", "expense"} else (
@@ -205,30 +214,113 @@ def public_entry_from_model(entry: models.ExternalLedgerEntry) -> dict[str, Any]
     return result
 
 
+def public_currency(value: str | None) -> str:
+    currency = (value or "USD").strip().upper()
+    return currency if re.fullmatch(r"[A-Z]{3}", currency) else "XXX"
+
+
+def paypal_public_category(entry: models.ExternalLedgerEntry) -> str:
+    # Existing records all used category=payment. Recover refunds from the
+    # structured event code without ever inspecting or publishing free text.
+    payload = entry.raw_payload if isinstance(entry.raw_payload, dict) else {}
+    event_code = str(payload.get("event_code") or "")
+    if re.fullmatch(r"T[0-9]{4}", event_code):
+        # PayPal's documented accounting event groups:
+        # https://developer.paypal.com/reports/reference/t-codes
+        return {
+            "T00": "payment", "T01": "fee", "T02": "currency_conversion",
+            "T03": "transfer", "T04": "transfer", "T17": "transfer",
+            "T20": "transfer", "T11": "refund_reversal",
+        }.get(event_code[:3], "other")
+    return entry.category if entry.category in PAYPAL_PUBLIC_CATEGORIES else "other"
+
+
+def public_paypal_monthly_entries(rows: list[models.ExternalLedgerEntry]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str, str], dict[str, Decimal]] = {}
+    for row in rows:
+        posted_at = row.posted_at or row.created_at
+        if posted_at is None:
+            continue
+        if posted_at.tzinfo is None:
+            posted_at = posted_at.replace(tzinfo=datetime.timezone.utc)
+        month = posted_at.astimezone(datetime.timezone.utc).strftime("%Y-%m")
+        key = (month, public_currency(row.currency), paypal_public_category(row))
+        totals = groups.setdefault(key, {"revenue": Decimal(0), "expense": Decimal(0)})
+        amount = Decimal(str(row.amount or 0))
+        totals["revenue" if amount >= 0 else "expense"] += amount
+
+    entries = []
+    for (month, currency, category), totals in sorted(groups.items(), reverse=True):
+        revenue = round(totals["revenue"], 2)
+        expense = round(totals["expense"], 2)
+        amount = revenue + expense
+        # Explicit allowlist: no fields are copied from a transaction record.
+        entries.append({
+            "id": f"paypal-monthly:{month}:{currency}:{category}",
+            "date": month,
+            "aggregation": "monthly",
+            "type": "revenue" if amount >= 0 else "expense",
+            "provider": "paypal",
+            "category": category,
+            "source": PAYPAL_SOURCE,
+            "desc": PAYPAL_PUBLIC_CATEGORIES[category],
+            "amount": format_money(amount, currency),
+            "amount_value": float(amount),
+            "revenue_value": float(revenue),
+            "expense_value": float(expense),
+            "currency": currency,
+            "status": "posted",
+        })
+    return entries
+
+
 def public_external_entries(db: Session) -> list[dict[str, Any]]:
     rows = db.query(models.ExternalLedgerEntry).filter(
         models.ExternalLedgerEntry.provider.in_(PUBLIC_LEDGER_PROVIDERS),
         models.ExternalLedgerEntry.status.in_(PUBLIC_LEDGER_STATUSES)
     ).order_by(models.ExternalLedgerEntry.posted_at.desc()).all()
-    return [public_entry_from_model(row) for row in rows]
+    entries = [public_entry_from_model(row) for row in rows if row.provider != "paypal"]
+    entries.extend(public_paypal_monthly_entries([row for row in rows if row.provider == "paypal"]))
+    return sorted(entries, key=lambda entry: (entry["date"], entry["id"]), reverse=True)
 
 
 def build_summary(entries: list[dict[str, Any]], provider: str | None = None) -> dict[str, Any]:
     scoped = [entry for entry in entries if provider is None or entry.get("provider") == provider]
-    values = [parse_amount_value(entry.get("amount_value", entry.get("amount"))) for entry in scoped]
-    total_value = round(sum(values), 2)
-    revenue_value = round(sum(max(value, 0.0) for value in values), 2)
-    expense_value = round(sum(min(value, 0.0) for value in values), 2)
-    last_entry_at = max((entry.get("date") for entry in scoped), default=None)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for entry in scoped:
+        grouped.setdefault(public_currency(entry.get("currency")), []).append(entry)
+    by_currency = {}
+    for currency, currency_entries in sorted(grouped.items()):
+        revenue = Decimal(0)
+        expense = Decimal(0)
+        for entry in currency_entries:
+            amount = Decimal(str(parse_amount_value(entry.get("amount_value", entry.get("amount")))))
+            revenue += Decimal(str(entry.get("revenue_value", max(amount, 0))))
+            expense += Decimal(str(entry.get("expense_value", min(amount, 0))))
+        revenue_value, expense_value = float(round(revenue, 2)), float(round(expense, 2))
+        total_value = float(round(revenue + expense, 2))
+        by_currency[currency] = {
+            "currency": currency,
+            "count": len(currency_entries),
+            "total": format_money(total_value, currency),
+            "total_value": total_value,
+            "revenue": format_money(revenue_value, currency),
+            "revenue_value": revenue_value,
+            "expense": format_money(expense_value, currency),
+            "expense_value": expense_value,
+        }
+    # Preserve single-currency consumers without inventing an exchange rate.
+    single = next(iter(by_currency.values())) if len(by_currency) == 1 else {}
     return {
         "count": len(scoped),
-        "total": format_money(total_value, "USD"),
-        "total_value": total_value,
-        "revenue": format_money(revenue_value, "USD"),
-        "revenue_value": revenue_value,
-        "expense": format_money(expense_value, "USD"),
-        "expense_value": expense_value,
-        "last_entry_at": last_entry_at,
+        "by_currency": by_currency,
+        "total": single.get("total", None if scoped else "+$0.00"),
+        "total_value": single.get("total_value", None if scoped else 0.0),
+        "revenue": single.get("revenue", None if scoped else "+$0.00"),
+        "revenue_value": single.get("revenue_value", None if scoped else 0.0),
+        "expense": single.get("expense", None if scoped else "+$0.00"),
+        "expense_value": single.get("expense_value", None if scoped else 0.0),
+        "last_entry_at": max((entry.get("date") for entry in scoped), default=None),
     }
 
 
@@ -518,7 +610,8 @@ async def start_paypal_sync_job() -> None:
 
 @legacy_open_router.get("/ledger", include_in_schema=False)
 @router.get("/ledger")
-async def get_public_ledger(db: Session = Depends(get_db)):
+async def get_public_ledger(response: Response, db: Session = Depends(get_db)):
+    response.headers["Cache-Control"] = "no-store"
     entries = public_external_entries(db)
 
     return {
