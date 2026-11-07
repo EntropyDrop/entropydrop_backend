@@ -2,6 +2,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 
+SKING_DDJ_V131 = "SKING_DDJ_v131"
 SKING_DDJ_V130 = "SKING_DDJ_v130"
 SKING_DDJ_V101C = "SKING_DDJ_v101c"
 SKING_DDJ_V104B = "SKING_DDJ_v104b"
@@ -53,6 +54,11 @@ _V104B_PIPELINE = SkinPipelineSpec(
 # v101c changes only the UV release; generation assets and settings stay identical.
 MODEL_PIPELINES = MappingProxyType(
     {
+        SKING_DDJ_V131: replace(
+            _V104B_PIPELINE,
+            dense_uv_checkpoint_file="SKING_DDJ_v131/parser.pt",
+            DMR_mappings_dir="SKING_DDJ_v131/mappings",
+        ),
         SKING_DDJ_V130: replace(
             _V104B_PIPELINE,
             dense_uv_checkpoint_file="SKING_DDJ_v130/parser.pt",

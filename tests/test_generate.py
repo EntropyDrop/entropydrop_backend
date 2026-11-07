@@ -61,18 +61,29 @@ def test_get_models(client):
     response = client.get("/skin/api/models")
     assert response.status_code == 200
     data = response.json()
-    assert "image_to_skin_models" in data
-    assert "sking_v73_flux_4b_000027000" in data["image_to_skin_models"]
-    assert SKING_DDJ_V101C in data["image_to_skin_models"]
-    assert SKING_DDJ_V104B not in data["image_to_skin_models"]
-    assert SKING_DDJ_V104 not in data["image_to_skin_models"]
-    assert SKING_DDJ_V61B not in data["image_to_skin_models"]
-    assert "SKING_DDJ_v54" not in data["image_to_skin_models"]
-    assert "SKING_DDJ_v61" not in data["image_to_skin_models"]
-    assert "SKING_DDJ_v66" not in data["image_to_skin_models"]
-    assert "SkingDDJ_v1" not in data["image_to_skin_models"]
-    assert "text_to_image_models" in data
-    assert "image_edit_models" in data
+    assert data["image_to_skin_models"] == ["SKING_DDJ_v131"]
+    assert data["image_to_skin_options"]
+    assert all(option["model_version"] == "SKING_DDJ_v131" for option in data["image_to_skin_options"])
+    assert data["text_to_skin_options"] == []
+    assert data["image_edit_to_skin_options"] == []
+
+
+def test_retired_v130_rejected_before_billing_or_enqueue(client):
+    with patch("routers.generate.backend_utils.is_image_to_skin_enabled", return_value=True), \
+         patch("routers.generate.lock_balance") as billing, \
+         patch("routers.generate.Queue") as queue:
+        response = client.post("/skin/api/generate", data={
+            "mode": "aigc_image_to_skin", "model_version": "SKING_DDJ_v130",
+        })
+    assert response.status_code == 400
+    assert "Invalid model version" in response.json()["detail"]
+    billing.assert_not_called()
+    queue.assert_not_called()
+
+
+def test_retired_v130_history_pipeline_preserved():
+    from pipeline_registry import get_pipeline
+    assert get_pipeline("SKING_DDJ_v130").dense_uv_checkpoint_file == "SKING_DDJ_v130/parser.pt"
 
 
 @patch("routers.generate.backend_utils.get_generation_credit_cost", return_value=5)
