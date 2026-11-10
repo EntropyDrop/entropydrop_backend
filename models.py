@@ -28,8 +28,6 @@ class User(Base):
     last_login_date = Column(Date, nullable=True)
     terms_agreed = Column(Boolean, default=False) # Whether user agreed to terms of service
     is_creator = Column(Boolean, nullable=False, default=False, server_default="0")
-    figure_print_terms_version = Column(String(32), nullable=True)
-    figure_print_terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
     
     # Subscription fields
     pro_expires_at = Column(DateTime(timezone=True), nullable=True)
@@ -393,11 +391,16 @@ class CreatorPayout(Base):
     request_key = Column(String(64), nullable=False)
     amount_cents = Column(Integer, nullable=False)
     currency = Column(String(3), nullable=False, default="USD")
-    paypal_email = Column(String(127), nullable=False)
+    payout_email = Column(String(127), nullable=False)  # Contact email we use to arrange the Stripe transfer
     status = Column(String(32), nullable=False, default="pending_review", index=True)
     reviewed_by = Column(String(16), ForeignKey("users.id"), nullable=True)
     reviewed_at = Column(DateTime(timezone=True), nullable=True)
     review_note = Column(String(500), nullable=True)
+    # Manual withdrawals: the fee is deducted from amount_cents, so the creator receives amount_cents - fee_cents.
+    fee_cents = Column(Integer, nullable=True)
+    transfer_reference = Column(String(100), nullable=True, unique=True)  # Stripe transfer receipt
+    paid_at = Column(DateTime(timezone=True), nullable=True)
+    # Legacy PayPal Payouts audit and retry fields. No longer written; kept for rows created before manual withdrawals.
     paypal_batch_id = Column(String(100), nullable=True, unique=True)
     paypal_item_id = Column(String(100), nullable=True, unique=True)
     paypal_transaction_id = Column(String(100), nullable=True)
@@ -413,6 +416,7 @@ class CreatorPayout(Base):
         UniqueConstraint("creator_user_id", "request_key", name="uq_creator_payout_request"),
         CheckConstraint("amount_cents > 0", name="ck_creator_payout_amount"),
         CheckConstraint("currency = 'USD'", name="ck_creator_payout_currency"),
+        CheckConstraint("fee_cents IS NULL OR (fee_cents >= 0 AND fee_cents < amount_cents)", name="ck_creator_payout_fee"),
     )
 
 

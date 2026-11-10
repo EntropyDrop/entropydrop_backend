@@ -1,30 +1,23 @@
-"""Creator balances and durable, idempotent payout processing (USD integer cents)."""
-import asyncio
+"""Creator balances and manually processed withdrawals (USD integer cents)."""
 import hashlib
 import hmac
-import logging
 import re
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from fastapi import HTTPException
 from sqlalchemy import and_, func, or_
+from sqlalchemy.exc import IntegrityError
 import models
 from config import settings
 from creator_referrals import utc
-from database import SessionLocal
-from paypal_payouts import create_batch, get_batch, PayoutTransportError
 
-logger = logging.getLogger(__name__)
+# Requests reserve the creator balance until an administrator records the Stripe transfer or rejects them.
+# The PayPal-era statuses stay reserved too, so rows created before manual withdrawals are resolved the same way.
 HELD = ("pending_review", "processing", "unclaimed", "on_hold", "manual_review")
-RECONCILE = ("processing", "unclaimed", "on_hold", "paid")
 COMMISSION_HOLD_DAYS = 3
+PAYOUT_DAYS = 5  # We process withdrawal requests within this many days.
 
 
 def now(): return datetime.now(timezone.utc)
-
-
-def configured():
-    return bool(settings.PAYPAL_PAYOUTS_ENABLED and settings.PAYPAL_CLIENT_ID and settings.PAYPAL_SECRET
-                and settings.PAYPAL_API_BASE.rstrip('/') in ("https://api-m.paypal.com", "https://api-m.sandbox.paypal.com"))
 
 
 def email_address(value):
@@ -79,8 +72,11 @@ def event(db, payout, name, actor=None):
 
 
 def payout_response(payout, db, admin=False):
-    result = {name: getattr(payout, name) for name in ("id", "amount_cents", "currency", "paypal_email", "status", "created_at", "updated_at",
-              "reviewed_at", "review_note", "paypal_batch_id", "paypal_transaction_id", "paypal_status", "last_error")}
+    result = {name: getattr(payout, name) for name in ("id", "amount_cents", "fee_cents", "currency", "payout_email", "status", "created_at", "updated_at",
+              "reviewed_at", "review_note", "paid_at")}
+    result["net_cents"] = None if payout.fee_cents is None else payout.amount_cents - payout.fee_cents
+    result["transfer_reference"] = payout.transfer_reference or payout.paypal_transaction_id
+    result["due_at"] = utc(payout.created_at) + timedelta(days=PAYOUT_DAYS) if payout.created_at else None
     result["events"] = [{"status": row.status, "event": row.event, "created_at": row.created_at} for row in db.query(models.CreatorPayoutEvent)
                         .filter_by(payout_id=payout.id).order_by(models.CreatorPayoutEvent.created_at, models.CreatorPayoutEvent.id).all()]
     if admin:
@@ -89,113 +85,46 @@ def payout_response(payout, db, admin=False):
     return result
 
 
-def apply_paypal_result(payout, data):
-    header = data.get("batch_header", {})
-    batch_id = header.get("payout_batch_id")
-    if not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9]+", batch_id):
-        raise PayoutTransportError("paypal_invalid_batch")
-    sender_id = header.get("sender_batch_header", {}).get("sender_batch_id")
-    if sender_id != f"creator-{payout.id}" or (payout.paypal_batch_id and batch_id != payout.paypal_batch_id):
-        raise PayoutTransportError("paypal_mismatch")
-    payout.paypal_batch_id = batch_id
-    items = data.get("items", [])
-    if not items:
-        # A successful batch is not proof that its recipient was paid.
-        if payout.status != "paid" and header.get("batch_status") in ("DENIED", "CANCELED"):
-            payout.status = "failed"
-            payout.paypal_status = header["batch_status"]
-        return
-    if len(items) != 1:
-        raise PayoutTransportError("paypal_mismatch")
-    item, expected = items[0], Decimal(payout.amount_cents) / 100
-    recipient = item.get("payout_item", {})
-    amount = recipient.get("amount", {})
-    try: received = Decimal(str(amount.get("value", "")))
-    except InvalidOperation: raise PayoutTransportError("paypal_mismatch")
-    if (recipient.get("sender_item_id") != payout.id or recipient.get("receiver", "").lower() != payout.paypal_email
-        or amount.get("currency") != "USD" or not received.is_finite() or received != expected):
-        raise PayoutTransportError("paypal_mismatch")
-    status = item.get("transaction_status")
-    mapped = {"SUCCESS": "paid", "PENDING": "processing", "UNCLAIMED": "unclaimed", "ONHOLD": "on_hold", "BLOCKED": "on_hold",
-              "FAILED": "failed", "DENIED": "failed", "RETURNED": "returned", "REFUNDED": "returned", "REVERSED": "returned", "CANCELED": "returned"}
-    if status not in mapped: raise PayoutTransportError("paypal_unknown_status")
-    if payout.status == "paid" and mapped[status] not in ("paid", "returned"):
-        return  # Never let a delayed pending/failure response reopen a paid balance.
-    payout.status, payout.paypal_status = mapped[status], status
-    payout.paypal_item_id = item.get("payout_item_id") or payout.paypal_item_id
-    payout.paypal_transaction_id = item.get("transaction_id") or payout.paypal_transaction_id
+TRANSFER_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{2,99}")
 
 
-def process_payout(db, payout_id, force=False):
-    """Commit a lease before I/O. Crashes/retries always retain the same sender ID."""
-    if not configured(): return
+def locked_payout(db, payout_id):
     initial = db.get(models.CreatorPayout, payout_id)
-    if not initial: return
+    if not initial: raise HTTPException(404, "creator_payout_not_found")
     lock_creator(db, initial.creator_user_id)
-    payout = db.query(models.CreatorPayout).filter_by(id=payout_id).with_for_update().populate_existing().one()
+    return db.query(models.CreatorPayout).filter_by(id=payout_id).with_for_update().populate_existing().one()
+
+
+def record_transfer(db, payout_id, admin_id, transfer_reference, fee_cents, note=""):
+    """Record the Stripe transfer receipt. The creator's balance drops by the full requested
+    amount; the fee comes out of that amount, so the creator receives amount - fee."""
+    payout = locked_payout(db, payout_id)
+    reference = transfer_reference.strip()
+    if not TRANSFER_REFERENCE.fullmatch(reference): raise HTTPException(422, "creator_transfer_reference_invalid")
+    if payout.status == "paid":
+        if payout.transfer_reference == reference and payout.fee_cents == fee_cents: return payout
+        raise HTTPException(409, "creator_payout_changed")
+    if payout.status not in HELD: raise HTTPException(409, "creator_payout_changed")
+    if fee_cents < 0 or fee_cents >= payout.amount_cents: raise HTTPException(422, "creator_fee_invalid")
+    if balance(db, payout.creator_user_id)["adjustment_cents"]: raise HTTPException(409, "creator_insufficient_balance")
+    if db.query(models.CreatorPayout.id).filter(models.CreatorPayout.transfer_reference == reference, models.CreatorPayout.id != payout.id).first():
+        raise HTTPException(409, "creator_transfer_reference_used")
     current = now()
-    if payout.status not in RECONCILE + ("manual_review",) or (payout.processing_until and utc(payout.processing_until) > current):
-        db.rollback(); return
-    if not force and payout.next_check_at and utc(payout.next_check_at) > current:
-        db.rollback(); return
-    if not payout.paypal_batch_id and payout.first_sent_at and utc(payout.first_sent_at) < current - timedelta(days=29):
-        payout.status = "manual_review"; payout.last_error = "paypal_retry_window_expired"
-        event(db, payout, payout.last_error); db.commit(); return
-    if payout.status == "manual_review" and not payout.paypal_batch_id:
-        db.rollback(); return
-    if not payout.first_sent_at:
-        if balance(db, payout.creator_user_id)["adjustment_cents"]:
-            payout.status = "rejected"; payout.review_note = "balance_changed"
-            event(db, payout, "balance_changed"); db.commit(); return
-        payout.first_sent_at = current
-    payout.processing_until = current + timedelta(seconds=90)
-    payout.attempt_count += 1
-    attempt = payout.attempt_count
-    batch_id, email, cents = payout.paypal_batch_id, payout.paypal_email, payout.amount_cents
+    payout.status, payout.transfer_reference, payout.fee_cents = "paid", reference, fee_cents
+    payout.paid_at, payout.reviewed_by, payout.reviewed_at, payout.review_note = current, admin_id, current, note.strip() or None
+    event(db, payout, "paid", admin_id)
+    try: db.commit()
+    except IntegrityError:
+        db.rollback(); raise HTTPException(409, "creator_transfer_reference_used")
+    return payout
+
+
+def reject_request(db, payout_id, admin_id, note):
+    payout = locked_payout(db, payout_id)
+    if payout.status == "rejected": return payout
+    if payout.status not in HELD: raise HTTPException(409, "creator_payout_changed")
+    if not note.strip(): raise HTTPException(400, "creator_rejection_reason_required")
+    payout.status, payout.reviewed_by, payout.reviewed_at, payout.review_note = "rejected", admin_id, now(), note.strip()
+    event(db, payout, "rejected", admin_id)
     db.commit()
-    error, definitive, data = None, False, None
-    try:
-        data = get_batch(batch_id) if batch_id else create_batch(payout_id, cents, email)
-    except PayoutTransportError as exc:
-        error, definitive = exc.code, exc.definitive
-    except Exception:
-        error = "paypal_unconfirmed"
-    lock_creator(db, initial.creator_user_id)
-    payout = db.query(models.CreatorPayout).filter_by(id=payout_id).with_for_update().populate_existing().one()
-    if payout.attempt_count != attempt:
-        db.rollback(); return
-    previous = payout.status, payout.last_error
-    if data is not None:
-        try: apply_paypal_result(payout, data)
-        except (PayoutTransportError, TypeError, AttributeError, ValueError) as exc:
-            error = exc.code if isinstance(exc, PayoutTransportError) else "paypal_mismatch"
-    if payout.status != "paid" and error in ("paypal_mismatch", "paypal_invalid_batch", "paypal_duplicate_unresolved", "paypal_unknown_status"):
-        payout.status = "manual_review"
-    elif definitive and not batch_id and attempt == 1:
-        # A rejection after an earlier timeout cannot disprove that the earlier
-        # submission succeeded. Keep that money reserved until reconciled.
-        payout.status = "failed"
-    payout.last_error = error
-    payout.processing_until = None
-    interval = 86400 if payout.status == "paid" else min(900, 30 * 2 ** min(attempt, 5))
-    payout.next_check_at = now() + timedelta(seconds=interval)
-    if previous != (payout.status, payout.last_error): event(db, payout, error or "paypal_status_updated")
-    db.commit()
-
-
-def reconcile_due():
-    if not configured(): return
-    with SessionLocal() as db:
-        ids = db.query(models.CreatorPayout.id).filter(models.CreatorPayout.status.in_(RECONCILE),
-              or_(models.CreatorPayout.next_check_at.is_(None), models.CreatorPayout.next_check_at <= now())).order_by(models.CreatorPayout.next_check_at).limit(50).all()
-    for (payout_id,) in ids:
-        with SessionLocal() as db:
-            try: process_payout(db, payout_id)
-            except Exception:
-                db.rollback(); logger.exception("Creator payout reconciliation failed for %s", payout_id)
-
-
-async def start_payout_reconciliation_job():
-    while True:
-        await asyncio.to_thread(reconcile_due)
-        await asyncio.sleep(30)
+    return payout

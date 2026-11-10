@@ -47,18 +47,20 @@ and `.local/` directories.
 
 ## Production Notes
 
-- Revision `e6b93f1a0c25` adds `users.figure_print_terms_version` and
-  `users.figure_print_terms_accepted_at`. Run migrations, deploy the API, then
-  deploy the frontend's download-confirmation flow. Existing rows remain null;
-  accepting the general Terms of Service does not accept the printing terms.
-- Authenticated GET/POST `/api/users/me/figure_print_terms` reads/records the
-  printing agreement. POST requires `{ "version": "1.0", "accepted": true }`;
-  the server supplies the user identity and UTC time, rejects outdated versions,
-  and preserves the first acceptance time on retries. This is the latest user
-  acceptance, not a download history or a history of all agreement versions.
-- Keep `figure_print_terms.py` synchronized with the frontend's terms version
-  and its archived text in `docs/legal/figure-print-terms/`. Publish changed
-  terms under a new version; never replace text for an already published one.
+- Revision `e6b93f1a0c25` added `users.figure_print_terms_version` and
+  `users.figure_print_terms_accepted_at` (acceptance of the former standalone 3D
+  printing terms, version 1.0). The `/api/users/me/figure_print_terms` endpoints
+  were removed and revision `c5e8a17d3b92` drops both columns. The per-user
+  acceptance records are deleted and cannot be restored by the downgrade.
+- Revision `a3d58e1f7c94` resets `users.terms_agreed` for every user. The 3D
+  printing download terms are now Section 18 of the Terms of Service, so users
+  see the Terms of Service confirmation again at their next sign-in. The reset is
+  irreversible. Run migrations, then deploy the API and the frontend together.
+- Revision `d7a2f93e5b14` makes creator withdrawals manual. Requests reserve the creator's balance; an administrator sends
+  the Stripe transfer and records its receipt and fee (`POST /api/creators/manage/payouts/{id}/transfer`), which marks the request
+  paid and deducts the requested amount; the fee is taken out of that amount. PayPal Payouts, its reconciliation job and
+  `PAYPAL_PAYOUTS_ENABLED` are gone. The migration renames `creator_payouts.paypal_email` to `payout_email`; confirm no old PayPal
+  payout is still in flight before deploying.
 - Keep real credentials in your deployment secret manager or local `.env` files.
 - Do not commit `.env`, `.env.prod`, private keys, virtualenvs, coverage output, or deployment scripts with environment-specific details.
 - Run migrations with `alembic upgrade head` before starting new API versions.

@@ -98,18 +98,7 @@ def _process_paypal_webhook(body, headers, db):
     resource = payload.get("resource", {})
 
     if isinstance(event_type, str) and event_type.startswith("PAYMENT.PAYOUTS-"):
-        # Signed events only schedule reconciliation. Never trust a webhook's
-        # amount/status as proof of payment; the worker fetches PayPal directly.
-        from creator_payouts import now
-        batch_id = resource.get("payout_batch_id") or resource.get("batch_header", {}).get("payout_batch_id")
-        item_id = resource.get("payout_item_id")
-        query = db.query(models.CreatorPayout)
-        if batch_id: payout = query.filter_by(paypal_batch_id=batch_id).first()
-        elif item_id: payout = query.filter_by(paypal_item_id=item_id).first()
-        else: payout = None
-        if payout:
-            payout.next_check_at = now()
-            db.commit()
+        # Creator withdrawals are processed manually and no longer use PayPal Payouts.
         return {"status": "success"}
 
     if event_type in {

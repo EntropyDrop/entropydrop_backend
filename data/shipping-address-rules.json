@@ -1,10 +1,11 @@
 {
-  "version": "2026-10-10",
+  "version": "2026-11-10",
   "sources": [
     "https://developer.paypal.com/sdk/orders/v2/definitions/order_request",
     "https://developer.paypal.com/api/orders/v2/definitions/purchase_unit",
     "https://github.com/google/libaddressinput/wiki/AddressValidationMetadata",
-    "https://github.com/google/libaddressinput/blob/5ef3a927bdd6002bf25c5c09029347bebf57a57b/testdata/countryinfo.txt"
+    "https://github.com/google/libaddressinput/blob/5ef3a927bdd6002bf25c5c09029347bebf57a57b/testdata/countryinfo.txt",
+    "https://stripe.com/legal/restricted-businesses"
   ],
   "limits": {
     "recipient_name": 300,
@@ -550,16 +551,6 @@
       "postal_pattern": "\\d{4,5}|\\d{3}-\\d{4}",
       "postal_example": "1000",
       "paypal_country_code": "CR"
-    },
-    "CU": {
-      "state_required": false,
-      "state_visible": false,
-      "city_required": true,
-      "postal_required": false,
-      "postal_visible": false,
-      "postal_pattern": "",
-      "postal_example": "",
-      "paypal_country_code": "CU"
     },
     "CV": {
       "state_required": false,
@@ -1121,16 +1112,6 @@
       "postal_example": "",
       "paypal_country_code": "IQ"
     },
-    "IR": {
-      "state_required": false,
-      "state_visible": true,
-      "city_required": true,
-      "postal_required": true,
-      "postal_visible": true,
-      "postal_pattern": "\\d{5}-?\\d{5}",
-      "postal_example": "11936-12345",
-      "paypal_country_code": "IR"
-    },
     "IS": {
       "state_required": false,
       "state_visible": false,
@@ -1250,16 +1231,6 @@
       "postal_pattern": "",
       "postal_example": "",
       "paypal_country_code": "KN"
-    },
-    "KP": {
-      "state_required": false,
-      "state_visible": false,
-      "city_required": true,
-      "postal_required": false,
-      "postal_visible": false,
-      "postal_pattern": "",
-      "postal_example": "",
-      "paypal_country_code": "KP"
     },
     "KR": {
       "state_required": true,
@@ -2161,16 +2132,6 @@
       "postal_example": "",
       "paypal_country_code": "SX"
     },
-    "SY": {
-      "state_required": false,
-      "state_visible": false,
-      "city_required": true,
-      "postal_required": false,
-      "postal_visible": false,
-      "postal_pattern": "",
-      "postal_example": "",
-      "paypal_country_code": "SY"
-    },
     "SZ": {
       "state_required": false,
       "state_visible": false,
@@ -2625,5 +2586,11 @@
       "postal_example": "",
       "paypal_country_code": "ZW"
     }
-  }
+  },
+  "unsupported_countries": [
+    "CU",
+    "IR",
+    "KP",
+    "SY"
+  ]
 }
