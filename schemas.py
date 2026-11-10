@@ -1,5 +1,5 @@
 from decimal import Decimal
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from typing import Optional, List, Literal
 from datetime import datetime
 
@@ -35,8 +35,6 @@ class UserResponse(BaseModel):
     
     # Priority fields
     terms_agreed: Optional[bool] = False
-    figure_print_terms_version: Optional[str] = None
-    figure_print_terms_accepted_at: Optional[datetime] = None
     is_pro: bool = False
     is_admin: bool = False
     is_creator: bool = False
@@ -54,17 +52,6 @@ class UserResponse(BaseModel):
     paypal_subscription_status: Optional[str] = None
     
     model_config = ConfigDict(from_attributes=True)
-
-class FigurePrintTermsRequest(BaseModel):
-    version: str = Field(..., min_length=1, max_length=32)
-    accepted: StrictBool
-    model_config = ConfigDict(extra="forbid")
-
-class FigurePrintTermsResponse(BaseModel):
-    required_version: str
-    effective_date: str
-    accepted_version: Optional[str] = None
-    accepted_at: Optional[datetime] = None
 
 class TokenResponse(BaseModel):
     access_token: str

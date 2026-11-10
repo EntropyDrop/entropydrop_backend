@@ -159,7 +159,7 @@ def paginated(query, page, page_size, serialize):
 @router.get("/me")
 def creator_dashboard(db: Session = Depends(get_db), user: models.User = Depends(require_creator)):
     codes = db.query(models.CreatorCode).filter_by(creator_user_id=user.id).order_by(models.CreatorCode.code).all()
-    return {"balance": payouts.balance(db, user.id), "payouts_enabled": payouts.configured(),
+    return {"balance": payouts.balance(db, user.id),
             "codes": [{"code": code.code, "active": code.active, "usable": code.active and (not code.expires_at or utc(code.expires_at) > payouts.now()), "expires_at": code.expires_at,
                        "discount_percent": code.discount_bps / 100, "commission_percent": code.commission_bps / 100} for code in codes]}
 
@@ -193,11 +193,11 @@ def creator_orders(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, 
 
 class PayoutRequest(BaseModel):
     amount_cents: int = Field(gt=0, le=100_000_000, strict=True)
-    paypal_email: str = Field(max_length=127)
+    payout_email: str = Field(max_length=127)
     request_key: UUID
     model_config = ConfigDict(extra="forbid")
 
-    @field_validator("paypal_email")
+    @field_validator("payout_email")
     @classmethod
     def validate_email(cls, value): return payouts.email_address(value)
 
@@ -208,12 +208,12 @@ def request_payout(request: Request, req: PayoutRequest, db: Session = Depends(g
     payouts.lock_creator(db, user.id)
     previous = db.query(models.CreatorPayout).filter_by(creator_user_id=user.id, request_key=str(req.request_key)).first()
     if previous:
-        if previous.amount_cents != req.amount_cents or previous.paypal_email != req.paypal_email:
+        if previous.amount_cents != req.amount_cents or previous.payout_email != req.payout_email:
             raise HTTPException(409, "creator_request_conflict")
         return payouts.payout_response(previous, db)
     if req.amount_cents > payouts.balance(db, user.id)["available_cents"]:
         raise HTTPException(409, "creator_insufficient_balance")
-    payout = models.CreatorPayout(creator_user_id=user.id, amount_cents=req.amount_cents, paypal_email=req.paypal_email, request_key=str(req.request_key))
+    payout = models.CreatorPayout(creator_user_id=user.id, amount_cents=req.amount_cents, payout_email=req.payout_email, request_key=str(req.request_key))
     db.add(payout); db.flush()
     payouts.event(db, payout, "requested", user.id)
     db.commit()
@@ -232,42 +232,28 @@ def manage_payouts(page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, 
                    db: Session = Depends(get_db), user: models.User = Depends(auth.get_current_admin)):
     query = db.query(models.CreatorPayout)
     if status: query = query.filter_by(status=status)
-    result = paginated(query.order_by(models.CreatorPayout.created_at.desc(), models.CreatorPayout.id), page, page_size, lambda row: payouts.payout_response(row, db, admin=True))
-    result["payouts_enabled"] = payouts.configured()
-    return result
+    return paginated(query.order_by(models.CreatorPayout.created_at.desc(), models.CreatorPayout.id), page, page_size, lambda row: payouts.payout_response(row, db, admin=True))
 
 
-class PayoutReview(BaseModel):
-    action: str = Field(pattern="^(approve|reject|sync)$")
+class TransferReceipt(BaseModel):
+    transfer_reference: str = Field(min_length=3, max_length=100)
+    fee_cents: int = Field(ge=0, le=100_000_000, strict=True)
     note: str = Field("", max_length=500)
     model_config = ConfigDict(extra="forbid")
 
 
-@router.post("/manage/payouts/{payout_id}/review")
-def review_payout(payout_id: str, req: PayoutReview, db: Session = Depends(get_db), admin: models.User = Depends(auth.get_current_admin)):
-    payout = db.get(models.CreatorPayout, payout_id)
-    if not payout: raise HTTPException(404, "creator_payout_not_found")
-    payouts.lock_creator(db, payout.creator_user_id)
-    payout = db.query(models.CreatorPayout).filter_by(id=payout_id).with_for_update().populate_existing().one()
-    if req.action in ("approve", "reject"):
-        if payout.status != "pending_review":
-            if req.action == "approve" and payout.reviewed_at and payout.status != "rejected":
-                return payouts.payout_response(payout, db, admin=True)
-            raise HTTPException(409, "creator_payout_changed")
-        if req.action == "approve":
-            if not payouts.configured(): raise HTTPException(409, "creator_payouts_disabled")
-            if payouts.balance(db, payout.creator_user_id)["adjustment_cents"]:
-                raise HTTPException(409, "creator_insufficient_balance")
-            payout.status = "processing"
-        else:
-            if not req.note.strip(): raise HTTPException(400, "creator_rejection_reason_required")
-            payout.status = "rejected"
-        payout.reviewed_by = admin.id; payout.reviewed_at = payouts.now(); payout.review_note = req.note.strip() or None
-        payouts.event(db, payout, "approved" if req.action == "approve" else "rejected", admin.id)
-        db.commit()
-    else:
-        if not payouts.configured(): raise HTTPException(409, "creator_payouts_disabled")
-        db.rollback()
-    if req.action != "reject": payouts.process_payout(db, payout_id, force=True)
-    db.expire_all()
-    return payouts.payout_response(db.get(models.CreatorPayout, payout_id), db, admin=True)
+class PayoutRejection(BaseModel):
+    note: str = Field("", max_length=500)
+    model_config = ConfigDict(extra="forbid")
+
+
+@router.post("/manage/payouts/{payout_id}/transfer")
+def record_payout_transfer(payout_id: str, req: TransferReceipt, db: Session = Depends(get_db), admin: models.User = Depends(auth.get_current_admin)):
+    payout = payouts.record_transfer(db, payout_id, admin.id, req.transfer_reference, req.fee_cents, req.note)
+    return payouts.payout_response(payout, db, admin=True)
+
+
+@router.post("/manage/payouts/{payout_id}/reject")
+def reject_payout(payout_id: str, req: PayoutRejection, db: Session = Depends(get_db), admin: models.User = Depends(auth.get_current_admin)):
+    payout = payouts.reject_request(db, payout_id, admin.id, req.note)
+    return payouts.payout_response(payout, db, admin=True)

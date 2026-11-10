@@ -28,6 +28,10 @@ def buyer(db):
     ('recipient_name', ' ', 'required'),
     ('country', 'China', 'too_long'),
     ('country', 'ZZ', 'country_invalid'),
+    ('country', 'CU', 'country_invalid'),
+    ('country', 'IR', 'country_invalid'),
+    ('country', 'KP', 'country_invalid'),
+    ('country', 'SY', 'country_invalid'),
     ('country', '', 'required'),
     ('state', ' ', 'required'),
     ('state', 'Not a state', 'state_invalid'),
@@ -183,3 +187,13 @@ def test_recipient_migration_preserves_existing_addresses_and_order_snapshots(mo
         assert conn.execute(text('SELECT address_snapshot FROM orders')).scalar_one() == snapshot
         column = next(c for c in inspect(conn).get_columns('shipping_addresses') if c['name'] == 'recipient_name')
         assert column['type'].length == 300 and not column['nullable']
+
+
+def test_sanctioned_destinations_are_not_shippable():
+    unsupported = {'CU', 'IR', 'KP', 'SY'}
+    assert set(RULES['unsupported_countries']) == unsupported
+    assert unsupported.isdisjoint(RULES['countries'])
+    for code in unsupported:
+        with pytest.raises(ShippingAddressError) as error:
+            validate_address({**VALID, 'country': code, 'state': '', 'zip_code': ''})
+        assert error.value.detail['fields']['country'] == 'country_invalid'
