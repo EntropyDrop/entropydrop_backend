@@ -193,3 +193,101 @@ def capture_credits(
         "credits_awarded": credits_to_award,
         "new_balance": current_user.credits,
     }
+
+
+YOUTUBE_REWARD_CREDITS = 5
+YOUTUBE_CHANNEL_URL = "https://www.youtube.com/@EntropyDrop?sub_confirmation=1"
+YOUTUBE_TASK_IDEMPOTENCY_PREFIX = "reward:youtube_subscribe:"
+
+
+@router.get("/tasks/youtube-subscription")
+def get_youtube_subscription_task_status(
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(auth.get_current_user_optional),
+):
+    """Check whether the current user has already claimed the YouTube subscription reward."""
+    claimed = False
+    if current_user:
+        idempotency_key = f"{YOUTUBE_TASK_IDEMPOTENCY_PREFIX}{current_user.id}"
+        existing = (
+            db.query(models.CreditLog)
+            .filter(
+                models.CreditLog.user_id == current_user.id,
+                models.CreditLog.idempotency_key == idempotency_key,
+            )
+            .first()
+        )
+        if existing:
+            claimed = True
+
+    return {
+        "claimed": claimed,
+        "reward_credits": YOUTUBE_REWARD_CREDITS,
+        "channel_url": YOUTUBE_CHANNEL_URL,
+    }
+
+
+@router.post("/tasks/youtube-subscription/claim")
+@limiter.limit(
+    "10/minute; 60/hour",
+    key_func=get_authenticated_or_remote_address,
+    override_defaults=False,
+)
+def claim_youtube_subscription_reward(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(auth.get_current_user),
+):
+    """Claim the one-time YouTube subscription reward of 5 credits."""
+    lock_balance(db, current_user)
+
+    idempotency_key = f"{YOUTUBE_TASK_IDEMPOTENCY_PREFIX}{current_user.id}"
+    existing = (
+        db.query(models.CreditLog)
+        .filter(
+            models.CreditLog.user_id == current_user.id,
+            models.CreditLog.idempotency_key == idempotency_key,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail="YouTube subscription reward has already been claimed",
+        )
+
+    # Award credits
+    current_user.credits = (current_user.credits or 0) + YOUTUBE_REWARD_CREDITS
+
+    # Record credit log
+    log = models.CreditLog(
+        user_id=current_user.id,
+        amount=YOUTUBE_REWARD_CREDITS,
+        action="system_gift",
+        source="YouTube: @EntropyDrop",
+        idempotency_key=idempotency_key,
+    )
+    db.add(log)
+    db.flush()
+
+    # Record forum notification for mailbox
+    notif = models.ForumNotification(
+        user_id=current_user.id,
+        sender_id=None,
+        type="system_gift",
+        post_id=log.id,
+        comment_id=str(YOUTUBE_REWARD_CREDITS),
+        action_url="https://www.youtube.com/@EntropyDrop",
+        is_read=False,
+    )
+    db.add(notif)
+
+    db.commit()
+    db.refresh(current_user)
+
+    return {
+        "status": "success",
+        "credits_awarded": YOUTUBE_REWARD_CREDITS,
+        "new_balance": current_user.credits,
+    }
+
