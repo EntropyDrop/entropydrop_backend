@@ -191,6 +191,7 @@ def logout_session(
         request.cookies.get(settings.AUTH_SESSION_COOKIE_NAME),
     )
     auth.clear_auth_session_cookie(response)
+    response.headers["Clear-Site-Data"] = '"cookies", "storage", "cache"'
     return {"status": "ok"}
 
 @router.get("/api/users/{user_id}/profile", response_model=schemas.PublicUserProfile)
