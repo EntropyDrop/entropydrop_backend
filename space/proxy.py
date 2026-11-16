@@ -2,18 +2,60 @@
 import asyncio
 import hmac
 import ipaddress
+from contextlib import asynccontextmanager
+from http.cookiejar import CookieJar, DefaultCookiePolicy
+from time import perf_counter
 from urllib.parse import urlsplit
 import httpx
 import websockets
+from anyio import CancelScope
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from starlette.responses import JSONResponse, StreamingResponse
-from starlette.background import BackgroundTask
 from config import settings
 from rate_limit import limiter, _is_trusted_proxy
 
-router = APIRouter()
+@asynccontextmanager
+async def lifespan(app):
+    # One pool per API process/event loop. Never inherit desktop proxy settings
+    # or retain upstream cookies across callers of this shared client.
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(35, connect=5),
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=30),
+        follow_redirects=False,
+        trust_env=False,
+        cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=())),
+    ) as client:
+        app.state.space_proxy_client = client
+        try:
+            yield
+        finally:
+            del app.state.space_proxy_client
+
+
+router = APIRouter(lifespan=lifespan)
 HOP_HEADERS = {"host", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                "te", "trailer", "transfer-encoding", "upgrade", "cookie", "set-cookie"}
+
+
+class UpstreamStreamingResponse(StreamingResponse):
+    """Release the pool slot even when streaming fails or the caller disconnects."""
+
+    def __init__(self, upstream, headers):
+        super().__init__(upstream.aiter_raw(), status_code=upstream.status_code, headers=headers)
+        self.upstream = upstream
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with CancelScope(shield=True):
+                await self.upstream.aclose()
+
+
+def upstream_timing(started_at):
+    # Includes pool wait, connection setup, request upload, network and Space
+    # processing, ending at upstream response headers (not the streamed body).
+    return f'gateway_upstream;dur={(perf_counter() - started_at) * 1000:.2f}'
 
 
 def client_ip(request):
@@ -49,28 +91,33 @@ async def forward(request: Request, path: str):
         headers.pop(name, None)
     headers["x-real-ip"] = client_ip(request)
     headers["accept-encoding"] = "identity"
-    # This trusted origin is reached directly over LAN/SSH/private VPC. Desktop
-    # proxy settings must not redirect account credentials to another proxy.
-    client = httpx.AsyncClient(timeout=httpx.Timeout(35, connect=5), follow_redirects=False, trust_env=False)
+    client = request.app.state.space_proxy_client
+    body = await request.body()
+    upstream_request = client.build_request(request.method,
+        target(request.url.path), params=request.query_params.multi_items(), headers=headers,
+        content=body)
+    started_at = perf_counter()
     try:
-        upstream = await client.send(client.build_request(request.method,
-            target(request.url.path), params=request.query_params.multi_items(), headers=headers,
-            content=await request.body()), stream=True)
+        upstream = await client.send(upstream_request, stream=True)
     except httpx.HTTPError:
-        await client.aclose()
-        return JSONResponse({"detail": {"code": "SPACE_SERVICE_UNAVAILABLE"}}, status_code=503)
-    async def close():
-        await upstream.aclose()
-        await client.aclose()
-    response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in HOP_HEADERS}
-    if "location" in response_headers:
-        location = urlsplit(response_headers["location"])
-        if location.netloc == urlsplit(settings.SPACE_SERVICE_URL).netloc:
-            scheme = "https" if settings.SPACE_PUBLIC_API_URL.startswith("https://") else request.url.scheme
-            response_headers["location"] = location._replace(scheme=scheme, netloc=request.url.netloc).geturl()
-    response_headers["cache-control"] = "no-store"
-    return StreamingResponse(upstream.aiter_raw(), status_code=upstream.status_code,
-        headers=response_headers, background=BackgroundTask(close))
+        return JSONResponse({"detail": {"code": "SPACE_SERVICE_UNAVAILABLE"}}, status_code=503,
+            headers={"Cache-Control": "no-store", "Server-Timing": upstream_timing(started_at)})
+    try:
+        timing = upstream_timing(started_at)
+        response_headers = {k: v for k, v in upstream.headers.items() if k.lower() not in HOP_HEADERS}
+        if "location" in response_headers:
+            location = urlsplit(response_headers["location"])
+            if location.netloc == urlsplit(settings.SPACE_SERVICE_URL).netloc:
+                scheme = "https" if settings.SPACE_PUBLIC_API_URL.startswith("https://") else request.url.scheme
+                response_headers["location"] = location._replace(scheme=scheme, netloc=request.url.netloc).geturl()
+        response_headers["cache-control"] = "no-store"
+        existing_timing = response_headers.get("server-timing")
+        response_headers["server-timing"] = f"{existing_timing}, {timing}" if existing_timing else timing
+        return UpstreamStreamingResponse(upstream, response_headers)
+    except BaseException:
+        with CancelScope(shield=True):
+            await upstream.aclose()
+        raise
 
 
 @router.websocket("/space/ws/v2/entity-messages")

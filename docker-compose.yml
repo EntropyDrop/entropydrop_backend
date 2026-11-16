@@ -75,6 +75,19 @@ services:
     depends_on:
       - app
 
+  umami:
+    image: ghcr.io/umami-software/umami:postgresql-latest
+    container_name: ed_umami
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/umami
+      - DATABASE_TYPE=postgresql
+      - APP_SECRET=entropydrop-dev-secret-key-2026
+    depends_on:
+      - db
+
   space-hosting:
     build:
       context: ..

@@ -271,6 +271,7 @@ app.add_middleware(
         "X-RateLimit-Remaining",
         "X-RateLimit-Reset",
         "Retry-After",
+        "Server-Timing",
     ],
 )
 
