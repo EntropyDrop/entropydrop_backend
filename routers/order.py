@@ -998,7 +998,7 @@ def activate_subscription(
             if subscriber_email != current_user.email.lower():
                 raise HTTPException(status_code=403, detail="Subscription does not belong to current user")
 
-        from subscription_lifecycle import remember, select_contract
+        from subscription_lifecycle import remember, select_contract, utc
         contract = remember(db, current_user, sub_id, sub_data)
         if not select_contract(db, current_user, contract, explicit=True):
             db.commit()
@@ -1013,7 +1013,13 @@ def activate_subscription(
             # account, without awarding credits or extending Pro yet.
             db.commit()
             raise
-        current_user.pro_expires_at = expires_at
+        # Reconfirming the same tier must preserve any later expiry, including gifts.
+        if (
+            current_user.pro_level != pro_level
+            or not current_user.pro_expires_at
+            or expires_at > utc(current_user.pro_expires_at)
+        ):
+            current_user.pro_expires_at = expires_at
 
         current_user.pro_level = pro_level
         

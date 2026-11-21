@@ -1,5 +1,6 @@
 from credit_balance import lock_balance
-from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, Depends, BackgroundTasks, HTTPException, Request, Response
+from pydantic import AwareDatetime, BaseModel, Field, HttpUrl, field_validator
 from redis import Redis
 from rq import Worker, Queue
 from config import settings
@@ -14,6 +15,7 @@ from sqlalchemy import func
 from database import get_db
 from rate_limit import limiter, get_authenticated_or_remote_address
 from instance_monitor import list_backend_instance_history, list_backend_instance_metrics
+from subscription_lifecycle import utc
 
 router = APIRouter(
     prefix="/api/monitor",
@@ -427,9 +429,6 @@ def admin_delete_all_failed_tasks(
     return {"message": "Failed tasks deleted and public files withdrawn", "deleted_count": count}
 
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
-
-
 class ModeMaintenanceToggleRequest(BaseModel):
     enabled: bool
 
@@ -547,6 +546,83 @@ async def set_model_price_endpoint(
         raise HTTPException(status_code=500, detail=f"Failed to update Redis settings: {e}")
 
 
+
+
+class MonitorAccountRequest(BaseModel):
+    email: str
+
+
+class GiftProPlusRequest(MonitorAccountRequest):
+    expires_at: AwareDatetime
+
+
+def _get_monitor_account(db: Session, email: str, *, lock: bool = False) -> User:
+    target_email = email.strip().lower()
+    if not target_email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    query = db.query(User).filter(func.lower(User.email) == target_email)
+    if lock:
+        query = query.with_for_update().populate_existing()
+    users = query.limit(2).all()
+    if not users:
+        raise HTTPException(status_code=404, detail="User not found")
+    if len(users) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ambiguous_email", "message": "Multiple users match this email"},
+        )
+    return users[0]
+
+
+@router.post("/users/lookup")
+@limiter.limit(MONITOR_READ_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
+def lookup_account_by_email(
+    request: Request,
+    response: Response,
+    req: MonitorAccountRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    user = _get_monitor_account(db, req.email)
+    response.headers["Cache-Control"] = "no-store"
+    return {"email": user.email, "username": user.username}
+
+
+@router.post("/users/gift-pro-plus")
+@limiter.limit(MONITOR_WRITE_RATE_LIMIT, key_func=get_authenticated_or_remote_address, override_defaults=True)
+def gift_pro_plus_by_email(
+    request: Request,
+    req: GiftProPlusRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    user = _get_monitor_account(db, req.email, lock=True)
+    now = datetime.now(timezone.utc)
+    expiry = req.expires_at.astimezone(timezone.utc)
+    if expiry <= now:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "expiry_in_past", "message": "Expiry must be in the future"},
+        )
+
+    if user.is_pro:
+        if user.pro_level == "pro-max":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "active_pro_max", "message": "User has active Pro Max"},
+            )
+        if expiry < utc(user.pro_expires_at):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "expiry_before_current", "message": "Expiry precedes the current membership expiry"},
+            )
+
+    user.pro_level = "pro-plus"
+    user.pro_expires_at = expiry
+    result = {"email": user.email, "username": user.username, "expires_at": expiry}
+    db.commit()
+    return result
 
 
 @router.delete("/users/by-email")
