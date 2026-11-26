@@ -308,6 +308,62 @@ def test_queue_position_uses_actual_priority_and_migration_tail(db, subscriber, 
     assert generate.get_queue_position(db, log.id) == 0
 
 
+def test_sking_ddj_task_group_queue_position_counts_stage2_ahead_of_stage1(db, subscriber, redis_conn):
+    user, _ = subscriber
+    log = generation(
+        db,
+        user,
+        id="ddj-target",
+        mode="aigc_image_to_skin",
+        model_version="SKING_DDJ_v131",
+        status="pending",
+        pro_priority=True,
+    )
+    # 1 Pro UV + 1 Normal UV waiting in Stage 2, plus 1 Pro + 1 Normal ahead in Stage 1.
+    queued(redis_conn, "uv-pro", stage="render_to_uv", high=True)
+    queued(redis_conn, "uv-normal", stage="render_to_uv", high=False)
+    queued(redis_conn, "r2r-pro-ahead", stage="real_to_render", high=True)
+    queued(redis_conn, "r2r-normal-ahead", stage="real_to_render", high=False)
+    queued(redis_conn, log.id, stage="real_to_render", high=False)
+
+    # Ahead of ddj-target (currently in normal Stage 1): 2 UV + 1 Pro R2R + 1 Normal R2R = 4.
+    assert generate.get_queue_position(db, log.id) == 4
+
+    # Pro promotion moves ddj-target into high_queue_real_to_render behind 2 UV + 1 Pro R2R = 3.
+    priority.sync_pro_priority(db)
+    assert generate.get_queue_position(db, log.id) == 3
+
+    # Draining Stage 2 reduces Stage 1 queue position accurately.
+    redis_conn.lpop("rq:queue:high_queue_render_to_uv")
+    redis_conn.lpop("rq:queue:queue_render_to_uv")
+    assert generate.get_queue_position(db, log.id) == 1
+
+    # Once popped for execution, queue_position becomes 0.
+    redis_conn.lpop("rq:queue:high_queue_real_to_render")
+    redis_conn.lpop("rq:queue:high_queue_real_to_render")
+    assert generate.get_queue_position(db, log.id) == 0
+
+
+def test_real_to_render_enqueue_uses_task_group_timeout(db, subscriber, redis_conn):
+    user, _ = subscriber
+    log = generation(
+        db,
+        user,
+        id="ddj-timeout",
+        mode="aigc_image_to_skin",
+        model_version="SKING_DDJ_v131",
+        source="uploads/ddj-timeout.png",
+        provider_task_id="prov-1",
+    )
+    job = generate.enqueue_real_to_render_task(log, is_pro_active=False, content_type="image/png")
+    assert job.timeout == generate.REAL_TO_RENDER_JOB_TIMEOUT_SECONDS
+    assert job.timeout >= 3600
+
+    resume_job = generate.enqueue_real_to_render_resume_task(log, is_pro_active=True)
+    assert resume_job.timeout == generate.REAL_TO_RENDER_JOB_TIMEOUT_SECONDS
+    assert resume_job.timeout >= 3600
+
+
 def test_subscription_order_grants_priority_in_same_transaction(db, subscriber):
     user, _ = subscriber
     log = generation(db, user)

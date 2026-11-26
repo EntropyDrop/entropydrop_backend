@@ -49,6 +49,9 @@ TWO_STAGE_GENERATION_MODES = {
     "aigc_image_to_skin",
 }
 LEGACY_SKIN_MODEL_VERSION = "sking_v73_flux_4b_000027000"
+REAL_TO_RENDER_JOB_TIMEOUT_SECONDS = int(
+    os.getenv("REAL_TO_RENDER_JOB_TIMEOUT_SECONDS", "3600")
+)
 RENDER_TO_UV_JOB_TIMEOUT_SECONDS = int(
     os.getenv("RENDER_TO_UV_JOB_TIMEOUT_SECONDS", "600")
 )
@@ -272,7 +275,7 @@ def enqueue_real_to_render_task(
             log.model_version,
             real_to_render_task_payload(log),
         ),
-        job_timeout="60s",
+        job_timeout=REAL_TO_RENDER_JOB_TIMEOUT_SECONDS,
         retry=None,
         on_failure=Callback(
             "tasks.real_to_render_job_failure",
@@ -312,8 +315,16 @@ def enqueue_real_to_render_resume_task(
             log.model_version,
             real_to_render_task_payload(log),
         ),
-        job_timeout="60s",
+        job_timeout=REAL_TO_RENDER_JOB_TIMEOUT_SECONDS,
         retry=Retry(max=5, interval=[5, 15, 30, 60, 120]),
+        on_failure=Callback(
+            "tasks.real_to_render_job_failure",
+            timeout=20,
+        ),
+        on_stopped=Callback(
+            "tasks.real_to_render_job_stopped",
+            timeout=20,
+        ),
         result_ttl=10,
         failure_ttl=86400,
         job_id=make_generation_job_id(log.id, "real_to_render_resume"),
@@ -413,16 +424,53 @@ end
 return 0
 """
 
+# Stage 1 (real_to_render) and Stage 2 (render_to_uv) execute as a single task
+# group: any queued stage-2 UV work always drains ahead of queued stage-1 tasks.
+TASK_GROUP_QUEUE_POSITION_SCRIPT = """
+local high_uv = redis.call('lrange', KEYS[1], 0, -1)
+for i, id in ipairs(high_uv) do
+    if id == ARGV[3] then return i - 1 end
+end
+local normal_uv = redis.call('lrange', KEYS[2], 0, -1)
+for i, id in ipairs(normal_uv) do
+    if id == ARGV[3] then return #high_uv + i - 1 end
+end
+local high_r2r = redis.call('lrange', KEYS[3], 0, -1)
+for i, id in ipairs(high_r2r) do
+    if id == ARGV[1] or id == ARGV[2] then return #high_uv + #normal_uv + i - 1 end
+end
+local normal_r2r = redis.call('lrange', KEYS[4], 0, -1)
+for i, id in ipairs(normal_r2r) do
+    if id == ARGV[1] or id == ARGV[2] then return #high_uv + #normal_uv + #high_r2r + i - 1 end
+end
+return 0
+"""
+
 
 def get_queue_position(db: Session, log_id: str) -> int:
     """Count waiting jobs ahead in the actual queues, including Pro priority."""
     log = db.query(models.GenerationLog).filter(models.GenerationLog.id == log_id).first()
     if not log or log.status not in ACTIVE_GENERATION_STATUSES:
         return 0
+    if uses_real_to_render_pipeline(log):
+        try:
+            # One Redis snapshot counts queued stage-2 UV work ahead of queued
+            # stage-1 task groups and avoids double-counting during promotion.
+            return int(redis_conn.eval(
+                TASK_GROUP_QUEUE_POSITION_SCRIPT, 4,
+                "rq:queue:high_queue_render_to_uv",
+                "rq:queue:queue_render_to_uv",
+                "rq:queue:high_queue_real_to_render",
+                "rq:queue:queue_real_to_render",
+                make_generation_job_id(log.id, "real_to_render"),
+                make_generation_job_id(log.id, "real_to_render_resume"),
+                make_generation_job_id(log.id, "render_to_uv"),
+            ))
+        except Exception:
+            # Queue visibility is best effort; history remains available in outages.
+            return 0
     if log.status in SECOND_STAGE_STATUSES:
-        stage = "render_to_uv" if uses_real_to_render_pipeline(log) else "image_to_skin"
-    elif uses_real_to_render_pipeline(log):
-        stage = "real_to_render"
+        stage = "image_to_skin"
     else:
         stage = {
             "aigc_text_to_skin": "text_to_image",
